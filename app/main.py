@@ -157,7 +157,7 @@ MENU_USERS = "\U0001f465 Пользователи"
 MENU_MAINT = "\U0001f6e0 Техработы"
 MENU_FAIL2BAN = "\U0001f6e1 Fail2ban"
 
-MENU_BUTTONS = [MENU_STATUS, MENU_TICKET, MENU_USERS, MENU_MAINT, MENU_FAIL2BAN]
+MENU_BUTTONS = [MENU_STATUS, MENU_TICKET, MENU_USERS, MENU_MAINT]
 MENU_PATTERN = r"^(?:" + "|".join(re.escape(x) for x in MENU_BUTTONS) + r")$"
 PRIVATE_TEXT = filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND
 
@@ -401,7 +401,6 @@ def main_menu_kb(update: Update) -> ReplyKeyboardMarkup:
     rows = [[KeyboardButton(MENU_STATUS), KeyboardButton(MENU_TICKET)]]
     if is_admin(update):
         rows.append([KeyboardButton(MENU_USERS), KeyboardButton(MENU_MAINT)])
-        rows.append([KeyboardButton(MENU_FAIL2BAN)])
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
 # ============================================================
@@ -616,13 +615,16 @@ def _parse_ufw_rules(out: str) -> Tuple[List[str], List[str], List[str]]:
         if not ln.strip():
             continue
 
-        parts = re.split(r"\s{2,}", ln.strip())
+        parts = [p.strip() for p in re.split(r"\s{2,}", ln.strip()) if p.strip()]
         if len(parts) < 2:
             continue
         to, action = parts[0], parts[1].upper()
+        src = parts[2] if len(parts) > 2 else ""
         item = to.strip()
         if not item:
             continue
+        if src and src.lower() not in {"anywhere", "anywhere (v6)"}:
+            item = f"{item} ← {src}"
         if action.startswith("ALLOW"):
             allow.append(item)
         elif action.startswith("DENY"):
@@ -2324,14 +2326,6 @@ async def menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await msg.reply_text("Доступ только для администратора.")
             return ConversationHandler.END
         return await maint_start(update, context)
-
-    if txt == MENU_FAIL2BAN:
-        if not is_admin(update):
-            if msg:
-                await msg.reply_text("Доступ только для администратора.")
-            return ConversationHandler.END
-        await fail2ban_menu(update, context)
-        return ConversationHandler.END
 
     if txt == MENU_USERS:
         if not is_admin(update):
