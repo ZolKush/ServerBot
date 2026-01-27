@@ -45,6 +45,7 @@ logger = logging.getLogger("maint-bot")
 T = TypeVar("T")
 
 BASE_DIR = Path(__file__).resolve().parent
+ROOT_DIR = BASE_DIR.parent
 
 _ENV_PATH = os.getenv("ENV_PATH", "").strip()
 if _ENV_PATH:
@@ -88,7 +89,10 @@ def _normalize_bool(value: Any, truthy: Set[str]) -> bool:
         return value.strip().lower() in truthy
     return bool(value)
 
-CONFIG_PATH = _resolve_path(os.getenv("CONFIG_PATH", "config.json"), BASE_DIR)
+CONFIG_PATH = _resolve_path(
+    os.getenv("CONFIG_PATH", str(ROOT_DIR / "data" / "config.json")),
+    ROOT_DIR,
+)
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
 AUTH_PASSWORD = os.getenv("AUTH_PASSWORD", "").strip()
@@ -135,7 +139,7 @@ FAIL2BAN_STATE_PATH = _resolve_path(
         "FAIL2BAN_STATE_PATH",
         str(Path(CONFIG_PATH).with_suffix(".fail2ban_state.json")),
     ),
-    BASE_DIR,
+    ROOT_DIR,
 )
 
 FAIL2BAN_DAILY_AT = os.getenv("FAIL2BAN_DAILY_AT", "12:00").strip()
