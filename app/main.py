@@ -170,6 +170,7 @@ PRIVATE_TEXT = filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND
 class BotConfig:
     authorized_users: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     tickets_seq: int = 0
+    maintenance: Dict[str, Any] = field(default_factory=dict)
 
     @staticmethod
     def _normalize_user(meta: Dict[str, Any]) -> Dict[str, Any]:
@@ -221,7 +222,10 @@ class BotConfig:
                     authorized_users[str(uid_i)] = BotConfig._normalize_user({"user_id": uid_i, "role": "user"})
 
         tickets_seq = int(raw.get("tickets_seq", 0) or 0)
-        return BotConfig(authorized_users=authorized_users, tickets_seq=tickets_seq)
+        maintenance = raw.get("maintenance", {})
+        if not isinstance(maintenance, dict):
+            maintenance = {}
+        return BotConfig(authorized_users=authorized_users, tickets_seq=tickets_seq, maintenance=maintenance)
 
     @classmethod
     def load(cls, path: str) -> "BotConfig":
@@ -240,7 +244,11 @@ class BotConfig:
         try:
             p.parent.mkdir(parents=True, exist_ok=True)
             payload = json.dumps(
-                {"authorized_users": self.authorized_users, "tickets_seq": self.tickets_seq},
+                {
+                    "authorized_users": self.authorized_users,
+                    "tickets_seq": self.tickets_seq,
+                    "maintenance": self.maintenance,
+                },
                 ensure_ascii=False,
                 indent=2,
             )
@@ -266,6 +274,19 @@ def _set_user_meta(cfg: BotConfig, uid: int, meta: Dict[str, Any]) -> Dict[str, 
 
 def _remove_user(cfg: BotConfig, uid: int) -> Optional[Dict[str, Any]]:
     return cfg.authorized_users.pop(str(uid), None)
+
+def _set_maintenance(cfg: BotConfig, payload: Dict[str, Any]) -> Dict[str, Any]:
+    cfg.maintenance = payload
+    return payload
+
+def _clear_maintenance(cfg: BotConfig) -> None:
+    cfg.maintenance = {}
+
+def _get_active_maintenance() -> Optional[Dict[str, Any]]:
+    m = getattr(CONFIG, "maintenance", None)
+    if isinstance(m, dict) and m.get("active"):
+        return m
+    return None
 
 # ============================================================
 #                       SECURITY / PRESENTATION HELPERS
@@ -1676,7 +1697,7 @@ async def cmd_logout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         if msg:
             await msg.reply_text("Вы не в списке авторизованных.")
 
-STATE_MAINT_URGENCY, STATE_MAINT_DURATION = range(2)
+STATE_MAINT_URGENCY, STATE_MAINT_DURATION, STATE_MAINT_EXTEND = range(3)
 
 def urgency_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -1724,6 +1745,108 @@ def format_maint(urgency: str, hh: int, mm: int, author: str) -> str:
         f"• Старт: <code>{html_escape(now)}</code> ({html_escape(TZ_NAME)})"
     )
 
+def _hhmm_to_minutes(hh: int, mm: int) -> int:
+    return max(0, (int(hh) * 60) + int(mm))
+
+def _minutes_to_hhmm(total: int) -> Tuple[int, int]:
+    total = max(0, int(total))
+    return total // 60, total % 60
+
+def _fmt_dt_short(dt: datetime) -> str:
+    return dt.astimezone(TZ).strftime("%d.%m.%Y %H:%M")
+
+def _build_maint_record(urgency: str, hh: int, mm: int, author_id: Optional[int], author_name: str) -> Dict[str, Any]:
+    now = datetime.now(TZ)
+    duration_min = _hhmm_to_minutes(hh, mm)
+    expected_end = now + timedelta(minutes=duration_min)
+    maint_id = str(int(now.timestamp()))
+    return {
+        "id": maint_id,
+        "active": True,
+        "urgency": urgency,
+        "duration_min": duration_min,
+        "started_at": now.isoformat(),
+        "expected_end": expected_end.isoformat(),
+        "author_id": author_id,
+        "author_name": author_name,
+        "updated_at": now.isoformat(),
+    }
+
+def _maint_control_kb(maint_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("✅ Завершить", callback_data=f"maint:end:{maint_id}"),
+                InlineKeyboardButton("⏳ Продлить", callback_data=f"maint:extend:{maint_id}"),
+            ]
+        ]
+    )
+
+def _maint_panel_text(maint: Dict[str, Any]) -> str:
+    urgency_label = "срочные" if maint.get("urgency") == "urgent" else "плановые"
+    duration_min = int(maint.get("duration_min", 0) or 0)
+    hh, mm = _minutes_to_hhmm(duration_min)
+    started_at = maint.get("started_at")
+    expected_end = maint.get("expected_end")
+    try:
+        started_dt = datetime.fromisoformat(started_at) if started_at else None
+    except Exception:
+        started_dt = None
+    try:
+        end_dt = datetime.fromisoformat(expected_end) if expected_end else None
+    except Exception:
+        end_dt = None
+    lines = [
+        "🛠️ <b>Техработы активны</b>",
+        f"• Тип: <b>{html_escape(urgency_label)}</b>",
+        f"• Оценка простоя: <b>{html_escape(humanize_hhmm(hh, mm))}</b>",
+    ]
+    if started_dt:
+        lines.append(f"• Старт: <code>{html_escape(_fmt_dt_short(started_dt))}</code> ({html_escape(TZ_NAME)})")
+    if end_dt:
+        lines.append(f"• Окончание: <code>{html_escape(_fmt_dt_short(end_dt))}</code> ({html_escape(TZ_NAME)})")
+    lines.append("\nВыберите действие:")
+    return "\n".join(lines)
+
+def _maint_extend_notice(maint: Dict[str, Any], hh: int, mm: int, author: str) -> str:
+    expected_end = maint.get("expected_end")
+    end_dt = None
+    try:
+        end_dt = datetime.fromisoformat(expected_end) if expected_end else None
+    except Exception:
+        end_dt = None
+    end_txt = _fmt_dt_short(end_dt) if end_dt else "-"
+    return (
+        "⏳ <b>Техработы продлены</b>\n"
+        f"• Новый ориентир простоя: <b>{html_escape(humanize_hhmm(hh, mm))}</b>\n"
+        f"• Окончание: <code>{html_escape(end_txt)}</code> ({html_escape(TZ_NAME)})\n"
+        f"• Ответственный: <b>{html_escape(author)}</b>\n\n"
+        "Спасибо за понимание 🙏"
+    )
+
+def _maint_end_notice(maint: Dict[str, Any], author: str) -> str:
+    ended_at = datetime.now(TZ)
+    return (
+        "✅ <b>Техработы завершены</b>\n"
+        f"• Время: <code>{html_escape(_fmt_dt_short(ended_at))}</code> ({html_escape(TZ_NAME)})\n"
+        f"• Ответственный: <b>{html_escape(author)}</b>\n\n"
+        "Спасибо за терпение 🙌"
+    )
+
+def _maint_due_prompt(maint: Dict[str, Any]) -> str:
+    expected_end = maint.get("expected_end")
+    end_dt = None
+    try:
+        end_dt = datetime.fromisoformat(expected_end) if expected_end else None
+    except Exception:
+        end_dt = None
+    end_txt = _fmt_dt_short(end_dt) if end_dt else "-"
+    return (
+        "⏰ <b>Время простоя истекло</b>\n"
+        f"• Окончание: <code>{html_escape(end_txt)}</code> ({html_escape(TZ_NAME)})\n\n"
+        "Завершить техработы или продлить?"
+    )
+
 async def send_to_many(
     context: ContextTypes.DEFAULT_TYPE,
     user_ids: Iterable[int],
@@ -1757,6 +1880,38 @@ def authorized_ids(role_filter: Optional[str] = None, exclude: Optional[Set[int]
         ids.append(uid)
     return sorted(set(ids))
 
+def _maint_job_name(maint_id: str) -> str:
+    return f"maint_due:{maint_id}"
+
+def _cancel_maint_job(job_queue: Optional[Any], maint_id: str) -> None:
+    if not job_queue:
+        return
+    for job in job_queue.get_jobs_by_name(_maint_job_name(maint_id)):
+        job.schedule_removal()
+
+def _schedule_maint_due(job_queue: Optional[Any], maint: Dict[str, Any]) -> None:
+    if not job_queue:
+        return
+    maint_id = str(maint.get("id", "") or "")
+    if not maint_id:
+        return
+    _cancel_maint_job(job_queue, maint_id)
+    expected_end = maint.get("expected_end")
+    try:
+        end_dt = datetime.fromisoformat(expected_end) if expected_end else None
+    except Exception:
+        end_dt = None
+    now = datetime.now(TZ)
+    if not end_dt:
+        return
+    delay = max(1, int((end_dt - now).total_seconds()))
+    job_queue.run_once(
+        maint_due_job,
+        when=delay,
+        name=_maint_job_name(maint_id),
+        data={"maint_id": maint_id},
+    )
+
 # ============================================================
 #                       MAINTENANCE (ADMIN)
 # ============================================================
@@ -1777,6 +1932,9 @@ async def maint_urgency(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if q.data not in ("maint:urgent", "maint:planned"):
         return ConversationHandler.END
     context.user_data["maint_urgency"] = "urgent" if q.data.endswith("urgent") else "planned"
+    if q.message and q.message.chat:
+        context.user_data["maint_panel_chat_id"] = q.message.chat.id
+        context.user_data["maint_panel_msg_id"] = q.message.message_id
     await q.edit_message_text("Введите ожидаемое время простоя в формате ЧЧ:ММ (например, 1:35):")
     return STATE_MAINT_DURATION
 
@@ -1790,8 +1948,10 @@ async def maint_duration(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return STATE_MAINT_DURATION
 
     hh, mm = parsed
+    urgency = context.user_data.get("maint_urgency", "planned")
     author = display_name(update)
-    msg_text = format_maint(context.user_data.get("maint_urgency", "planned"), hh, mm, author)
+    author_id = get_user_id(update)
+    msg_text = format_maint(urgency, hh, mm, author)
 
     recipients = authorized_ids(role_filter="user", exclude=set())
     if not recipients:
@@ -1800,9 +1960,135 @@ async def maint_duration(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     ok, fail = await send_to_many(context, recipients, msg_text)
+
+    maint = _build_maint_record(urgency, hh, mm, author_id, author)
+    maint_id = maint.get("id")
+    if maint_id:
+        await update_config(lambda cfg: _set_maintenance(cfg, maint))
+        _schedule_maint_due(context.application.job_queue, maint)
+
+    panel_text = _maint_panel_text(maint)
+    panel_text = f"{panel_text}\n\nОповещены: ✅ {ok}, ❌ {fail}"
+
+    panel_chat_id = context.user_data.get("maint_panel_chat_id")
+    panel_msg_id = context.user_data.get("maint_panel_msg_id")
+    if panel_chat_id and panel_msg_id:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=panel_chat_id,
+                message_id=panel_msg_id,
+                text=panel_text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=_maint_control_kb(str(maint_id)),
+            )
+            return ConversationHandler.END
+        except Exception:
+            pass
+
     if msg:
-        await msg.reply_text(f"Отправлено: ✅ {ok}, ❌ {fail}")
+        await msg.reply_text(panel_text, parse_mode=ParseMode.HTML, reply_markup=_maint_control_kb(str(maint_id)))
     return ConversationHandler.END
+
+@require_admin
+async def maint_extend_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if not q:
+        return ConversationHandler.END
+    await q.answer()
+    m = re.fullmatch(r"maint:extend:(\d+)", q.data or "")
+    if not m:
+        return ConversationHandler.END
+    maint_id = m.group(1)
+    maint = _get_active_maintenance()
+    if not maint or str(maint.get("id")) != maint_id:
+        await q.edit_message_text("Техработы не активны или уже завершены.")
+        return ConversationHandler.END
+    context.user_data["maint_extend_id"] = maint_id
+    await q.edit_message_text(
+        "⏳ Продление техработ.\nВведите новое время простоя в формате ЧЧ:ММ (например, 1:35):"
+    )
+    return STATE_MAINT_EXTEND
+
+@require_admin
+async def maint_extend_duration(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    parsed = parse_hhmm((msg.text if msg else "") or "")
+    if not parsed:
+        if msg:
+            await msg.reply_text("Некорректно. Введите ЧЧ:ММ, например 0:45 или 2:00:")
+        return STATE_MAINT_EXTEND
+
+    maint_id = context.user_data.get("maint_extend_id")
+    maint = _get_active_maintenance()
+    if not maint or str(maint.get("id")) != str(maint_id):
+        if msg:
+            await msg.reply_text("Техработы не активны или уже завершены.")
+        return ConversationHandler.END
+
+    hh, mm = parsed
+    duration_min = _hhmm_to_minutes(hh, mm)
+    now = datetime.now(TZ)
+    expected_end = now + timedelta(minutes=duration_min)
+    maint["duration_min"] = duration_min
+    maint["expected_end"] = expected_end.isoformat()
+    maint["updated_at"] = now.isoformat()
+
+    await update_config(lambda cfg: _set_maintenance(cfg, maint))
+    _schedule_maint_due(context.application.job_queue, maint)
+
+    author = display_name(update)
+    notice = _maint_extend_notice(maint, hh, mm, author)
+    recipients = authorized_ids(role_filter="user", exclude=set())
+    ok, fail = await send_to_many(context, recipients, notice) if recipients else (0, 0)
+
+    panel_text = _maint_panel_text(maint)
+    panel_text = f"{panel_text}\n\nОповещены: ✅ {ok}, ❌ {fail}"
+    context.user_data.pop("maint_extend_id", None)
+    if msg:
+        await msg.reply_text(panel_text, parse_mode=ParseMode.HTML, reply_markup=_maint_control_kb(str(maint_id)))
+    return ConversationHandler.END
+
+@require_admin
+async def maint_end_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if not q:
+        return
+    await q.answer()
+    m = re.fullmatch(r"maint:end:(\d+)", q.data or "")
+    if not m:
+        return
+    maint_id = m.group(1)
+    maint = _get_active_maintenance()
+    if not maint or str(maint.get("id")) != maint_id:
+        await q.edit_message_text("Техработы не активны или уже завершены.")
+        return
+
+    author = display_name(update)
+    notice = _maint_end_notice(maint, author)
+    recipients = authorized_ids(role_filter="user", exclude=set())
+    ok, fail = await send_to_many(context, recipients, notice) if recipients else (0, 0)
+
+    await update_config(lambda cfg: _clear_maintenance(cfg))
+    _cancel_maint_job(context.application.job_queue, maint_id)
+
+    await q.edit_message_text(f"✅ Техработы завершены. Оповещены: ✅ {ok}, ❌ {fail}")
+
+async def maint_due_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    data = context.job.data if context.job else {}
+    maint_id = str((data or {}).get("maint_id", "") or "")
+    maint = _get_active_maintenance()
+    if not maint or str(maint.get("id")) != maint_id:
+        return
+    admin_ids = authorized_ids(role_filter="admin", exclude=set())
+    if not admin_ids:
+        return
+    text = _maint_due_prompt(maint)
+    kb = _maint_control_kb(maint_id)
+    for uid in admin_ids:
+        try:
+            await context.bot.send_message(chat_id=uid, text=text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        except Exception as e:
+            logger.warning("Не удалось отправить админу %s: %s", uid, e)
 
 TICKET_SUBJECT, TICKET_URGENCY, TICKET_TEXT, TICKET_CONFIRM = range(4)
 
@@ -2367,11 +2653,15 @@ def build_app() -> Application:
         entry_points=[
             CommandHandler("maint", maint_start),
             MessageHandler(filters.ChatType.PRIVATE & filters.Regex(rf"^{re.escape(MENU_MAINT)}$"), maint_start),
+            CallbackQueryHandler(maint_extend_cb, pattern=r"^maint:extend:\d+$"),
         ],
         states={
             STATE_MAINT_URGENCY: [CallbackQueryHandler(maint_urgency, pattern=r"^maint:(urgent|planned)$")],
             STATE_MAINT_DURATION: [
                 MessageHandler(PRIVATE_TEXT, maint_duration)
+            ],
+            STATE_MAINT_EXTEND: [
+                MessageHandler(PRIVATE_TEXT, maint_extend_duration)
             ],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
@@ -2379,6 +2669,7 @@ def build_app() -> Application:
         persistent=False,
     )
     app.add_handler(maint_conv)
+    app.add_handler(CallbackQueryHandler(maint_end_cb, pattern=r"^maint:end:\d+$"))
 
     ticket_conv = ConversationHandler(
         entry_points=[
@@ -2462,6 +2753,9 @@ def build_app() -> Application:
             time=dtime(hour=hh, minute=mm, tzinfo=TZ),
             name="fail2ban_digest",
         )
+        active_maint = _get_active_maintenance()
+        if active_maint:
+            _schedule_maint_due(app.job_queue, active_maint)
     else:
         logger.warning("JobQueue недоступен: для ежедневной выжимки установите python-telegram-bot[job-queue].")
 
