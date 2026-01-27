@@ -89,7 +89,15 @@ def _normalize_bool(value: Any, truthy: Set[str]) -> bool:
         return value.strip().lower() in truthy
     return bool(value)
 
-CONFIG_PATH = _resolve_path(
+USER_DATA_PATH = _resolve_path(
+    os.getenv("USER_DATA_PATH", str(ROOT_DIR / "data" / "user_data.json")),
+    ROOT_DIR,
+)
+IMPORTANT_DATA_PATH = _resolve_path(
+    os.getenv("IMPORTANT_DATA_PATH", str(ROOT_DIR / "data" / "important_data.json")),
+    ROOT_DIR,
+)
+LEGACY_CONFIG_PATH = _resolve_path(
     os.getenv("CONFIG_PATH", str(ROOT_DIR / "data" / "config.json")),
     ROOT_DIR,
 )
@@ -137,7 +145,7 @@ FAIL2BAN_LOG_PATH = os.getenv("FAIL2BAN_LOG_PATH", "/var/log/fail2ban.log").stri
 FAIL2BAN_STATE_PATH = _resolve_path(
     os.getenv(
         "FAIL2BAN_STATE_PATH",
-        str(Path(CONFIG_PATH).with_suffix(".fail2ban_state.json")),
+        str(Path(IMPORTANT_DATA_PATH).with_suffix(".fail2ban_state.json")),
     ),
     ROOT_DIR,
 )
@@ -167,10 +175,8 @@ PRIVATE_TEXT = filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND
 #                       STORAGE
 # ============================================================
 
-class BotConfig:
+class UserData:
     authorized_users: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-    tickets_seq: int = 0
-    maintenance: Dict[str, Any] = field(default_factory=dict)
 
     @staticmethod
     def _normalize_user(meta: Dict[str, Any]) -> Dict[str, Any]:
@@ -201,7 +207,7 @@ class BotConfig:
         return meta
 
     @staticmethod
-    def _migrate(raw: Dict[str, Any]) -> "BotConfig":
+    def _migrate(raw: Dict[str, Any]) -> "UserData":
         authorized_users: Dict[str, Dict[str, Any]] = {}
 
         if isinstance(raw.get("authorized_users"), dict):
@@ -210,7 +216,7 @@ class BotConfig:
                     uid = int((meta or {}).get("user_id", k))
                 except Exception:
                     continue
-                authorized_users[str(uid)] = BotConfig._normalize_user({**(meta or {}), "user_id": uid})
+                authorized_users[str(uid)] = UserData._normalize_user({**(meta or {}), "user_id": uid})
         else:
             allowed = raw.get("allowed_user_ids", [])
             if isinstance(allowed, list):
@@ -219,24 +225,30 @@ class BotConfig:
                         uid_i = int(uid)
                     except Exception:
                         continue
-                    authorized_users[str(uid_i)] = BotConfig._normalize_user({"user_id": uid_i, "role": "user"})
+                    authorized_users[str(uid_i)] = UserData._normalize_user({"user_id": uid_i, "role": "user"})
 
-        tickets_seq = int(raw.get("tickets_seq", 0) or 0)
-        maintenance = raw.get("maintenance", {})
-        if not isinstance(maintenance, dict):
-            maintenance = {}
-        return BotConfig(authorized_users=authorized_users, tickets_seq=tickets_seq, maintenance=maintenance)
+        return UserData(authorized_users=authorized_users)
 
     @classmethod
-    def load(cls, path: str) -> "BotConfig":
-        p = Path(path)
-        if p.exists():
+    def load(cls, path: str, legacy_path: Optional[str] = None) -> "UserData":
+        for pth in [path, legacy_path]:
+            if not pth:
+                continue
+            p = Path(pth)
+            if not p.exists():
+                continue
             try:
                 raw = json.loads(p.read_text(encoding="utf-8"))
                 if isinstance(raw, dict):
-                    return cls._migrate(raw)
+                    data = cls._migrate(raw)
+                    if pth != path:
+                        try:
+                            data.save(path)
+                        except Exception:
+                            pass
+                    return data
             except Exception as e:
-                logger.error("Не удалось прочитать %s: %s", path, e)
+                logger.error("Не удалось прочитать %s: %s", pth, e)
         return cls()
 
     def save(self, path: str) -> None:
@@ -244,11 +256,7 @@ class BotConfig:
         try:
             p.parent.mkdir(parents=True, exist_ok=True)
             payload = json.dumps(
-                {
-                    "authorized_users": self.authorized_users,
-                    "tickets_seq": self.tickets_seq,
-                    "maintenance": self.maintenance,
-                },
+                {"authorized_users": self.authorized_users},
                 ensure_ascii=False,
                 indent=2,
             )
@@ -258,32 +266,90 @@ class BotConfig:
         except Exception as e:
             logger.error("Не удалось сохранить %s: %s", path, e)
 
-CONFIG = BotConfig.load(CONFIG_PATH)
-CONFIG_LOCK = asyncio.Lock()
+@dataclass
+class ImportantData:
+    tickets_seq: int = 0
+    maintenance: Dict[str, Any] = field(default_factory=dict)
 
-async def update_config(update_fn: Callable[[BotConfig], T]) -> T:
-    async with CONFIG_LOCK:
-        result = update_fn(CONFIG)
-        await asyncio.to_thread(CONFIG.save, CONFIG_PATH)
+    @staticmethod
+    def _migrate(raw: Dict[str, Any]) -> "ImportantData":
+        tickets_seq = int(raw.get("tickets_seq", 0) or 0)
+        maintenance = raw.get("maintenance", {})
+        if not isinstance(maintenance, dict):
+            maintenance = {}
+        return ImportantData(tickets_seq=tickets_seq, maintenance=maintenance)
+
+    @classmethod
+    def load(cls, path: str, legacy_path: Optional[str] = None) -> "ImportantData":
+        for pth in [path, legacy_path]:
+            if not pth:
+                continue
+            p = Path(pth)
+            if not p.exists():
+                continue
+            try:
+                raw = json.loads(p.read_text(encoding="utf-8"))
+                if isinstance(raw, dict):
+                    data = cls._migrate(raw)
+                    if pth != path:
+                        try:
+                            data.save(path)
+                        except Exception:
+                            pass
+                    return data
+            except Exception as e:
+                logger.error("Не удалось прочитать %s: %s", pth, e)
+        return cls()
+
+    def save(self, path: str) -> None:
+        p = Path(path)
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            payload = json.dumps(
+                {"tickets_seq": self.tickets_seq, "maintenance": self.maintenance},
+                ensure_ascii=False,
+                indent=2,
+            )
+            tmp = p.with_suffix(p.suffix + ".tmp")
+            tmp.write_text(payload, encoding="utf-8")
+            tmp.replace(p)
+        except Exception as e:
+            logger.error("Не удалось сохранить %s: %s", path, e)
+
+USER_DATA = UserData.load(USER_DATA_PATH, legacy_path=LEGACY_CONFIG_PATH)
+IMPORTANT_DATA = ImportantData.load(IMPORTANT_DATA_PATH, legacy_path=LEGACY_CONFIG_PATH)
+USER_DATA_LOCK = asyncio.Lock()
+IMPORTANT_DATA_LOCK = asyncio.Lock()
+
+async def update_user_data(update_fn: Callable[[UserData], T]) -> T:
+    async with USER_DATA_LOCK:
+        result = update_fn(USER_DATA)
+        await asyncio.to_thread(USER_DATA.save, USER_DATA_PATH)
     return result
 
-def _set_user_meta(cfg: BotConfig, uid: int, meta: Dict[str, Any]) -> Dict[str, Any]:
-    normalized = BotConfig._normalize_user(meta)
+async def update_important_data(update_fn: Callable[[ImportantData], T]) -> T:
+    async with IMPORTANT_DATA_LOCK:
+        result = update_fn(IMPORTANT_DATA)
+        await asyncio.to_thread(IMPORTANT_DATA.save, IMPORTANT_DATA_PATH)
+    return result
+
+def _set_user_meta(cfg: UserData, uid: int, meta: Dict[str, Any]) -> Dict[str, Any]:
+    normalized = UserData._normalize_user(meta)
     cfg.authorized_users[str(uid)] = normalized
     return normalized
 
-def _remove_user(cfg: BotConfig, uid: int) -> Optional[Dict[str, Any]]:
+def _remove_user(cfg: UserData, uid: int) -> Optional[Dict[str, Any]]:
     return cfg.authorized_users.pop(str(uid), None)
 
-def _set_maintenance(cfg: BotConfig, payload: Dict[str, Any]) -> Dict[str, Any]:
+def _set_maintenance(cfg: ImportantData, payload: Dict[str, Any]) -> Dict[str, Any]:
     cfg.maintenance = payload
     return payload
 
-def _clear_maintenance(cfg: BotConfig) -> None:
+def _clear_maintenance(cfg: ImportantData) -> None:
     cfg.maintenance = {}
 
 def _get_active_maintenance() -> Optional[Dict[str, Any]]:
-    m = getattr(CONFIG, "maintenance", None)
+    m = getattr(IMPORTANT_DATA, "maintenance", None)
     if isinstance(m, dict) and m.get("active"):
         return m
     return None
@@ -314,11 +380,11 @@ def get_user_id(update: Update) -> Optional[int]:
     return int(u.id) if u else None
 
 def get_user_meta(uid: int) -> Optional[Dict[str, Any]]:
-    return CONFIG.authorized_users.get(str(uid))
+    return USER_DATA.authorized_users.get(str(uid))
 
 def is_authorized(update: Update) -> bool:
     uid = get_user_id(update)
-    return bool(uid is not None and str(uid) in CONFIG.authorized_users)
+    return bool(uid is not None and str(uid) in USER_DATA.authorized_users)
 
 def is_enabled(update: Update) -> bool:
     uid = get_user_id(update)
@@ -1669,7 +1735,7 @@ async def cmd_auth(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "auth_at": datetime.now(TZ).isoformat(),
         "is_paid": preserved_paid,
     }
-    await update_config(lambda cfg: _set_user_meta(cfg, u.id, meta))
+    await update_user_data(lambda cfg: _set_user_meta(cfg, u.id, meta))
 
     if not preserved_enabled:
         await reply_disabled(update)
@@ -1689,8 +1755,8 @@ async def cmd_logout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if uid is None:
         return
 
-    if str(uid) in CONFIG.authorized_users:
-        await update_config(lambda cfg: _remove_user(cfg, uid))
+    if str(uid) in USER_DATA.authorized_users:
+        await update_user_data(lambda cfg: _remove_user(cfg, uid))
         if msg:
             await msg.reply_text("Вы удалены из списка авторизованных.")
     else:
@@ -1847,6 +1913,9 @@ def _maint_due_prompt(maint: Dict[str, Any]) -> str:
         "Завершить техработы или продлить?"
     )
 
+def _maint_restart_text(maint: Dict[str, Any]) -> str:
+    return "♻️ <b>Бот перезапущен</b>\n\n" + _maint_panel_text(maint)
+
 async def send_to_many(
     context: ContextTypes.DEFAULT_TYPE,
     user_ids: Iterable[int],
@@ -1866,7 +1935,7 @@ async def send_to_many(
 def authorized_ids(role_filter: Optional[str] = None, exclude: Optional[Set[int]] = None) -> List[int]:
     exclude = exclude or set()
     ids: List[int] = []
-    for k, meta in CONFIG.authorized_users.items():
+    for k, meta in USER_DATA.authorized_users.items():
         try:
             uid = int(meta.get("user_id", k))
         except Exception:
@@ -1880,37 +1949,7 @@ def authorized_ids(role_filter: Optional[str] = None, exclude: Optional[Set[int]
         ids.append(uid)
     return sorted(set(ids))
 
-def _maint_job_name(maint_id: str) -> str:
-    return f"maint_due:{maint_id}"
-
-def _cancel_maint_job(job_queue: Optional[Any], maint_id: str) -> None:
-    if not job_queue:
-        return
-    for job in job_queue.get_jobs_by_name(_maint_job_name(maint_id)):
-        job.schedule_removal()
-
-def _schedule_maint_due(job_queue: Optional[Any], maint: Dict[str, Any]) -> None:
-    if not job_queue:
-        return
-    maint_id = str(maint.get("id", "") or "")
-    if not maint_id:
-        return
-    _cancel_maint_job(job_queue, maint_id)
-    expected_end = maint.get("expected_end")
-    try:
-        end_dt = datetime.fromisoformat(expected_end) if expected_end else None
-    except Exception:
-        end_dt = None
-    now = datetime.now(TZ)
-    if not end_dt:
-        return
-    delay = max(1, int((end_dt - now).total_seconds()))
-    job_queue.run_once(
-        maint_due_job,
-        when=delay,
-        name=_maint_job_name(maint_id),
-        data={"maint_id": maint_id},
-    )
+ 
 
 # ============================================================
 #                       MAINTENANCE (ADMIN)
@@ -1964,8 +2003,7 @@ async def maint_duration(update: Update, context: ContextTypes.DEFAULT_TYPE):
     maint = _build_maint_record(urgency, hh, mm, author_id, author)
     maint_id = maint.get("id")
     if maint_id:
-        await update_config(lambda cfg: _set_maintenance(cfg, maint))
-        _schedule_maint_due(context.application.job_queue, maint)
+        await update_important_data(lambda cfg: _set_maintenance(cfg, maint))
 
     panel_text = _maint_panel_text(maint)
     panel_text = f"{panel_text}\n\nОповещены: ✅ {ok}, ❌ {fail}"
@@ -2033,8 +2071,7 @@ async def maint_extend_duration(update: Update, context: ContextTypes.DEFAULT_TY
     maint["expected_end"] = expected_end.isoformat()
     maint["updated_at"] = now.isoformat()
 
-    await update_config(lambda cfg: _set_maintenance(cfg, maint))
-    _schedule_maint_due(context.application.job_queue, maint)
+    await update_important_data(lambda cfg: _set_maintenance(cfg, maint))
 
     author = display_name(update)
     notice = _maint_extend_notice(maint, hh, mm, author)
@@ -2068,21 +2105,20 @@ async def maint_end_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     recipients = authorized_ids(role_filter="user", exclude=set())
     ok, fail = await send_to_many(context, recipients, notice) if recipients else (0, 0)
 
-    await update_config(lambda cfg: _clear_maintenance(cfg))
-    _cancel_maint_job(context.application.job_queue, maint_id)
-
+    await update_important_data(lambda cfg: _clear_maintenance(cfg))
     await q.edit_message_text(f"✅ Техработы завершены. Оповещены: ✅ {ok}, ❌ {fail}")
 
-async def maint_due_job(context: ContextTypes.DEFAULT_TYPE) -> None:
-    data = context.job.data if context.job else {}
-    maint_id = str((data or {}).get("maint_id", "") or "")
+async def maint_restart_notify(context: ContextTypes.DEFAULT_TYPE) -> None:
     maint = _get_active_maintenance()
-    if not maint or str(maint.get("id")) != maint_id:
+    if not maint:
+        return
+    maint_id = str(maint.get("id", "") or "")
+    if not maint_id:
         return
     admin_ids = authorized_ids(role_filter="admin", exclude=set())
     if not admin_ids:
         return
-    text = _maint_due_prompt(maint)
+    text = _maint_restart_text(maint)
     kb = _maint_control_kb(maint_id)
     for uid in admin_ids:
         try:
@@ -2176,11 +2212,11 @@ async def ticket_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if q.data != "ticket:send":
         return ConversationHandler.END
 
-    def _next_ticket(cfg: BotConfig) -> int:
+    def _next_ticket(cfg: ImportantData) -> int:
         cfg.tickets_seq += 1
         return cfg.tickets_seq
 
-    ticket_id = await update_config(_next_ticket)
+    ticket_id = await update_important_data(_next_ticket)
 
     u = update.effective_user
     uid = u.id if u else None
@@ -2236,7 +2272,7 @@ def users_list_kb() -> InlineKeyboardMarkup:
     buttons.append([InlineKeyboardButton("📣 Все пользователи", callback_data="users:all")])
 
     items: List[Tuple[str, bool, bool, str, int, str]] = []
-    for k, meta in CONFIG.authorized_users.items():
+    for k, meta in USER_DATA.authorized_users.items():
         try:
             uid = int(meta.get("user_id", k))
         except Exception:
@@ -2432,7 +2468,7 @@ async def users_user_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return ADMIN_USER_MENU
 
         meta["enabled"] = not bool(meta.get("enabled", True))
-        updated = await update_config(lambda cfg: _set_user_meta(cfg, uid, meta))
+        updated = await update_user_data(lambda cfg: _set_user_meta(cfg, uid, meta))
         await q.edit_message_text(format_user_card(updated), parse_mode=ParseMode.HTML, reply_markup=user_card_kb(uid))
         return ADMIN_USER_MENU
 
@@ -2444,7 +2480,7 @@ async def users_user_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.edit_message_text("Пользователь не найден.", reply_markup=users_list_kb())
             return ADMIN_PICK
         meta["is_paid"] = not bool(meta.get("is_paid", False))
-        updated = await update_config(lambda cfg: _set_user_meta(cfg, uid, meta))
+        updated = await update_user_data(lambda cfg: _set_user_meta(cfg, uid, meta))
         await q.edit_message_text(format_user_card(updated), parse_mode=ParseMode.HTML, reply_markup=user_card_kb(uid))
         return ADMIN_USER_MENU
 
@@ -2542,7 +2578,7 @@ async def users_user_nick_text(update: Update, context: ContextTypes.DEFAULT_TYP
         return ADMIN_USER_NICK_TEXT
 
     meta["nickname"] = nick
-    await update_config(lambda cfg: _set_user_meta(cfg, uid, meta))
+    await update_user_data(lambda cfg: _set_user_meta(cfg, uid, meta))
 
     if msg:
         await msg.reply_text("Никнейм сохранён ✅")
@@ -2753,9 +2789,7 @@ def build_app() -> Application:
             time=dtime(hour=hh, minute=mm, tzinfo=TZ),
             name="fail2ban_digest",
         )
-        active_maint = _get_active_maintenance()
-        if active_maint:
-            _schedule_maint_due(app.job_queue, active_maint)
+        app.job_queue.run_once(maint_restart_notify, when=2, name="maint_restart_notify")
     else:
         logger.warning("JobQueue недоступен: для ежедневной выжимки установите python-telegram-bot[job-queue].")
 
