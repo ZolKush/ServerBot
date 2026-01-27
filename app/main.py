@@ -1913,8 +1913,6 @@ def _maint_due_prompt(maint: Dict[str, Any]) -> str:
         "Завершить техработы или продлить?"
     )
 
-def _maint_restart_text(maint: Dict[str, Any]) -> str:
-    return "♻️ <b>Бот перезапущен</b>\n\n" + _maint_panel_text(maint)
 
 async def send_to_many(
     context: ContextTypes.DEFAULT_TYPE,
@@ -2108,21 +2106,14 @@ async def maint_end_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update_important_data(lambda cfg: _clear_maintenance(cfg))
     await q.edit_message_text(f"✅ Техработы завершены. Оповещены: ✅ {ok}, ❌ {fail}")
 
-async def maint_restart_notify(context: ContextTypes.DEFAULT_TYPE) -> None:
-    maint = _get_active_maintenance()
-    if not maint:
-        return
-    maint_id = str(maint.get("id", "") or "")
-    if not maint_id:
-        return
+async def startup_notify(context: ContextTypes.DEFAULT_TYPE) -> None:
     admin_ids = authorized_ids(role_filter="admin", exclude=set())
     if not admin_ids:
         return
-    text = _maint_restart_text(maint)
-    kb = _maint_control_kb(maint_id)
+    text = "✅ <b>Бот запущен</b>\nЕсли идут техработы — зайдите в меню «Техработы»."
     for uid in admin_ids:
         try:
-            await context.bot.send_message(chat_id=uid, text=text, parse_mode=ParseMode.HTML, reply_markup=kb)
+            await context.bot.send_message(chat_id=uid, text=text, parse_mode=ParseMode.HTML)
         except Exception as e:
             logger.warning("Не удалось отправить админу %s: %s", uid, e)
 
@@ -2789,7 +2780,7 @@ def build_app() -> Application:
             time=dtime(hour=hh, minute=mm, tzinfo=TZ),
             name="fail2ban_digest",
         )
-        app.job_queue.run_once(maint_restart_notify, when=2, name="maint_restart_notify")
+        app.job_queue.run_once(startup_notify, when=2, name="startup_notify")
     else:
         logger.warning("JobQueue недоступен: для ежедневной выжимки установите python-telegram-bot[job-queue].")
 
