@@ -1,0 +1,8 @@
+# env files (любые)
+.env
+**/.env
+.env.*
+**/.env.*
+
+# runtime data
+data/
