@@ -50,6 +50,14 @@ async def build_status_message(update: Update) -> Tuple[str, Optional[InlineKeyb
     mem_clean = mem
     if mem_clean.lower().startswith("ram:"):
         mem_clean = mem_clean.split(":", 1)[1].strip()
+    if ";" in mem_clean:
+        mem_clean = mem_clean.split(";", 1)[0].strip()
+
+    disk_clean = disk.strip()
+    if " (" in disk_clean:
+        disk_clean = disk_clean.split(" (", 1)[0].strip()
+    if " mount" in disk_clean:
+        disk_clean = disk_clean.split(" mount", 1)[0].strip()
 
     ufw_state = ufw_s.upper()
 
@@ -67,7 +75,7 @@ async def build_status_message(update: Update) -> Tuple[str, Optional[InlineKeyb
     lines.append(f"<b>⏰ Время:</b> {html_escape(now_str())}")
     lines.append(f"<b>⏳ Uptime:</b> {html_escape(up)}")
     lines.append(f"<b>🧠 RAM:</b> {html_escape(mem_clean)}")
-    lines.append(f"<b>💾 ROM:</b> {html_escape(disk)}")
+    lines.append(f"<b>💾 ROM:</b> {html_escape(disk_clean)}")
     lines.append(f"<b>🛡 UFW status:</b> <b>{html_escape(ufw_state)}</b>")
     if is_admin(update) and ufw_s == "active":
         lines.append("    ALLOW:")
@@ -81,7 +89,7 @@ async def build_status_message(update: Update) -> Tuple[str, Optional[InlineKeyb
     lines.append("<b>🐳 Docker контейнеры:</b>")
     for name, upb, st, rst in cont:
         emoji = "🟢" if upb else "🔴"
-        lines.append(f"    {emoji} {html_escape(name)} — {html_escape(st)} (restarts: {html_escape(rst)})")
+        lines.append(f"{emoji} {html_escape(name)} — {html_escape(st)} (restarts: {html_escape(rst)})")
 
     rows: List[List[InlineKeyboardButton]] = []
     if is_admin(update):
