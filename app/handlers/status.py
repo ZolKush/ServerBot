@@ -10,17 +10,13 @@ from ..config import (
     DNS_RESOLVERS,
     EXPECTED_A_IP,
     MONITOR_CONTAINERS,
-    PING_COUNT,
-    PING_TIMEOUT_SEC,
     TZ_NAME,
 )
 from ..services.docker_service import docker_containers
 from ..services.system_service import (
     check_uptime,
     disk_root,
-    loadavg,
     meminfo,
-    ping_host,
     resolve_a_record,
     ufw_status_basic,
     ufw_summary_for_admin,
@@ -38,7 +34,6 @@ async def cmd_health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 async def build_status_message(update: Update) -> Tuple[str, Optional[InlineKeyboardMarkup]]:
     up = await check_uptime()
-    la = await loadavg()
     mem = await meminfo()
     disk = await disk_root()
 
@@ -50,41 +45,43 @@ async def build_status_message(update: Update) -> Tuple[str, Optional[InlineKeyb
 
     cont = await docker_containers(MONITOR_CONTAINERS)
 
-    expected_ip = EXPECTED_A_IP
-    ok_ping_expected, rtt_expected = await ping_host(expected_ip, count=PING_COUNT, timeout_sec=PING_TIMEOUT_SEC)
+    # ping and loadavg aren't part of the requested status layout
+
+    mem_clean = mem
+    if mem_clean.lower().startswith("ram:"):
+        mem_clean = mem_clean.split(":", 1)[1].strip()
+
+    ufw_state = ufw_s.upper()
+
+    def fmt_ufw_list(items: List[str]) -> List[str]:
+        if not items:
+            return ["<code>    —</code>"]
+        out: List[str] = []
+        for i, item in enumerate(items):
+            suffix = "," if i < (len(items) - 1) else ""
+            out.append(f"<code>    {html_escape(item)}{suffix}</code>")
+        return out
 
     lines: List[str] = []
-    lines.append("<b>Статус сервера</b>")
-    lines.append(f"• Время: <code>{html_escape(now_str())}</code> ({html_escape(TZ_NAME)})")
-    lines.append(f"• Uptime: <code>{html_escape(up)}</code>")
-    lines.append(f"• Load average (1/5/15): <code>{html_escape(la)}</code>")
-    lines.append(f"• Память: <code>{html_escape(mem)}</code>")
-    lines.append(f"• Диск /: <code>{html_escape(disk)}</code>")
-    lines.append(f"• UFW: <code>{html_escape(ufw_s)}</code>")
-
+    lines.append("<b>🧭 Статус сервера</b>")
+    lines.append(f"<b>⏰ Время:</b> {html_escape(now_str())}")
+    lines.append(f"<b>⏳ Uptime:</b> {html_escape(up)}")
+    lines.append(f"<b>🧠 RAM:</b> {html_escape(mem_clean)}")
+    lines.append(f"<b>💾 ROM:</b> {html_escape(disk)}")
+    lines.append(f"<b>🛡 UFW status:</b> <b>{html_escape(ufw_state)}</b>")
     if is_admin(update) and ufw_s == "active":
+        lines.append("    ALLOW:")
+        lines.extend(fmt_ufw_list(allow))
+        lines.append("    DENY:")
+        lines.extend(fmt_ufw_list(deny))
+        lines.append("    REJECT:")
+        lines.extend(fmt_ufw_list(reject))
 
-        def join_short(xs: List[str]) -> str:
-            if not xs:
-                return "—"
-            s = ", ".join(xs)
-            return s if len(s) <= 200 else (s[:200] + "…")
-
-        lines.append(f"  ALLOW: <code>{html_escape(join_short(allow))}</code>")
-        lines.append(f"  DENY: <code>{html_escape(join_short(deny))}</code>")
-        lines.append(f"  REJECT: <code>{html_escape(join_short(reject))}</code>")
-
-    lines.append("\n<b>Docker контейнеры</b>")
+    lines.append("")
+    lines.append("<b>🐳 Docker контейнеры:</b>")
     for name, upb, st, rst in cont:
         emoji = "🟢" if upb else "🔴"
-        lines.append(f"• {emoji} <code>{html_escape(name)}</code> — {html_escape(st)} (restarts: {html_escape(rst)})")
-
-    lines.append("\n<b>Сеть (ICMP)</b>")
-    if ok_ping_expected:
-        rtt_s = f"{rtt_expected:.1f} ms" if rtt_expected is not None else "ok"
-        lines.append(f"• ping <code>{html_escape(expected_ip)}</code> — ok (avg {html_escape(rtt_s)})")
-    else:
-        lines.append(f"• ping <code>{html_escape(expected_ip)}</code> — fail/timeout")
+        lines.append(f"    {emoji} {html_escape(name)} — {html_escape(st)} (restarts: {html_escape(rst)})")
 
     rows: List[List[InlineKeyboardButton]] = []
     if is_admin(update):
