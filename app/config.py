@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Any, List
 from zoneinfo import ZoneInfo
 
-from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logging.basicConfig(
@@ -25,6 +24,17 @@ _ENV_FILE = Path(_ENV_PATH) if _ENV_PATH else (BASE_DIR / ".env")
 def _split_env_list(raw: Any) -> List[str]:
     if raw is None:
         return []
+    if isinstance(raw, str):
+        s = raw.strip()
+        if not s:
+            return []
+        if s.startswith("[") and s.endswith("]"):
+            try:
+                parsed = json.loads(s)
+                if isinstance(parsed, list):
+                    raw = parsed
+            except Exception:
+                pass
     if isinstance(raw, list):
         items = [str(x).strip() for x in raw]
     else:
@@ -54,19 +64,11 @@ def _resolve_bin(*candidates: str) -> str:
     return candidates[-1] if candidates else ""
 
 
-def _env_json_loads(value: str):
-    try:
-        return json.loads(value)
-    except Exception:
-        return value
-
-
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=str(_ENV_FILE),
         env_file_encoding="utf-8",
         extra="ignore",
-        env_json_loads=_env_json_loads,
     )
 
     BOT_TOKEN: str = ""
@@ -78,25 +80,15 @@ class Settings(BaseSettings):
     IMPORTANT_DATA_PATH: str = str(ROOT_DIR / "data" / "important_data.json")
     CONFIG_PATH: str = str(ROOT_DIR / "data" / "config.json")
 
-    MONITOR_CONTAINERS: List[str] = Field(
-        default_factory=lambda: [
-            "remnawave",
-            "remnawave-db",
-            "remnawave-redis",
-            "remnanode",
-            "remnawave-nginx",
-        ]
-    )
+    MONITOR_CONTAINERS: str = "remnawave,remnawave-db,remnawave-redis,remnanode,remnawave-nginx"
     MONITOR_PANEL_HOST: str = "xvui.ittelecom.pl"
     PING_COUNT: int = 1
     PING_TIMEOUT_SEC: int = 1
 
     EXPECTED_A_IP: str = "95.164.47.185"
-    CHECK_A_DOMAINS: List[str] = Field(
-        default_factory=lambda: ["nxc.ittelecom.pl", "xvui.ittelecom.pl", "supsub.ittelecom.pl"]
-    )
+    CHECK_A_DOMAINS: str = "nxc.ittelecom.pl,xvui.ittelecom.pl,supsub.ittelecom.pl"
 
-    DNS_RESOLVERS: List[str] = Field(default_factory=lambda: ["1.1.1.1", "8.8.8.8", "77.88.8.8"])
+    DNS_RESOLVERS: str = "1.1.1.1,8.8.8.8,77.88.8.8"
 
     FAIL2BAN_LOG_PATH: str = "/var/log/fail2ban.log"
     FAIL2BAN_STATE_PATH: str = ""
@@ -104,12 +96,6 @@ class Settings(BaseSettings):
 
     SUBPROC_SHORT_TIMEOUT: int = 3
     SUBPROC_MEDIUM_TIMEOUT: int = 8
-
-    @field_validator("MONITOR_CONTAINERS", "CHECK_A_DOMAINS", "DNS_RESOLVERS", mode="before")
-    @classmethod
-    def _parse_list(cls, v: Any) -> List[str]:
-        return _split_env_list(v)
-
 
 SETTINGS = Settings()
 
@@ -135,14 +121,14 @@ FAIL2BAN_STATE_PATH = _resolve_path(
     ROOT_DIR,
 )
 
-MONITOR_CONTAINERS = SETTINGS.MONITOR_CONTAINERS
+MONITOR_CONTAINERS = _split_env_list(SETTINGS.MONITOR_CONTAINERS)
 MONITOR_CONTAINER_SET = set(MONITOR_CONTAINERS)
 MONITOR_PANEL_HOST = SETTINGS.MONITOR_PANEL_HOST
 PING_COUNT = SETTINGS.PING_COUNT
 PING_TIMEOUT_SEC = SETTINGS.PING_TIMEOUT_SEC
 EXPECTED_A_IP = SETTINGS.EXPECTED_A_IP.strip()
-CHECK_A_DOMAINS = SETTINGS.CHECK_A_DOMAINS
-DNS_RESOLVERS = SETTINGS.DNS_RESOLVERS
+CHECK_A_DOMAINS = _split_env_list(SETTINGS.CHECK_A_DOMAINS)
+DNS_RESOLVERS = _split_env_list(SETTINGS.DNS_RESOLVERS)
 
 DOCKER_BIN = _resolve_bin("/usr/bin/docker", "docker")
 UFW_BIN = _resolve_bin("/usr/sbin/ufw", "ufw")
