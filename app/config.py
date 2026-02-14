@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import shutil
@@ -53,11 +54,19 @@ def _resolve_bin(*candidates: str) -> str:
     return candidates[-1] if candidates else ""
 
 
+def _env_json_loads(value: str):
+    try:
+        return json.loads(value)
+    except Exception:
+        return value
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=str(_ENV_FILE),
         env_file_encoding="utf-8",
         extra="ignore",
+        env_json_loads=_env_json_loads,
     )
 
     BOT_TOKEN: str = ""
