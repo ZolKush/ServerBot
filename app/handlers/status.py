@@ -52,6 +52,8 @@ async def build_status_message(update: Update) -> Tuple[str, Optional[InlineKeyb
         mem_clean = mem_clean.split(":", 1)[1].strip()
     if ";" in mem_clean:
         mem_clean = mem_clean.split(";", 1)[0].strip()
+    if " (" in mem_clean:
+        mem_clean = mem_clean.split(" (", 1)[0].strip()
 
     disk_clean = disk.strip()
     if " (" in disk_clean:
