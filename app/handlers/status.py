@@ -50,12 +50,22 @@ def _status_pick_kb() -> InlineKeyboardMarkup:
     rows: List[List[InlineKeyboardButton]] = []
     for key in _server_keys():
         srv = SERVERS[key]
-        rows.append([InlineKeyboardButton(f"🖥 {srv.label}", callback_data=f"status:show:{srv.key}")])
+        rows.append([InlineKeyboardButton(f"{_server_flag(srv)} {srv.label}", callback_data=f"status:show:{srv.key}")])
     return InlineKeyboardMarkup(rows)
 
 
 def _status_pick_text() -> str:
     return "<b>Выберите сервер</b>\nКакой статус показать?"
+
+
+def _server_flag(server: ServerTarget) -> str:
+    key = (server.key or "").lower()
+    label = (server.label or "").lower()
+    if key == "de" or "germany" in label:
+        return "🇩🇪"
+    if key == "nl" or "netherlands" in label:
+        return "🇳🇱"
+    return "🖥"
 
 
 def _status_actions_kb(admin_mode: bool, server_key: str) -> InlineKeyboardMarkup:
@@ -181,7 +191,7 @@ async def build_status_message(update: Update, server_key: Optional[str] = None)
 
     lines: List[str] = []
     lines.append("<b>🧭 Статус сервера</b>")
-    lines.append(f"<b>🌍 Сервер:</b> {html_escape(server.label)}")
+    lines.append(f"<b>🌍 Сервер:</b> {_server_flag(server)} {html_escape(server.label)}")
     lines.append(f"<b>⏰ Время:</b> {html_escape(now_str())}")
     lines.append(f"<b>⏳ Uptime:</b> {html_escape(up)}")
     lines.append(f"<b>🧠 RAM:</b> {html_escape(mem_clean)}")

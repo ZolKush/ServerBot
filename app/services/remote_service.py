@@ -5,7 +5,7 @@ import shlex
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from ..config import SSH_BIN, SUBPROC_MEDIUM_TIMEOUT, SUBPROC_SHORT_TIMEOUT, SUDO_BIN, TZ, logger
+from ..config import DOCKER_BIN, SSH_BIN, SUBPROC_MEDIUM_TIMEOUT, SUBPROC_SHORT_TIMEOUT, SUDO_BIN, TZ, UFW_BIN, logger
 from .system_service import _fmt_bytes_binary, _parse_ufw_rules, parse_fail2ban_events, run_exec
 
 
@@ -19,9 +19,11 @@ async def ssh_run_shell(target: str, command: str, timeout: int) -> Tuple[int, s
         "BatchMode=yes",
         "-o",
         f"ConnectTimeout={max(2, min(timeout, 10))}",
+        "-o",
+        "LogLevel=ERROR",
         tgt,
         "sh",
-        "-lc",
+        "-c",
         command,
     ]
     return await run_exec(args, timeout=max(timeout + 2, 5))
@@ -155,7 +157,16 @@ async def remote_disk_root(ssh_target: str) -> str:
 
 
 async def remote_ufw_status_basic(ssh_target: str) -> str:
-    for cmd in ("ufw status", f"{SUDO_BIN} -n ufw status"):
+    ufw_candidates = [UFW_BIN, "/usr/sbin/ufw", "ufw"]
+    cmds: List[str] = []
+    for ufw_bin in ufw_candidates:
+        if ufw_bin and f"{ufw_bin} status" not in cmds:
+            cmds.append(f"{ufw_bin} status")
+        if ufw_bin and SUDO_BIN:
+            sudo_cmd = f"{SUDO_BIN} -n {ufw_bin} status"
+            if sudo_cmd not in cmds:
+                cmds.append(sudo_cmd)
+    for cmd in cmds:
         rc, out, _ = await ssh_run_shell(ssh_target, cmd, timeout=SUBPROC_SHORT_TIMEOUT)
         if rc == 0 and out.strip():
             first = (out.strip().splitlines()[:1] or [""])[0].lower()
@@ -167,7 +178,16 @@ async def remote_ufw_status_basic(ssh_target: str) -> str:
 
 
 async def remote_ufw_summary_for_admin(ssh_target: str) -> Tuple[str, List[str], List[str], List[str]]:
-    for cmd in ("ufw status", f"{SUDO_BIN} -n ufw status"):
+    ufw_candidates = [UFW_BIN, "/usr/sbin/ufw", "ufw"]
+    cmds: List[str] = []
+    for ufw_bin in ufw_candidates:
+        if ufw_bin and f"{ufw_bin} status" not in cmds:
+            cmds.append(f"{ufw_bin} status")
+        if ufw_bin and SUDO_BIN:
+            sudo_cmd = f"{SUDO_BIN} -n {ufw_bin} status"
+            if sudo_cmd not in cmds:
+                cmds.append(sudo_cmd)
+    for cmd in cmds:
         rc, out, _ = await ssh_run_shell(ssh_target, cmd, timeout=SUBPROC_SHORT_TIMEOUT)
         if rc == 0 and out.strip():
             first = (out.strip().splitlines()[:1] or [""])[0].lower()
@@ -178,13 +198,19 @@ async def remote_ufw_summary_for_admin(ssh_target: str) -> Tuple[str, List[str],
 
 
 async def remote_docker_containers(ssh_target: str, names: Sequence[str]) -> List[Tuple[str, bool, str, str]]:
-    rc, _, _ = await ssh_run_exec(ssh_target, ["docker", "info"], timeout=SUBPROC_SHORT_TIMEOUT)
+    docker_bin = DOCKER_BIN or "/usr/bin/docker"
+    rc, _, _ = await ssh_run_exec(ssh_target, [docker_bin, "info"], timeout=SUBPROC_SHORT_TIMEOUT)
+    if rc != 0 and SUDO_BIN:
+        rc, _, _ = await ssh_run_exec(ssh_target, [SUDO_BIN, "-n", docker_bin, "info"], timeout=SUBPROC_SHORT_TIMEOUT)
+        docker_prefix = [SUDO_BIN, "-n", docker_bin]
+    else:
+        docker_prefix = [docker_bin]
     if rc != 0:
         return [(n, False, "docker недоступен", "-") for n in names]
 
     rc, out, _ = await ssh_run_exec(
         ssh_target,
-        ["docker", "ps", "-a", "--format", "{{.Names}}|{{.Status}}"],
+        [*docker_prefix, "ps", "-a", "--format", "{{.Names}}|{{.Status}}"],
         timeout=SUBPROC_MEDIUM_TIMEOUT,
     )
     if rc != 0:
@@ -197,7 +223,7 @@ async def remote_docker_containers(ssh_target: str, names: Sequence[str]) -> Lis
 
     rc2, out2, _ = await ssh_run_exec(
         ssh_target,
-        ["docker", "ps", "-a", "--format", "{{.Names}}|{{.RestartCount}}"],
+        [*docker_prefix, "ps", "-a", "--format", "{{.Names}}|{{.RestartCount}}"],
         timeout=SUBPROC_MEDIUM_TIMEOUT,
     )
     restarts: Dict[str, str] = {}
@@ -218,7 +244,14 @@ async def remote_docker_containers(ssh_target: str, names: Sequence[str]) -> Lis
 
 
 async def remote_docker_inspect_summary(ssh_target: str, name: str) -> str:
-    rc, out, err = await ssh_run_exec(ssh_target, ["docker", "inspect", name], timeout=SUBPROC_MEDIUM_TIMEOUT)
+    docker_bin = DOCKER_BIN or "/usr/bin/docker"
+    rc, out, err = await ssh_run_exec(ssh_target, [docker_bin, "inspect", name], timeout=SUBPROC_MEDIUM_TIMEOUT)
+    if rc != 0 and SUDO_BIN:
+        rc, out, err = await ssh_run_exec(
+            ssh_target,
+            [SUDO_BIN, "-n", docker_bin, "inspect", name],
+            timeout=SUBPROC_MEDIUM_TIMEOUT,
+        )
     if rc != 0:
         return f"docker inspect error: {err.strip() or out.strip() or 'н/д'}"
     try:
@@ -271,11 +304,18 @@ async def remote_docker_inspect_summary(ssh_target: str, name: str) -> str:
 
 
 async def remote_docker_logs_tail(ssh_target: str, name: str, tail: int) -> str:
+    docker_bin = DOCKER_BIN or "/usr/bin/docker"
     rc, out, err = await ssh_run_exec(
         ssh_target,
-        ["docker", "logs", "--tail", str(int(tail)), name],
+        [docker_bin, "logs", "--tail", str(int(tail)), name],
         timeout=SUBPROC_MEDIUM_TIMEOUT,
     )
+    if rc != 0 and SUDO_BIN:
+        rc, out, err = await ssh_run_exec(
+            ssh_target,
+            [SUDO_BIN, "-n", docker_bin, "logs", "--tail", str(int(tail)), name],
+            timeout=SUBPROC_MEDIUM_TIMEOUT,
+        )
     if rc != 0:
         return f"docker logs error: {err.strip() or out.strip() or 'н/д'}"
     return out
