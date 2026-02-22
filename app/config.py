@@ -2,8 +2,9 @@ import json
 import logging
 import os
 import shutil
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, List
+from typing import Any, Dict, List
 from zoneinfo import ZoneInfo
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -97,6 +98,18 @@ class Settings(BaseSettings):
     SUBPROC_SHORT_TIMEOUT: int = 3
     SUBPROC_MEDIUM_TIMEOUT: int = 8
 
+    LOCAL_SERVER_CODE: str = "nl"
+    LOCAL_SERVER_LABEL: str = "Netherlands"
+
+    REMOTE_SERVER_ENABLED: bool = True
+    REMOTE_SERVER_CODE: str = "de"
+    REMOTE_SERVER_LABEL: str = "Germany"
+    REMOTE_SERVER_SSH_TARGET: str = ""
+    REMOTE_SERVER_EXPECTED_A_IP: str = "144.31.111.77"
+    REMOTE_SERVER_CHECK_A_DOMAINS: str = "nextfiles.ittelecom.pl"
+    REMOTE_SERVER_FAIL2BAN_LOG_PATH: str = "/var/log/fail2ban.log"
+    REMOTE_SERVER_MONITOR_CONTAINERS: str = ""
+
 SETTINGS = Settings()
 
 BOT_TOKEN = SETTINGS.BOT_TOKEN.strip()
@@ -134,12 +147,60 @@ DOCKER_BIN = _resolve_bin("/usr/bin/docker", "docker")
 UFW_BIN = _resolve_bin("/usr/sbin/ufw", "ufw")
 PING_BIN = _resolve_bin("/bin/ping", "/usr/bin/ping", "ping")
 SUDO_BIN = _resolve_bin("/usr/bin/sudo", "sudo")
+SSH_BIN = _resolve_bin("/usr/bin/ssh", "ssh")
 
 FAIL2BAN_LOG_PATH = SETTINGS.FAIL2BAN_LOG_PATH.strip()
 FAIL2BAN_DAILY_AT = SETTINGS.FAIL2BAN_DAILY_AT.strip()
+LOCAL_SERVER_CODE = (SETTINGS.LOCAL_SERVER_CODE.strip().lower() or "nl")[:12]
+LOCAL_SERVER_LABEL = SETTINGS.LOCAL_SERVER_LABEL.strip() or "Netherlands"
+
+REMOTE_SERVER_ENABLED = bool(SETTINGS.REMOTE_SERVER_ENABLED)
+REMOTE_SERVER_CODE = (SETTINGS.REMOTE_SERVER_CODE.strip().lower() or "de")[:12]
+REMOTE_SERVER_LABEL = SETTINGS.REMOTE_SERVER_LABEL.strip() or "Germany"
+REMOTE_SERVER_SSH_TARGET = SETTINGS.REMOTE_SERVER_SSH_TARGET.strip()
+REMOTE_SERVER_EXPECTED_A_IP = SETTINGS.REMOTE_SERVER_EXPECTED_A_IP.strip()
+REMOTE_SERVER_CHECK_A_DOMAINS = _split_env_list(SETTINGS.REMOTE_SERVER_CHECK_A_DOMAINS)
+REMOTE_SERVER_FAIL2BAN_LOG_PATH = SETTINGS.REMOTE_SERVER_FAIL2BAN_LOG_PATH.strip() or "/var/log/fail2ban.log"
+REMOTE_SERVER_MONITOR_CONTAINERS = _split_env_list(SETTINGS.REMOTE_SERVER_MONITOR_CONTAINERS) or list(MONITOR_CONTAINERS)
 
 SUBPROC_SHORT_TIMEOUT = SETTINGS.SUBPROC_SHORT_TIMEOUT
 SUBPROC_MEDIUM_TIMEOUT = SETTINGS.SUBPROC_MEDIUM_TIMEOUT
+
+
+@dataclass(frozen=True)
+class ServerTarget:
+    key: str
+    label: str
+    mode: str  # local | ssh
+    expected_a_ip: str
+    check_a_domains: List[str]
+    monitor_containers: List[str]
+    fail2ban_log_path: str
+    ssh_target: str = ""
+
+
+SERVERS: Dict[str, ServerTarget] = {
+    LOCAL_SERVER_CODE: ServerTarget(
+        key=LOCAL_SERVER_CODE,
+        label=LOCAL_SERVER_LABEL,
+        mode="local",
+        expected_a_ip=EXPECTED_A_IP,
+        check_a_domains=list(CHECK_A_DOMAINS),
+        monitor_containers=list(MONITOR_CONTAINERS),
+        fail2ban_log_path=FAIL2BAN_LOG_PATH,
+    )
+}
+if REMOTE_SERVER_ENABLED and REMOTE_SERVER_SSH_TARGET:
+    SERVERS[REMOTE_SERVER_CODE] = ServerTarget(
+        key=REMOTE_SERVER_CODE,
+        label=REMOTE_SERVER_LABEL,
+        mode="ssh",
+        expected_a_ip=REMOTE_SERVER_EXPECTED_A_IP,
+        check_a_domains=list(REMOTE_SERVER_CHECK_A_DOMAINS),
+        monitor_containers=list(REMOTE_SERVER_MONITOR_CONTAINERS),
+        fail2ban_log_path=REMOTE_SERVER_FAIL2BAN_LOG_PATH,
+        ssh_target=REMOTE_SERVER_SSH_TARGET,
+    )
 
 MENU_STATUS = "📊 Статус сервера"
 MENU_TICKET = "🎫 Создать тикет"

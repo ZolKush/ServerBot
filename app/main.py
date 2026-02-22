@@ -40,6 +40,7 @@ from app.handlers.fail2ban import (
     fail2ban_menu,
 )
 from app.handlers.maint import (
+    STATE_MAINT_SCOPE,
     STATE_MAINT_DURATION,
     STATE_MAINT_EXTEND,
     STATE_MAINT_URGENCY,
@@ -48,10 +49,11 @@ from app.handlers.maint import (
     maint_extend_cb,
     maint_extend_duration,
     maint_restart_notify,
+    maint_scope,
     maint_start,
     maint_urgency,
 )
-from app.handlers.status import cmd_health, dns_back_cb, dns_check_cb
+from app.handlers.status import cmd_health, dns_back_cb, dns_check_cb, status_pick_cb, status_show_cb
 from app.handlers.tickets import (
     TICKET_CONFIRM,
     TICKET_SUBJECT,
@@ -107,10 +109,11 @@ def build_app() -> Application:
         entry_points=[
             CommandHandler("maint", maint_start),
             MessageHandler(filters.ChatType.PRIVATE & filters.Regex(rf"^{re.escape(MENU_MAINT)}$"), maint_start),
-            CallbackQueryHandler(maint_extend_cb, pattern=r"^maint:extend:\d+$"),
+            CallbackQueryHandler(maint_extend_cb, pattern=r"^maint:extend:[0-9a-f]+$"),
         ],
         states={
-            STATE_MAINT_URGENCY: [CallbackQueryHandler(maint_urgency, pattern=r"^maint:(urgent|planned)$")],
+            STATE_MAINT_SCOPE: [CallbackQueryHandler(maint_scope, pattern=r"^maint:scope:[a-z0-9_-]{1,12}$")],
+            STATE_MAINT_URGENCY: [CallbackQueryHandler(maint_urgency, pattern=r"^maint:urgency:(urgent|planned)$")],
             STATE_MAINT_DURATION: [MessageHandler(PRIVATE_TEXT, maint_duration)],
             STATE_MAINT_EXTEND: [MessageHandler(PRIVATE_TEXT, maint_extend_duration)],
         },
@@ -119,7 +122,7 @@ def build_app() -> Application:
         persistent=False,
     )
     app.add_handler(maint_conv)
-    app.add_handler(CallbackQueryHandler(maint_end_cb, pattern=r"^maint:end:\d+$"))
+    app.add_handler(CallbackQueryHandler(maint_end_cb, pattern=r"^maint:end:[0-9a-f]+$"))
 
     ticket_conv = ConversationHandler(
         entry_points=[
@@ -176,19 +179,27 @@ def build_app() -> Application:
     )
     app.add_handler(users_conv)
 
-    app.add_handler(CallbackQueryHandler(dns_check_cb, pattern=r"^dns:check$"))
-    app.add_handler(CallbackQueryHandler(dns_back_cb, pattern=r"^dns:back$"))
-    app.add_handler(CallbackQueryHandler(docker_list_menu, pattern=r"^docker:list$"))
-    app.add_handler(CallbackQueryHandler(docker_back_to_status, pattern=r"^docker:back$"))
-    app.add_handler(CallbackQueryHandler(docker_show, pattern=r"^docker:show:[a-zA-Z0-9_.\-]{1,64}$"))
-    app.add_handler(CallbackQueryHandler(docker_inspect, pattern=r"^docker:inspect:[a-zA-Z0-9_.\-]{1,64}$"))
-    app.add_handler(CallbackQueryHandler(docker_logs, pattern=r"^docker:logs:[a-zA-Z0-9_.\-]{1,64}:\d{1,3}$"))
+    app.add_handler(CallbackQueryHandler(status_pick_cb, pattern=r"^status:pick$"))
+    app.add_handler(CallbackQueryHandler(status_show_cb, pattern=r"^status:show:[a-z0-9_-]{1,12}$"))
+    app.add_handler(CallbackQueryHandler(dns_check_cb, pattern=r"^dns:check:[a-z0-9_-]{1,12}$"))
+    app.add_handler(CallbackQueryHandler(dns_back_cb, pattern=r"^dns:back:[a-z0-9_-]{1,12}$"))
+    app.add_handler(CallbackQueryHandler(docker_list_menu, pattern=r"^docker:list:[a-z0-9_-]{1,12}$"))
+    app.add_handler(CallbackQueryHandler(docker_back_to_status, pattern=r"^docker:back:[a-z0-9_-]{1,12}$"))
+    app.add_handler(
+        CallbackQueryHandler(docker_show, pattern=r"^docker:show:[a-z0-9_-]{1,12}:[a-zA-Z0-9_.\-]{1,64}$")
+    )
+    app.add_handler(
+        CallbackQueryHandler(docker_inspect, pattern=r"^docker:inspect:[a-z0-9_-]{1,12}:[a-zA-Z0-9_.\-]{1,64}$")
+    )
+    app.add_handler(
+        CallbackQueryHandler(docker_logs, pattern=r"^docker:logs:[a-z0-9_-]{1,12}:[a-zA-Z0-9_.\-]{1,64}:\d{1,3}$")
+    )
 
     app.add_handler(CommandHandler("fail2ban", fail2ban_menu))
-    app.add_handler(CallbackQueryHandler(f2b_menu_cb, pattern=r"^f2b:menu$"))
-    app.add_handler(CallbackQueryHandler(f2b_tail_cb, pattern=r"^f2b:tail:\d{1,5}$"))
-    app.add_handler(CallbackQueryHandler(f2b_digest_cb, pattern=r"^f2b:digest$"))
-    app.add_handler(CallbackQueryHandler(f2b_back_cb, pattern=r"^f2b:back$"))
+    app.add_handler(CallbackQueryHandler(f2b_menu_cb, pattern=r"^f2b:menu:[a-z0-9_-]{1,12}$"))
+    app.add_handler(CallbackQueryHandler(f2b_tail_cb, pattern=r"^f2b:tail:[a-z0-9_-]{1,12}:\d{1,5}$"))
+    app.add_handler(CallbackQueryHandler(f2b_digest_cb, pattern=r"^f2b:digest:[a-z0-9_-]{1,12}$"))
+    app.add_handler(CallbackQueryHandler(f2b_back_cb, pattern=r"^f2b:back:[a-z0-9_-]{1,12}$"))
 
     app.add_handler(
         MessageHandler(
