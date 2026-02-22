@@ -13,7 +13,6 @@ from ..services.remote_service import (
     remote_docker_containers,
     remote_disk_root,
     remote_meminfo,
-    remote_resolve_a_record_system,
     remote_ufw_status_basic,
     remote_ufw_summary_for_admin,
 )
@@ -228,23 +227,19 @@ async def build_dns_status_message(server_key: Optional[str]) -> str:
     if expected_ip:
         lines.append(f"• Ожидаемый IP: <code>{html_escape(expected_ip)}</code>")
 
-    if server.mode == "ssh":
-        lines.append(f"• Режим проверки: <code>system resolver via SSH ({html_escape(server.ssh_target)})</code>")
+    custom_resolvers_supported = dns_supports_custom_resolver()
+    if custom_resolvers_supported:
         for d in domains:
-            dns_map[d] = {"system": await remote_resolve_a_record_system(server.ssh_target, d)}
-        resolver_labels = ["system"]
+            ips_by = await asyncio.gather(*[resolve_a_record(d, resolver=r) for r in DNS_RESOLVERS])
+            dns_map[d] = {r: ips for r, ips in zip(DNS_RESOLVERS, ips_by)}
+        resolver_labels = list(DNS_RESOLVERS)
+        if server.mode == "ssh":
+            lines.append("• Режим проверки: <code>local resolvers (from bot server)</code>")
     else:
-        custom_resolvers_supported = dns_supports_custom_resolver()
-        if custom_resolvers_supported:
-            for d in domains:
-                ips_by = await asyncio.gather(*[resolve_a_record(d, resolver=r) for r in DNS_RESOLVERS])
-                dns_map[d] = {r: ips for r, ips in zip(DNS_RESOLVERS, ips_by)}
-            resolver_labels = list(DNS_RESOLVERS)
-        else:
-            lines.append("• Режим проверки: <code>system resolver fallback</code> (aiodns не установлен)")
-            for d in domains:
-                dns_map[d] = {"system": await resolve_a_record(d, resolver=None)}
-            resolver_labels = ["system"]
+        lines.append("• Режим проверки: <code>system resolver fallback</code> (aiodns не установлен)")
+        for d in domains:
+            dns_map[d] = {"system": await resolve_a_record(d, resolver=None)}
+        resolver_labels = ["system"]
 
     if not domains:
         lines.append("• Домены для проверки не настроены.")

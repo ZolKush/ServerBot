@@ -8,11 +8,38 @@ from typing import Dict, List, Optional, Sequence, Tuple
 from ..config import DOCKER_BIN, SSH_BIN, SUBPROC_MEDIUM_TIMEOUT, SUBPROC_SHORT_TIMEOUT, SUDO_BIN, TZ, UFW_BIN, logger
 from .system_service import _fmt_bytes_binary, _parse_ufw_rules, parse_fail2ban_events, run_exec
 
+_OUT_BEGIN = "__MBOT_OUT_BEGIN_43e1f3c4__"
+_OUT_END = "__MBOT_OUT_END_43e1f3c4__"
+
+
+def _extract_wrapped_stdout(text: str) -> str:
+    raw = text or ""
+    start = raw.find(_OUT_BEGIN)
+    if start < 0:
+        return raw
+    start = raw.find("\n", start)
+    if start < 0:
+        return ""
+    start += 1
+    end = raw.find(_OUT_END, start)
+    if end < 0:
+        return raw[start:]
+    payload = raw[start:end]
+    return payload[:-1] if payload.endswith("\n") else payload
+
 
 async def ssh_run_shell(target: str, command: str, timeout: int) -> Tuple[int, str, str]:
     tgt = (target or "").strip()
     if not tgt:
         return 127, "", "ssh target is not configured"
+    wrapped = (
+        "PATH=/usr/sbin:/usr/bin:/sbin:/bin:$PATH; export PATH; "
+        f"printf '%s\\n' {shlex.quote(_OUT_BEGIN)}; "
+        f"{command}; "
+        "rc=$?; "
+        f"printf '\\n%s\\n' {shlex.quote(_OUT_END)}; "
+        "exit $rc"
+    )
     args = [
         SSH_BIN,
         "-o",
@@ -24,9 +51,10 @@ async def ssh_run_shell(target: str, command: str, timeout: int) -> Tuple[int, s
         tgt,
         "sh",
         "-c",
-        command,
+        wrapped,
     ]
-    return await run_exec(args, timeout=max(timeout + 2, 5))
+    rc, out, err = await run_exec(args, timeout=max(timeout + 2, 5))
+    return rc, _extract_wrapped_stdout(out), err
 
 
 async def ssh_run_exec(target: str, argv: Sequence[str], timeout: int) -> Tuple[int, str, str]:
@@ -198,13 +226,23 @@ async def remote_ufw_summary_for_admin(ssh_target: str) -> Tuple[str, List[str],
 
 
 async def remote_docker_containers(ssh_target: str, names: Sequence[str]) -> List[Tuple[str, bool, str, str]]:
-    docker_bin = DOCKER_BIN or "/usr/bin/docker"
-    rc, _, _ = await ssh_run_exec(ssh_target, [docker_bin, "info"], timeout=SUBPROC_SHORT_TIMEOUT)
-    if rc != 0 and SUDO_BIN:
-        rc, _, _ = await ssh_run_exec(ssh_target, [SUDO_BIN, "-n", docker_bin, "info"], timeout=SUBPROC_SHORT_TIMEOUT)
-        docker_prefix = [SUDO_BIN, "-n", docker_bin]
-    else:
-        docker_prefix = [docker_bin]
+    docker_candidates = [DOCKER_BIN, "/usr/bin/docker", "docker"]
+    docker_prefix: List[str] = []
+    rc = 127
+    for docker_bin in [x for x in docker_candidates if x]:
+        rc, _, _ = await ssh_run_exec(ssh_target, [docker_bin, "info"], timeout=SUBPROC_SHORT_TIMEOUT)
+        if rc == 0:
+            docker_prefix = [docker_bin]
+            break
+        if SUDO_BIN:
+            rc, _, _ = await ssh_run_exec(
+                ssh_target,
+                [SUDO_BIN, "-n", docker_bin, "info"],
+                timeout=SUBPROC_SHORT_TIMEOUT,
+            )
+            if rc == 0:
+                docker_prefix = [SUDO_BIN, "-n", docker_bin]
+                break
     if rc != 0:
         return [(n, False, "docker недоступен", "-") for n in names]
 
@@ -244,14 +282,16 @@ async def remote_docker_containers(ssh_target: str, names: Sequence[str]) -> Lis
 
 
 async def remote_docker_inspect_summary(ssh_target: str, name: str) -> str:
-    docker_bin = DOCKER_BIN or "/usr/bin/docker"
-    rc, out, err = await ssh_run_exec(ssh_target, [docker_bin, "inspect", name], timeout=SUBPROC_MEDIUM_TIMEOUT)
-    if rc != 0 and SUDO_BIN:
-        rc, out, err = await ssh_run_exec(
-            ssh_target,
-            [SUDO_BIN, "-n", docker_bin, "inspect", name],
-            timeout=SUBPROC_MEDIUM_TIMEOUT,
-        )
+    cmds: List[List[str]] = []
+    for docker_bin in [x for x in [DOCKER_BIN, "/usr/bin/docker", "docker"] if x]:
+        cmds.append([docker_bin, "inspect", name])
+        if SUDO_BIN:
+            cmds.append([SUDO_BIN, "-n", docker_bin, "inspect", name])
+    rc, out, err = 127, "", "docker inspect unavailable"
+    for cmd in cmds:
+        rc, out, err = await ssh_run_exec(ssh_target, cmd, timeout=SUBPROC_MEDIUM_TIMEOUT)
+        if rc == 0:
+            break
     if rc != 0:
         return f"docker inspect error: {err.strip() or out.strip() or 'н/д'}"
     try:
@@ -304,18 +344,23 @@ async def remote_docker_inspect_summary(ssh_target: str, name: str) -> str:
 
 
 async def remote_docker_logs_tail(ssh_target: str, name: str, tail: int) -> str:
-    docker_bin = DOCKER_BIN or "/usr/bin/docker"
-    rc, out, err = await ssh_run_exec(
-        ssh_target,
-        [docker_bin, "logs", "--tail", str(int(tail)), name],
-        timeout=SUBPROC_MEDIUM_TIMEOUT,
-    )
-    if rc != 0 and SUDO_BIN:
+    rc, out, err = 127, "", "docker logs unavailable"
+    for docker_bin in [x for x in [DOCKER_BIN, "/usr/bin/docker", "docker"] if x]:
         rc, out, err = await ssh_run_exec(
             ssh_target,
-            [SUDO_BIN, "-n", docker_bin, "logs", "--tail", str(int(tail)), name],
+            [docker_bin, "logs", "--tail", str(int(tail)), name],
             timeout=SUBPROC_MEDIUM_TIMEOUT,
         )
+        if rc == 0:
+            break
+        if SUDO_BIN:
+            rc, out, err = await ssh_run_exec(
+                ssh_target,
+                [SUDO_BIN, "-n", docker_bin, "logs", "--tail", str(int(tail)), name],
+                timeout=SUBPROC_MEDIUM_TIMEOUT,
+            )
+            if rc == 0:
+                break
     if rc != 0:
         return f"docker logs error: {err.strip() or out.strip() or 'н/д'}"
     return out
