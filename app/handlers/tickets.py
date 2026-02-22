@@ -9,6 +9,7 @@ from ..config import TZ
 from ..storage import ImportantData, update_important_data
 from .common import (
     authorized_ids,
+    clip_text,
     display_name,
     get_user_id,
     html_escape,
@@ -18,6 +19,8 @@ from .common import (
 )
 
 TICKET_SUBJECT, TICKET_URGENCY, TICKET_TEXT, TICKET_CONFIRM = range(4)
+MAX_TICKET_SUBJECT_LEN = 160
+MAX_TICKET_TEXT_LEN = 3200
 
 
 def ticket_urgency_kb() -> InlineKeyboardMarkup:
@@ -50,6 +53,10 @@ async def ticket_subject(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if msg:
             await msg.reply_text("Тема слишком короткая. Введите минимум 3 символа.")
         return TICKET_SUBJECT
+    if len(subj) > MAX_TICKET_SUBJECT_LEN:
+        if msg:
+            await msg.reply_text(f"Тема слишком длинная. Максимум {MAX_TICKET_SUBJECT_LEN} символов.")
+        return TICKET_SUBJECT
 
     context.user_data["ticket_subject"] = subj
     if msg:
@@ -78,18 +85,23 @@ async def ticket_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if msg:
             await msg.reply_text("Описание слишком короткое. Дайте больше деталей (>= 10 символов).")
         return TICKET_TEXT
+    if len(text) > MAX_TICKET_TEXT_LEN:
+        if msg:
+            await msg.reply_text(f"Описание слишком длинное. Максимум {MAX_TICKET_TEXT_LEN} символов.")
+        return TICKET_TEXT
 
     context.user_data["ticket_text"] = text
 
     subj = context.user_data.get("ticket_subject", "-")
     urg = str(context.user_data.get("ticket_urgency", "p3")).upper()
 
+    text_for_preview = clip_text(str(text), limit=3000)
     preview = (
         "<b>Проверьте тикет</b>\n"
         f"• Тема: <code>{html_escape(str(subj))}</code>\n"
         f"• Срочность: <code>{html_escape(str(urg))}</code>\n\n"
         "Описание:\n"
-        + wrap_as_codeblock_html(str(text))
+        + wrap_as_codeblock_html(text_for_preview)
     )
     if msg:
         await msg.reply_text(preview, parse_mode=ParseMode.HTML, reply_markup=ticket_confirm_kb())
@@ -105,18 +117,23 @@ async def ticket_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if q.data != "ticket:send":
         return ConversationHandler.END
 
+    uid = get_user_id(update)
+    author_name = display_name(update)
+    subj = context.user_data.get("ticket_subject", "-")
+    urg = str(context.user_data.get("ticket_urgency", "p3")).upper()
+    txt = clip_text(str(context.user_data.get("ticket_text", "-")), limit=3000)
+    created = datetime.now(TZ).strftime("%d.%m.%Y %H:%M")
+
+    admins = authorized_ids(role_filter="admin")
+    if not admins:
+        await q.edit_message_text("Тикет не отправлен: нет авторизованных администраторов.")
+        return ConversationHandler.END
+
     def _next_ticket(cfg: ImportantData) -> int:
         cfg.tickets_seq += 1
         return cfg.tickets_seq
 
     ticket_id = await update_important_data(_next_ticket)
-
-    uid = get_user_id(update)
-    author_name = display_name(update)
-    subj = context.user_data.get("ticket_subject", "-")
-    urg = str(context.user_data.get("ticket_urgency", "p3")).upper()
-    txt = context.user_data.get("ticket_text", "-")
-    created = datetime.now(TZ).strftime("%d.%m.%Y %H:%M")
 
     msg_text = (
         f"🎫 <b>Новый тикет #{ticket_id}</b>\n"
@@ -126,11 +143,6 @@ async def ticket_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• Тема: <code>{html_escape(str(subj))}</code>\n\n"
         f"Описание:\n{wrap_as_codeblock_html(str(txt))}"
     )
-
-    admins = authorized_ids(role_filter="admin")
-    if not admins:
-        await q.edit_message_text("Тикет не отправлен: нет авторизованных администраторов.")
-        return ConversationHandler.END
 
     ok, fail = await send_to_many(context, admins, msg_text)
     await q.edit_message_text(f"Тикет отправлен админам ✅ (ok={ok}, fail={fail})")

@@ -12,7 +12,8 @@ from ..services.system_service import (
     Fail2banEvent,
     load_json_file,
     parse_fail2ban_events,
-    read_fail2ban_new_lines_async,
+    read_fail2ban_new_lines_with_state_async,
+    save_json_file,
     tail_text_file_async,
 )
 from .common import authorized_ids, clip_text, html_escape, require_admin, send_to_many, wrap_as_codeblock_html
@@ -123,11 +124,20 @@ def build_fail2ban_digest_text(events: List[Fail2banEvent], since: datetime, unt
         if v["unban"]:
             lines.append(f"• unbans: <code>{v['unban']}</code>")
 
-    out = "\n".join(lines)
-
-    if len(out) > 3800:
-        out = out[:3700] + "\n… (обрезано из-за лимита Telegram)"
-    return out
+    limit = 3800
+    out_lines: List[str] = []
+    cur_len = 0
+    truncated = False
+    for line in lines:
+        extra = len(line) + (1 if out_lines else 0)
+        if cur_len + extra > limit - 40:
+            truncated = True
+            break
+        out_lines.append(line)
+        cur_len += extra
+    if truncated:
+        out_lines.append("… (обрезано из-за лимита Telegram)")
+    return "\n".join(out_lines)
 
 
 @require_admin
@@ -225,13 +235,17 @@ async def f2b_back_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 async def fail2ban_daily_digest(context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         st_before = await load_json_file(FAIL2BAN_STATE_PATH)
-        raw_lines = await read_fail2ban_new_lines_async(FAIL2BAN_LOG_PATH, FAIL2BAN_STATE_PATH)
+        raw_lines, new_state = await read_fail2ban_new_lines_with_state_async(FAIL2BAN_LOG_PATH, FAIL2BAN_STATE_PATH)
         if not raw_lines:
+            if new_state is not None:
+                await save_json_file(FAIL2BAN_STATE_PATH, new_state)
             return
         events = parse_fail2ban_events(raw_lines)
 
         ban_events = [e for e in events if e.action in ("Ban", "Restore Ban")]
         if not ban_events:
+            if new_state is not None:
+                await save_json_file(FAIL2BAN_STATE_PATH, new_state)
             return
 
         until = datetime.now(tz=TZ)
@@ -248,7 +262,11 @@ async def fail2ban_daily_digest(context: ContextTypes.DEFAULT_TYPE) -> None:
 
         admin_ids = authorized_ids(role_filter="admin")
         if not admin_ids:
+            if new_state is not None:
+                await save_json_file(FAIL2BAN_STATE_PATH, new_state)
             return
         await send_to_many(context, admin_ids, payload)
+        if new_state is not None:
+            await save_json_file(FAIL2BAN_STATE_PATH, new_state)
     except Exception:
         logger.exception("fail2ban_daily_digest error")

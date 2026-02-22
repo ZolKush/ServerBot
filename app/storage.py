@@ -217,5 +217,5 @@ def _clear_maintenance(cfg: ImportantData) -> None:
 def _get_active_maintenance() -> Optional[Dict[str, Any]]:
     m = getattr(IMPORTANT_DATA, "maintenance", None)
     if isinstance(m, dict) and m.get("active"):
-        return m
+        return dict(m)
     return None

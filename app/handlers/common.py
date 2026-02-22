@@ -40,7 +40,8 @@ def get_user_id(update: Update) -> Optional[int]:
 
 
 def get_user_meta(uid: int) -> Optional[Dict[str, Any]]:
-    return USER_DATA.authorized_users.get(str(uid))
+    meta = USER_DATA.authorized_users.get(str(uid))
+    return dict(meta) if isinstance(meta, dict) else None
 
 
 def is_authorized(update: Update) -> bool:

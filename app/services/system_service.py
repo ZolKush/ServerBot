@@ -27,6 +27,10 @@ except Exception:  # pragma: no cover - fallback when aiodns is missing
     aiodns = None
 
 
+def dns_supports_custom_resolver() -> bool:
+    return aiodns is not None
+
+
 async def run_exec(args: Sequence[str], timeout: int) -> Tuple[int, str, str]:
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -483,6 +487,21 @@ async def read_fail2ban_new_lines_async(
     state_path: str,
     max_read_bytes: int = 5_000_000,
 ) -> List[str]:
+    lines_out, new_state = await read_fail2ban_new_lines_with_state_async(
+        log_path=log_path,
+        state_path=state_path,
+        max_read_bytes=max_read_bytes,
+    )
+    if new_state is not None:
+        await save_json_file(state_path, new_state)
+    return lines_out
+
+
+async def read_fail2ban_new_lines_with_state_async(
+    log_path: str,
+    state_path: str,
+    max_read_bytes: int = 5_000_000,
+) -> Tuple[List[str], Optional[Dict[str, Any]]]:
     async with FAIL2BAN_STATE_LOCK:
         state = await load_json_file(state_path)
         lines_out, new_state = await asyncio.to_thread(
@@ -491,9 +510,7 @@ async def read_fail2ban_new_lines_async(
             state,
             max_read_bytes,
         )
-        if new_state is not None:
-            await save_json_file(state_path, new_state)
-        return lines_out
+        return lines_out, new_state
 
 
 @dataclass(frozen=True)
@@ -516,12 +533,12 @@ def parse_fail2ban_events(lines_in: Iterable[str]) -> List[Fail2banEvent]:
             continue
         msg = (m.group("msg") or "").strip()
         action = "-"
-        if "Ban" in msg:
-            action = "Ban"
+        if "Restore Ban" in msg:
+            action = "Restore Ban"
         elif "Unban" in msg:
             action = "Unban"
-        elif "Restore Ban" in msg:
-            action = "Restore Ban"
+        elif "Ban" in msg:
+            action = "Ban"
         elif "Jail started" in msg:
             action = "Jail started"
         elif "Jail stopped" in msg:

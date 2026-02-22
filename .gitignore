@@ -6,3 +6,7 @@
 
 # runtime data
 data/
+
+.idea/
+__pycache__/
+*.py[cod]

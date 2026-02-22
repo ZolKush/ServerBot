@@ -9,6 +9,7 @@ from ..config import logger
 from ..storage import USER_DATA, update_user_data, _set_user_meta
 from .common import (
     authorized_ids,
+    clip_text,
     display_name_from_meta,
     get_user_id,
     get_user_meta,
@@ -201,7 +202,7 @@ async def users_all_msg_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await msg.reply_text("Нет получателей.")
         return ADMIN_PICK
 
-    payload = f"📩 <b>Сообщение администратора</b>\n\n{html_escape(text)}"
+    payload = f"📩 <b>Сообщение администратора</b>\n\n{html_escape(clip_text(text, limit=3000))}"
     ok, fail = await send_to_many(context, recipients, payload)
     if msg:
         await msg.reply_text(f"Отправлено всем: ✅ {ok}, ❌ {fail}")
@@ -311,7 +312,7 @@ async def users_user_msg_text(update: Update, context: ContextTypes.DEFAULT_TYPE
             await msg.reply_text("Пустой текст. Введите сообщение:")
         return ADMIN_USER_MSG_TEXT
 
-    payload = f"📩 <b>Сообщение от администратора</b>\n\n{html_escape(text)}"
+    payload = f"📩 <b>Сообщение от администратора</b>\n\n{html_escape(clip_text(text, limit=3000))}"
     try:
         await context.bot.send_message(chat_id=uid, text=payload, parse_mode=ParseMode.HTML)
         if msg:
@@ -380,7 +381,7 @@ async def users_user_cfg_text(update: Update, context: ContextTypes.DEFAULT_TYPE
         return ADMIN_PICK
 
     header = "📦 <b>Конфигурация от администратора</b>\n\n"
-    payload = header + wrap_as_codeblock_html(cfg)
+    payload = header + wrap_as_codeblock_html(clip_text(cfg, limit=3000))
 
     try:
         await context.bot.send_message(chat_id=uid, text=payload, parse_mode=ParseMode.HTML)

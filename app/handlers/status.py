@@ -16,6 +16,7 @@ from ..services.docker_service import docker_containers
 from ..services.system_service import (
     check_uptime,
     disk_root,
+    dns_supports_custom_resolver,
     meminfo,
     resolve_a_record,
     ufw_status_basic,
@@ -33,17 +34,20 @@ async def cmd_health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def build_status_message(update: Update) -> Tuple[str, Optional[InlineKeyboardMarkup]]:
-    up = await check_uptime()
-    mem = await meminfo()
-    disk = await disk_root()
+    admin_mode = is_admin(update)
+    up, mem, disk, cont, ufw_data = await asyncio.gather(
+        check_uptime(),
+        meminfo(),
+        disk_root(),
+        docker_containers(MONITOR_CONTAINERS),
+        ufw_summary_for_admin() if admin_mode else ufw_status_basic(),
+    )
 
-    if is_admin(update):
-        ufw_s, allow, deny, reject = await ufw_summary_for_admin()
+    if admin_mode:
+        ufw_s, allow, deny, reject = ufw_data
     else:
-        ufw_s = await ufw_status_basic()
+        ufw_s = str(ufw_data)
         allow, deny, reject = [], [], []
-
-    cont = await docker_containers(MONITOR_CONTAINERS)
 
     # ping and loadavg aren't part of the requested status layout
 
@@ -94,7 +98,7 @@ async def build_status_message(update: Update) -> Tuple[str, Optional[InlineKeyb
         lines.append(f"{emoji} {html_escape(name)} — {html_escape(st)} (restarts: {html_escape(rst)})")
 
     rows: List[List[InlineKeyboardButton]] = []
-    if is_admin(update):
+    if admin_mode:
         rows.append([InlineKeyboardButton("🐳 Docker: inspect/logs", callback_data="docker:list")])
         rows.append([InlineKeyboardButton("🛡️ Fail2ban: logs", callback_data="f2b:menu")])
     rows.append([InlineKeyboardButton("DNS проверка", callback_data="dns:check")])
@@ -108,17 +112,25 @@ async def build_dns_status_message() -> str:
     dns_resolvers = DNS_RESOLVERS
     dns_map: Dict[str, Dict[str, List[str]]] = {}
 
-    for d in domains:
-        ips_by = await asyncio.gather(*[resolve_a_record(d, resolver=r) for r in dns_resolvers])
-        dns_map[d] = {r: ips for r, ips in zip(dns_resolvers, ips_by)}
+    custom_resolvers_supported = dns_supports_custom_resolver()
+    if custom_resolvers_supported:
+        for d in domains:
+            ips_by = await asyncio.gather(*[resolve_a_record(d, resolver=r) for r in dns_resolvers])
+            dns_map[d] = {r: ips for r, ips in zip(dns_resolvers, ips_by)}
+    else:
+        for d in domains:
+            dns_map[d] = {"system": await resolve_a_record(d, resolver=None)}
 
     lines: List[str] = []
     lines.append("<b>DNS A-записи</b>")
     lines.append(f"• Ожидаемый IP: <code>{html_escape(expected_ip)}</code>")
+    if not custom_resolvers_supported:
+        lines.append("• Режим проверки: <code>system resolver fallback</code> (aiodns не установлен)")
     for dom in domains:
         lines.append(f"• <code>{html_escape(dom)}</code>")
         per = dns_map.get(dom, {})
-        for r in dns_resolvers:
+        resolver_labels = dns_resolvers if custom_resolvers_supported else ["system"]
+        for r in resolver_labels:
             ips = per.get(r, []) or []
             ips_s = ", ".join(ips) if ips else "н/д"
             ok = bool(ips) and (expected_ip in ips)

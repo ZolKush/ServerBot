@@ -1,6 +1,7 @@
 import re
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional, Tuple
+from uuid import uuid4
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
@@ -81,7 +82,7 @@ def _build_maint_record(urgency: str, hh: int, mm: int, author_id: Optional[int]
     now = datetime.now(TZ)
     duration_min = _hhmm_to_minutes(hh, mm)
     expected_end = now + timedelta(minutes=duration_min)
-    maint_id = str(int(now.timestamp()))
+    maint_id = uuid4().hex
     return {
         "id": maint_id,
         "active": True,
@@ -181,6 +182,16 @@ def _maint_restart_text(maint: Dict[str, Any]) -> str:
 
 @require_admin
 async def maint_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    active = _get_active_maintenance()
+    if active and str(active.get("id") or ""):
+        msg = update.effective_message
+        if msg:
+            await msg.reply_text(
+                _maint_panel_text(active),
+                parse_mode=ParseMode.HTML,
+                reply_markup=_maint_control_kb(str(active["id"])),
+            )
+        return ConversationHandler.END
     msg = update.effective_message
     if msg:
         await msg.reply_text("Выберите тип работ:", reply_markup=urgency_kb())
@@ -293,13 +304,26 @@ async def maint_extend_duration(update: Update, context: ContextTypes.DEFAULT_TY
 
     hh, mm = parsed
     duration_min = _hhmm_to_minutes(hh, mm)
-    now = datetime.now(TZ)
-    expected_end = now + timedelta(minutes=duration_min)
-    maint["duration_min"] = duration_min
-    maint["expected_end"] = expected_end.isoformat()
-    maint["updated_at"] = now.isoformat()
 
-    await update_important_data(lambda cfg: _set_maintenance(cfg, maint))
+    def _extend_current(cfg):
+        current = getattr(cfg, "maintenance", {})
+        if not isinstance(current, dict) or not current.get("active"):
+            raise RuntimeError("maintenance_not_active")
+        if str(current.get("id")) != str(maint_id):
+            raise RuntimeError("maintenance_changed")
+        now = datetime.now(TZ)
+        updated = dict(current)
+        updated["duration_min"] = duration_min
+        updated["expected_end"] = (now + timedelta(minutes=duration_min)).isoformat()
+        updated["updated_at"] = now.isoformat()
+        return _set_maintenance(cfg, updated)
+
+    try:
+        maint = await update_important_data(_extend_current)
+    except RuntimeError:
+        if msg:
+            await msg.reply_text("Техработы не активны или уже завершены.")
+        return ConversationHandler.END
 
     author = display_name(update)
     notice = _maint_extend_notice(maint, hh, mm, author)
