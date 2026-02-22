@@ -233,8 +233,6 @@ async def build_dns_status_message(server_key: Optional[str]) -> str:
             ips_by = await asyncio.gather(*[resolve_a_record(d, resolver=r) for r in DNS_RESOLVERS])
             dns_map[d] = {r: ips for r, ips in zip(DNS_RESOLVERS, ips_by)}
         resolver_labels = list(DNS_RESOLVERS)
-        if server.mode == "ssh":
-            lines.append("• Режим проверки: <code>local resolvers (from bot server)</code>")
     else:
         lines.append("• Режим проверки: <code>system resolver fallback</code> (aiodns не установлен)")
         for d in domains:
