@@ -1,0 +1,12 @@
+# env files (любые)
+.env
+**/.env
+.env.*
+**/.env.*
+
+# runtime data
+data/
+
+.idea/
+__pycache__/
+*.py[cod]
