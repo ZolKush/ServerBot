@@ -2,15 +2,20 @@ import json
 import re
 from typing import Dict, List, Sequence, Tuple
 
-from ..config import DOCKER_BIN, MONITOR_CONTAINER_SET, SUBPROC_MEDIUM_TIMEOUT, SUBPROC_SHORT_TIMEOUT
+from ..config import ALL_MONITOR_CONTAINER_SET, DOCKER_BIN, SUBPROC_MEDIUM_TIMEOUT, SUBPROC_SHORT_TIMEOUT
 from .system_service import run_exec
 
 _CONTAINER_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.\-]{0,62}$")
 
 
+def is_valid_container_name(name: str) -> bool:
+    nm = (name or "").strip()
+    return bool(nm and _CONTAINER_NAME_RE.fullmatch(nm))
+
+
 def is_allowed_container(name: str) -> bool:
     nm = (name or "").strip()
-    return bool(nm and _CONTAINER_NAME_RE.fullmatch(nm) and nm in MONITOR_CONTAINER_SET)
+    return bool(is_valid_container_name(nm) and nm in ALL_MONITOR_CONTAINER_SET)
 
 
 async def docker_containers(names: Sequence[str]) -> List[Tuple[str, bool, str, str]]:

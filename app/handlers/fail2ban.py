@@ -7,17 +7,16 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
-from ..config import FAIL2BAN_LOG_PATH, FAIL2BAN_STATE_PATH, SERVERS, TZ, logger
+from ..config import FAIL2BAN_STATE_PATH, SERVERS, TZ, logger
 from ..services.remote_service import remote_fail2ban_events_last_day, remote_fail2ban_stat, remote_tail_text_file
 from ..services.system_service import (
     Fail2banEvent,
     load_json_file,
     parse_fail2ban_events,
-    read_fail2ban_new_lines_with_state_async,
     save_json_file,
     tail_text_file_async,
 )
-from .common import authorized_ids, clip_text, html_escape, require_admin, send_to_many, wrap_as_codeblock_html
+from .common import breadcrumbs, authorized_ids, clip_text, html_escape, require_admin, send_to_many, ui_error_text, wrap_as_codeblock_html
 from .status import build_status_message, get_server_target
 
 
@@ -26,6 +25,7 @@ def _f2b_menu_kb(server_key: str) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📜 Логи (tail)", callback_data=f"f2b:tail:{server_key}:200")],
         [InlineKeyboardButton("🧾 Выжимка за сутки", callback_data=f"f2b:digest:{server_key}")],
         [InlineKeyboardButton("🔙 Назад", callback_data=f"f2b:back:{server_key}")],
+        [InlineKeyboardButton("🏠 Меню", callback_data="menu:home")],
     ]
     return InlineKeyboardMarkup(rows)
 
@@ -36,11 +36,18 @@ def _f2b_tail_kb(server_key: str, current: int) -> InlineKeyboardMarkup:
     for n in choices:
         label = f"{n} строк" + (" ✅" if n == current else "")
         row.append(InlineKeyboardButton(label, callback_data=f"f2b:tail:{server_key}:{n}"))
-    return InlineKeyboardMarkup([row, [InlineKeyboardButton("🔙 Назад", callback_data=f"f2b:menu:{server_key}")]])
+    return InlineKeyboardMarkup(
+        [row, [InlineKeyboardButton("🔙 Назад", callback_data=f"f2b:menu:{server_key}")], [InlineKeyboardButton("🏠 Меню", callback_data="menu:home")]]
+    )
 
 
 def _f2b_digest_kb(server_key: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data=f"f2b:menu:{server_key}")]])
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("🔙 Назад", callback_data=f"f2b:menu:{server_key}")],
+            [InlineKeyboardButton("🏠 Меню", callback_data="menu:home")],
+        ]
+    )
 
 
 def _fmt_dt(dt: datetime) -> str:
@@ -59,6 +66,42 @@ def _parse_server_tail(data: str) -> Optional[tuple[str, int]]:
     return m.group(1), int(m.group(2))
 
 
+def _daily_state_path_for_server(server_key: str) -> str:
+    p = Path(FAIL2BAN_STATE_PATH)
+    suffix = p.suffix or ".json"
+    stem = p.name[: -len(suffix)] if p.name.endswith(suffix) else p.name
+    fname = f"{stem}.{server_key}{suffix}"
+    return str(p.with_name(fname))
+
+
+def _window_from_state(st: Dict[str, Any], until: datetime) -> datetime:
+    try:
+        if st.get("updated_at"):
+            return datetime.fromisoformat(str(st["updated_at"])).astimezone(TZ) - timedelta(seconds=1)
+    except Exception:
+        pass
+    return until - timedelta(days=1)
+
+
+async def _daily_digest_events_for_server(server_key: str, since: datetime, until: datetime) -> tuple[Optional[object], Optional[str]]:
+    srv = SERVERS.get(server_key)
+    if not srv:
+        return None, "server_not_found"
+    try:
+        if srv.mode == "ssh":
+            events = await remote_fail2ban_events_last_day(srv.ssh_target, srv.fail2ban_log_path)
+        else:
+            raw_tail = await tail_text_file_async(srv.fail2ban_log_path, n_lines=20000, max_bytes=3_000_000)
+            events = parse_fail2ban_events(raw_tail.splitlines())
+        return [e for e in events if since <= e.ts <= until], None
+    except FileNotFoundError:
+        return None, f"Лог-файл не найден: {srv.fail2ban_log_path}"
+    except PermissionError:
+        return None, f"Нет прав на чтение: {srv.fail2ban_log_path}"
+    except Exception as e:
+        return None, str(e)
+
+
 async def build_fail2ban_menu_text(server_key: str) -> str:
     srv = get_server_target(server_key)
     if not srv:
@@ -69,7 +112,7 @@ async def build_fail2ban_menu_text(server_key: str) -> str:
         if st is not None:
             size_bytes, mtime = st
             return (
-                f"🛡 <b>Fail2ban ({html_escape(srv.label)})</b>\n\n"
+                f"<b>{html_escape(breadcrumbs('Админ-панель', 'Fail2ban', srv.label))}</b>\n\n"
                 f"Файл: <code>{html_escape(str(p))}</code>\n"
                 f"SSH host: <code>{html_escape(srv.ssh_target)}</code>\n"
                 f"Размер: <code>{size_bytes / 1024.0:.1f} KiB</code>\n"
@@ -77,7 +120,7 @@ async def build_fail2ban_menu_text(server_key: str) -> str:
                 "Действия:"
             )
         return (
-            f"🛡 <b>Fail2ban ({html_escape(srv.label)})</b>\n\n"
+            f"<b>{html_escape(breadcrumbs('Админ-панель', 'Fail2ban', srv.label))}</b>\n\n"
             f"Файл: <code>{html_escape(str(p))}</code>\n"
             f"SSH host: <code>{html_escape(srv.ssh_target)}</code>\n\n"
             "Действия:"
@@ -88,7 +131,7 @@ async def build_fail2ban_menu_text(server_key: str) -> str:
         mtime = datetime.fromtimestamp(st_local.st_mtime, tz=TZ)
         size_kb = st_local.st_size / 1024.0
         return (
-            f"🛡 <b>Fail2ban ({html_escape(srv.label)})</b>\n\n"
+            f"<b>{html_escape(breadcrumbs('Админ-панель', 'Fail2ban', srv.label))}</b>\n\n"
             f"Файл: <code>{html_escape(str(p))}</code>\n"
             f"Размер: <code>{size_kb:.1f} KiB</code>\n"
             f"Изменён: <code>{html_escape(_fmt_dt(mtime))}</code>\n\n"
@@ -96,7 +139,7 @@ async def build_fail2ban_menu_text(server_key: str) -> str:
         )
     except Exception:
         return (
-            f"🛡 <b>Fail2ban ({html_escape(srv.label)})</b>\n\n"
+            f"<b>{html_escape(breadcrumbs('Админ-панель', 'Fail2ban', srv.label))}</b>\n\n"
             f"Файл: <code>{html_escape(str(p))}</code>\n\n"
             "Действия:"
         )
@@ -168,15 +211,17 @@ def build_fail2ban_digest_text(events: List[Fail2banEvent], since: datetime, unt
 
 @require_admin
 async def fail2ban_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
     msg = update.effective_message
     if not msg:
         return
     server_key = next(iter(SERVERS.keys()), "")
-    await msg.reply_text(
-        await build_fail2ban_menu_text(server_key),
-        parse_mode=ParseMode.HTML,
-        reply_markup=_f2b_menu_kb(server_key),
-    )
+    text = await build_fail2ban_menu_text(server_key)
+    if q:
+        await q.answer()
+        await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=_f2b_menu_kb(server_key))
+    else:
+        await msg.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=_f2b_menu_kb(server_key))
 
 
 @require_admin
@@ -206,7 +251,7 @@ async def f2b_tail_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     n = 200 if n < 50 else (5000 if n > 5000 else n)
     srv = get_server_target(server_key)
     if not srv:
-        await q.edit_message_text("Сервер не найден.")
+        await q.edit_message_text(ui_error_text("сервер не найден."))
         return
 
     try:
@@ -217,19 +262,16 @@ async def f2b_tail_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if not tail_txt.strip():
             payload = f"🛡 <b>Fail2ban: tail ({html_escape(srv.label)})</b>\n\nЛог пуст или отсутствуют строки."
         else:
-            payload = f"🛡 <b>Fail2ban: tail ({html_escape(srv.label)})</b>\n\n" + wrap_as_codeblock_html(clip_text(tail_txt))
+            payload = (
+                f"<b>{html_escape(breadcrumbs('Админ-панель', 'Fail2ban', srv.label, 'Tail'))}</b>\n\n"
+                + wrap_as_codeblock_html(clip_text(tail_txt))
+            )
     except FileNotFoundError:
-        payload = (
-            f"🛡 <b>Fail2ban: tail ({html_escape(srv.label)})</b>\n\n"
-            f"Лог-файл не найден: <code>{html_escape(srv.fail2ban_log_path)}</code>"
-        )
+        payload = ui_error_text(f"лог-файл не найден: {srv.fail2ban_log_path}")
     except PermissionError:
-        payload = (
-            f"🛡 <b>Fail2ban: tail ({html_escape(srv.label)})</b>\n\n"
-            f"Нет прав на чтение: <code>{html_escape(srv.fail2ban_log_path)}</code>"
-        )
+        payload = ui_error_text(f"нет прав на чтение: {srv.fail2ban_log_path}")
     except Exception as e:
-        payload = f"🛡 <b>Fail2ban: tail ({html_escape(srv.label)})</b>\n\nОшибка: <code>{html_escape(str(e))}</code>"
+        payload = ui_error_text(str(e))
 
     await q.edit_message_text(payload, parse_mode=ParseMode.HTML, reply_markup=_f2b_tail_kb(server_key, current=n))
 
@@ -243,7 +285,7 @@ async def f2b_digest_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     server_key = _parse_server_key(q.data or "", "digest") or next(iter(SERVERS.keys()), "")
     srv = get_server_target(server_key)
     if not srv:
-        await q.edit_message_text("Сервер не найден.")
+        await q.edit_message_text(ui_error_text("сервер не найден."))
         return
 
     until = datetime.now(tz=TZ)
@@ -285,39 +327,34 @@ async def f2b_back_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def fail2ban_daily_digest(context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
-        st_before = await load_json_file(FAIL2BAN_STATE_PATH)
-        raw_lines, new_state = await read_fail2ban_new_lines_with_state_async(FAIL2BAN_LOG_PATH, FAIL2BAN_STATE_PATH)
-        if not raw_lines:
-            if new_state is not None:
-                await save_json_file(FAIL2BAN_STATE_PATH, new_state)
-            return
-        events = parse_fail2ban_events(raw_lines)
-
-        ban_events = [e for e in events if e.action in ("Ban", "Restore Ban")]
-        if not ban_events:
-            if new_state is not None:
-                await save_json_file(FAIL2BAN_STATE_PATH, new_state)
+        admin_ids = authorized_ids(role_filter="admin")
+        if not admin_ids:
             return
 
         until = datetime.now(tz=TZ)
-        since = None
-        try:
-            if st_before.get("updated_at"):
-                since = datetime.fromisoformat(st_before["updated_at"]).astimezone(TZ) - timedelta(seconds=1)
-        except Exception:
-            since = None
-        if since is None:
-            since = until - timedelta(days=1)
+        for server_key, srv in SERVERS.items():
+            state_path = _daily_state_path_for_server(server_key)
+            st_before = await load_json_file(state_path)
+            since = _window_from_state(st_before, until)
 
-        payload = build_fail2ban_digest_text(events, since=since, until=until)
+            events, err = await _daily_digest_events_for_server(server_key, since=since, until=until)
+            new_state = {"updated_at": until.isoformat(), "server_key": server_key}
 
-        admin_ids = authorized_ids(role_filter="admin")
-        if not admin_ids:
-            if new_state is not None:
-                await save_json_file(FAIL2BAN_STATE_PATH, new_state)
-            return
-        await send_to_many(context, admin_ids, payload)
-        if new_state is not None:
-            await save_json_file(FAIL2BAN_STATE_PATH, new_state)
+            if err:
+                logger.warning("fail2ban_daily_digest %s (%s) skipped: %s", server_key, srv.label, err)
+                await save_json_file(state_path, new_state)
+                continue
+            if not isinstance(events, list):
+                await save_json_file(state_path, new_state)
+                continue
+
+            ban_events = [e for e in events if e.action in ("Ban", "Restore Ban")]
+            if not ban_events:
+                await save_json_file(state_path, new_state)
+                continue
+
+            payload = f"🌍 <b>Сервер:</b> {html_escape(srv.label)}\n" + build_fail2ban_digest_text(events, since=since, until=until)
+            await send_to_many(context, admin_ids, payload)
+            await save_json_file(state_path, new_state)
     except Exception:
         logger.exception("fail2ban_daily_digest error")

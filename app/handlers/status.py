@@ -25,7 +25,9 @@ from ..services.system_service import (
     ufw_summary_for_admin,
     check_uptime,
 )
-from .common import html_escape, is_admin, now_str, require_auth
+from .common import breadcrumbs, html_escape, is_admin, now_str, require_auth, ui_error_text
+from .status_format import format_status_message
+from .status_models import DockerContainerView, StatusSnapshot
 
 
 def _server_keys() -> List[str]:
@@ -37,12 +39,13 @@ def _first_server_key() -> str:
     return keys[0] if keys else "local"
 
 
+def _default_server_target() -> Optional[ServerTarget]:
+    return SERVERS.get(_first_server_key())
+
+
 def get_server_target(server_key: Optional[str]) -> Optional[ServerTarget]:
     key = (server_key or "").strip().lower()
-    if key and key in SERVERS:
-        return SERVERS[key]
-    first = _first_server_key()
-    return SERVERS.get(first)
+    return SERVERS.get(key) if key else None
 
 
 def _status_pick_kb() -> InlineKeyboardMarkup:
@@ -50,6 +53,7 @@ def _status_pick_kb() -> InlineKeyboardMarkup:
     for key in _server_keys():
         srv = SERVERS[key]
         rows.append([InlineKeyboardButton(f"{_server_flag(srv)} {srv.label}", callback_data=f"status:show:{srv.key}")])
+    rows.append([InlineKeyboardButton("🏠 Меню", callback_data="menu:home")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -67,14 +71,24 @@ def _server_flag(server: ServerTarget) -> str:
     return "🖥"
 
 
-def _status_actions_kb(admin_mode: bool, server_key: str) -> InlineKeyboardMarkup:
+def _status_actions_kb(admin_mode: bool, server_key: str, *, detailed: bool = False) -> InlineKeyboardMarkup:
     rows: List[List[InlineKeyboardButton]] = []
+    rows.append([InlineKeyboardButton("🔄 Обновить", callback_data=f"status:show:{server_key}")])
+    rows.append(
+        [
+            InlineKeyboardButton(
+                "📖 Скрыть детали" if detailed else "📖 Подробнее",
+                callback_data=f"status:detail:{server_key}:{'brief' if detailed else 'full'}",
+            )
+        ]
+    )
     if admin_mode:
         rows.append([InlineKeyboardButton("🐳 Docker: inspect/logs", callback_data=f"docker:list:{server_key}")])
         rows.append([InlineKeyboardButton("🛡️ Fail2ban: logs", callback_data=f"f2b:menu:{server_key}")])
     rows.append([InlineKeyboardButton("DNS проверка", callback_data=f"dns:check:{server_key}")])
     if len(SERVERS) > 1:
         rows.append([InlineKeyboardButton("⬅️ К выбору сервера", callback_data="status:pick")])
+    rows.append([InlineKeyboardButton("🏠 Меню", callback_data="menu:home")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -83,17 +97,41 @@ def _resolve_server_key_from_callback(data: str, prefix: str) -> Optional[str]:
     return m.group(1) if m else None
 
 
+def _parse_status_detail_callback(data: str) -> Optional[Tuple[str, bool]]:
+    m = re.fullmatch(r"status:detail:([a-z0-9_-]{1,12}):(full|brief)", data or "")
+    if not m:
+        return None
+    return m.group(1), (m.group(2) == "full")
+
+
+def _exc_brief(value: object) -> str:
+    if not isinstance(value, Exception):
+        return "н/д"
+    name = value.__class__.__name__
+    text = str(value).strip()
+    return f"{name}: {text}" if text else name
+
+
 @require_auth
 async def cmd_health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
     msg = update.effective_message
     if not msg:
         return
+    if q:
+        await q.answer()
     if len(SERVERS) > 1:
-        await msg.reply_text(_status_pick_text(), parse_mode=ParseMode.HTML, reply_markup=_status_pick_kb())
+        if q:
+            await q.edit_message_text(_status_pick_text(), parse_mode=ParseMode.HTML, reply_markup=_status_pick_kb())
+        else:
+            await msg.reply_text(_status_pick_text(), parse_mode=ParseMode.HTML, reply_markup=_status_pick_kb())
         return
     server_key = _first_server_key()
     text, markup = await build_status_message(update, server_key=server_key)
-    await msg.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+    if q:
+        await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+    else:
+        await msg.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
 
 
 @require_auth
@@ -113,9 +151,26 @@ async def status_show_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await q.answer()
     server_key = _resolve_server_key_from_callback(q.data or "", r"status:show")
     if not get_server_target(server_key):
-        await q.edit_message_text("Сервер не найден.", reply_markup=_status_pick_kb())
+        await q.edit_message_text(ui_error_text("сервер не найден."), reply_markup=_status_pick_kb())
         return
-    text, markup = await build_status_message(update, server_key=server_key)
+    text, markup = await build_status_message(update, server_key=server_key, detailed=False)
+    await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+
+
+@require_auth
+async def status_detail_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    if not q:
+        return
+    await q.answer()
+    parsed = _parse_status_detail_callback(q.data or "")
+    if not parsed:
+        return
+    server_key, detailed = parsed
+    if not get_server_target(server_key):
+        await q.edit_message_text(ui_error_text("сервер не найден."), reply_markup=_status_pick_kb())
+        return
+    text, markup = await build_status_message(update, server_key=server_key, detailed=detailed)
     await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
 
 
@@ -126,7 +181,18 @@ async def _build_status_payload_local(admin_mode: bool, server: ServerTarget):
         disk_root(),
         docker_containers(server.monitor_containers),
         ufw_summary_for_admin() if admin_mode else ufw_status_basic(),
+        return_exceptions=True,
     )
+    if isinstance(up, Exception):
+        up = "н/д"
+    if isinstance(mem, Exception):
+        mem = "н/д"
+    if isinstance(disk, Exception):
+        disk = "н/д"
+    if isinstance(cont, Exception):
+        cont = [(n, False, f"ошибка: {_exc_brief(cont)}", "-") for n in server.monitor_containers]
+    if isinstance(ufw_data, Exception):
+        ufw_data = ("н/д", [], [], []) if admin_mode else "н/д"
     if admin_mode:
         ufw_s, allow, deny, reject = cast(Tuple[str, List[str], List[str], List[str]], ufw_data)
     else:
@@ -143,7 +209,18 @@ async def _build_status_payload_remote(admin_mode: bool, server: ServerTarget):
         remote_disk_root(ssh_target),
         remote_docker_containers(ssh_target, server.monitor_containers),
         remote_ufw_summary_for_admin(ssh_target) if admin_mode else remote_ufw_status_basic(ssh_target),
+        return_exceptions=True,
     )
+    if isinstance(up, Exception):
+        up = "н/д"
+    if isinstance(mem, Exception):
+        mem = "н/д"
+    if isinstance(disk, Exception):
+        disk = "н/д"
+    if isinstance(cont, Exception):
+        cont = [(n, False, f"ошибка: {_exc_brief(cont)}", "-") for n in server.monitor_containers]
+    if isinstance(ufw_data, Exception):
+        ufw_data = ("н/д", [], [], []) if admin_mode else "н/д"
     if admin_mode:
         ufw_s, allow, deny, reject = cast(Tuple[str, List[str], List[str], List[str]], ufw_data)
     else:
@@ -152,70 +229,100 @@ async def _build_status_payload_remote(admin_mode: bool, server: ServerTarget):
     return up, mem, disk, cont, ufw_s, allow, deny, reject
 
 
-async def build_status_message(update: Update, server_key: Optional[str] = None) -> Tuple[str, Optional[InlineKeyboardMarkup]]:
-    server = get_server_target(server_key)
+async def _build_dns_summary(server: ServerTarget) -> Tuple[int, int, int]:
+    domains = list(server.check_a_domains)
+    if not domains:
+        return 0, 0, 0
+    expected_ip = (server.expected_a_ip or "").strip()
+    ok = bad = unknown = 0
+    custom_resolvers_supported = dns_supports_custom_resolver()
+    if custom_resolvers_supported and DNS_RESOLVERS:
+        for dom in domains:
+            results = await asyncio.gather(
+                *[resolve_a_record(dom, resolver=r) for r in DNS_RESOLVERS],
+                return_exceptions=True,
+            )
+            ip_lists = [r for r in results if isinstance(r, list)]
+            merged: List[str] = []
+            for ips in ip_lists:
+                for ip in ips:
+                    if ip not in merged:
+                        merged.append(ip)
+            if not merged:
+                unknown += 1
+            elif expected_ip and expected_ip not in merged:
+                bad += 1
+            else:
+                ok += 1
+    else:
+        for dom in domains:
+            try:
+                ips = await resolve_a_record(dom, resolver=None)
+            except Exception:
+                ips = []
+            if not ips:
+                unknown += 1
+            elif expected_ip and expected_ip not in ips:
+                bad += 1
+            else:
+                ok += 1
+    return ok, bad, unknown
+
+
+async def _build_status_snapshot(update: Update, server: ServerTarget) -> StatusSnapshot:
+    admin_mode = is_admin(update)
+    if server.mode == "ssh":
+        status_task = _build_status_payload_remote(admin_mode, server)
+    else:
+        status_task = _build_status_payload_local(admin_mode, server)
+    (up, mem, disk, cont, ufw_s, allow, deny, reject), dns_summary = await asyncio.gather(
+        status_task,
+        _build_dns_summary(server),
+    )
+    dns_ok, dns_bad, dns_unknown = dns_summary
+
+    containers = [
+        DockerContainerView(name=name, is_up=upb, status_text=st, restarts=rst)
+        for name, upb, st, rst in cont
+    ]
+    return StatusSnapshot(
+        title="🧭 Статус сервера",
+        server_label=server.label,
+        server_flag=_server_flag(server),
+        now_text=now_str(),
+        uptime_text=str(up),
+        memory_raw=str(mem),
+        disk_raw=str(disk),
+        ufw_state=str(ufw_s),
+        dns_ok_domains=dns_ok,
+        dns_total_domains=len(list(server.check_a_domains)),
+        dns_bad_domains=dns_bad,
+        dns_unknown_domains=dns_unknown,
+        ufw_allow=list(allow),
+        ufw_deny=list(deny),
+        ufw_reject=list(reject),
+        containers=containers,
+        admin_mode=admin_mode,
+    )
+
+
+async def build_status_message(
+    update: Update,
+    server_key: Optional[str] = None,
+    *,
+    detailed: bool = False,
+) -> Tuple[str, Optional[InlineKeyboardMarkup]]:
+    server = get_server_target(server_key) if server_key else _default_server_target()
     if not server:
         return "Сервер не настроен.", _status_pick_kb() if len(SERVERS) > 1 else None
 
-    admin_mode = is_admin(update)
-    if server.mode == "ssh":
-        up, mem, disk, cont, ufw_s, allow, deny, reject = await _build_status_payload_remote(admin_mode, server)
-    else:
-        up, mem, disk, cont, ufw_s, allow, deny, reject = await _build_status_payload_local(admin_mode, server)
-
-    mem_clean = mem
-    if mem_clean.lower().startswith("ram:"):
-        mem_clean = mem_clean.split(":", 1)[1].strip()
-    if ";" in mem_clean:
-        mem_clean = mem_clean.split(";", 1)[0].strip()
-    if " (" in mem_clean:
-        mem_clean = mem_clean.split(" (", 1)[0].strip()
-
-    disk_clean = disk.strip()
-    if " (" in disk_clean:
-        disk_clean = disk_clean.split(" (", 1)[0].strip()
-    if " mount" in disk_clean:
-        disk_clean = disk_clean.split(" mount", 1)[0].strip()
-
-    ufw_state = ufw_s.upper()
-
-    def fmt_ufw_list(items: List[str]) -> List[str]:
-        if not items:
-            return ["<code>    —</code>"]
-        out: List[str] = []
-        for i, item in enumerate(items):
-            suffix = "," if i < (len(items) - 1) else ""
-            out.append(f"<code>    {html_escape(item)}{suffix}</code>")
-        return out
-
-    lines: List[str] = []
-    lines.append("<b>🧭 Статус сервера</b>")
-    lines.append(f"<b>🌍 Сервер:</b> {_server_flag(server)} {html_escape(server.label)}")
-    lines.append(f"<b>⏰ Время:</b> {html_escape(now_str())}")
-    lines.append(f"<b>⏳ Uptime:</b> {html_escape(up)}")
-    lines.append(f"<b>🧠 RAM:</b> {html_escape(mem_clean)}")
-    lines.append(f"<b>💾 ROM:</b> {html_escape(disk_clean)}")
-    lines.append(f"<b>🛡 UFW status:</b> <b>{html_escape(ufw_state)}</b>")
-    if admin_mode and ufw_s == "active":
-        lines.append("    ALLOW:")
-        lines.extend(fmt_ufw_list(allow))
-        lines.append("    DENY:")
-        lines.extend(fmt_ufw_list(deny))
-        lines.append("    REJECT:")
-        lines.extend(fmt_ufw_list(reject))
-
-    lines.append("")
-    lines.append("<b>🐳 Docker контейнеры:</b>")
-    for name, upb, st, rst in cont:
-        emoji = "🟢" if upb else "🔴"
-        lines.append(f"{emoji} {html_escape(name)} — {html_escape(st)} (restarts: {html_escape(rst)})")
-
-    markup = _status_actions_kb(admin_mode=admin_mode, server_key=server.key)
-    return "\n".join(lines), markup
+    snapshot = await _build_status_snapshot(update, server)
+    markup = _status_actions_kb(admin_mode=snapshot.admin_mode, server_key=server.key, detailed=detailed)
+    return format_status_message(snapshot, detailed=detailed), markup
 
 
 async def build_dns_status_message(server_key: Optional[str]) -> str:
-    server = get_server_target(server_key)
+    server = get_server_target(server_key) if server_key else _default_server_target()
     if not server:
         return "Сервер не найден."
 
@@ -223,15 +330,25 @@ async def build_dns_status_message(server_key: Optional[str]) -> str:
     expected_ip = server.expected_a_ip
     dns_map: Dict[str, Dict[str, List[str]]] = {}
     lines: List[str] = []
-    lines.append(f"<b>DNS A-записи ({html_escape(server.label)})</b>")
+    lines.append(f"<b>{html_escape(breadcrumbs('Статус', server.label, 'DNS'))}</b>")
     if expected_ip:
         lines.append(f"• Ожидаемый IP: <code>{html_escape(expected_ip)}</code>")
 
     custom_resolvers_supported = dns_supports_custom_resolver()
+    ok_domains = 0
+    bad_domains = 0
+    unknown_domains = 0
+
     if custom_resolvers_supported:
         for d in domains:
-            ips_by = await asyncio.gather(*[resolve_a_record(d, resolver=r) for r in DNS_RESOLVERS])
-            dns_map[d] = {r: ips for r, ips in zip(DNS_RESOLVERS, ips_by)}
+            ips_by = await asyncio.gather(
+                *[resolve_a_record(d, resolver=r) for r in DNS_RESOLVERS],
+                return_exceptions=True,
+            )
+            normalized: Dict[str, List[str]] = {}
+            for r, ips in zip(DNS_RESOLVERS, ips_by):
+                normalized[r] = ips if isinstance(ips, list) else []
+            dns_map[d] = normalized
         resolver_labels = list(DNS_RESOLVERS)
     else:
         lines.append("• Режим проверки: <code>system resolver fallback</code> (aiodns не установлен)")
@@ -244,14 +361,37 @@ async def build_dns_status_message(server_key: Optional[str]) -> str:
         return "\n".join(lines)
 
     for dom in domains:
-        lines.append(f"• <code>{html_escape(dom)}</code>")
+        per = dns_map.get(dom, {})
+        merged: List[str] = []
+        for r in resolver_labels:
+            for ip in per.get(r, []) or []:
+                if ip not in merged:
+                    merged.append(ip)
+        if not merged:
+            unknown_domains += 1
+        elif expected_ip and expected_ip not in merged:
+            bad_domains += 1
+        else:
+            ok_domains += 1
+
+    if bad_domains == 0 and unknown_domains == 0:
+        lines.append(f"• Итог: ✅ <b>{ok_domains}/{len(domains)}</b> доменов совпадают")
+    else:
+        lines.append(
+            f"• Итог: ❌ <b>{ok_domains}/{len(domains)}</b> OK, "
+            f"<b>{bad_domains}</b> неверный IP, <b>{unknown_domains}</b> без ответа"
+        )
+    lines.append("")
+
+    for dom in domains:
+        lines.append(f"• <b><code>{html_escape(dom)}</code></b>")
         per = dns_map.get(dom, {})
         for r in resolver_labels:
             ips = per.get(r, []) or []
             ips_s = ", ".join(ips) if ips else "н/д"
             ok = bool(ips) and (expected_ip in ips if expected_ip else True)
             flag = "✅" if ok else ("⚠️" if not ips else "❌")
-            lines.append(f"  {flag} <code>{html_escape(r)}</code> → <code>{html_escape(ips_s)}</code>")
+            lines.append(f"  {flag} <code>{html_escape(r)}</code> | <code>{html_escape(ips_s)}</code>")
 
     return "\n".join(lines)
 
@@ -266,7 +406,13 @@ async def dns_check_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not server_key:
         server_key = _first_server_key()
     text = await build_dns_status_message(server_key)
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("Назад к статусу", callback_data=f"dns:back:{server_key}")]])
+    kb = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("🔄 Повторить", callback_data=f"dns:check:{server_key}")],
+            [InlineKeyboardButton("⬅️ Назад к статусу", callback_data=f"dns:back:{server_key}")],
+            [InlineKeyboardButton("🏠 Меню", callback_data="menu:home")],
+        ]
+    )
     await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
 
@@ -279,5 +425,5 @@ async def dns_back_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     server_key = _resolve_server_key_from_callback(q.data or "", r"dns:back")
     if not server_key:
         server_key = _first_server_key()
-    text, markup = await build_status_message(update, server_key=server_key)
+    text, markup = await build_status_message(update, server_key=server_key, detailed=False)
     await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)

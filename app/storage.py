@@ -9,6 +9,8 @@ import aiofiles
 from .config import IMPORTANT_DATA_PATH, LEGACY_CONFIG_PATH, USER_DATA_PATH, logger
 
 T = TypeVar("T")
+USER_DATA_SCHEMA_VERSION = 1
+IMPORTANT_DATA_SCHEMA_VERSION = 1
 
 
 def _normalize_bool(value: Any, truthy: set[str]) -> bool:
@@ -82,6 +84,13 @@ class UserData:
 
         return UserData(authorized_users=authorized_users)
 
+    @staticmethod
+    def _needs_rewrite(raw: Dict[str, Any]) -> bool:
+        if raw.get("schema_version") != USER_DATA_SCHEMA_VERSION:
+            return True
+        allowed_keys = {"schema_version", "authorized_users"}
+        return any(k not in allowed_keys for k in raw.keys())
+
     @classmethod
     def load(cls, path: str, legacy_path: Optional[str] = None) -> "UserData":
         for pth in [path, legacy_path]:
@@ -94,7 +103,7 @@ class UserData:
                 raw = json.loads(p.read_text(encoding="utf-8"))
                 if isinstance(raw, dict):
                     data = cls._migrate(raw)
-                    if pth != path:
+                    if pth != path or cls._needs_rewrite(raw):
                         try:
                             data.save(path)
                         except Exception:
@@ -106,7 +115,7 @@ class UserData:
 
     def save(self, path: str) -> None:
         try:
-            payload = {"authorized_users": self.authorized_users}
+            payload = {"schema_version": USER_DATA_SCHEMA_VERSION, "authorized_users": self.authorized_users}
             tmp_path = Path(path)
             tmp_path.parent.mkdir(parents=True, exist_ok=True)
             tmp = tmp_path.with_suffix(tmp_path.suffix + ".tmp")
@@ -117,7 +126,7 @@ class UserData:
 
     async def save_async(self, path: str) -> None:
         try:
-            await _write_json_atomic(path, {"authorized_users": self.authorized_users})
+            await _write_json_atomic(path, {"schema_version": USER_DATA_SCHEMA_VERSION, "authorized_users": self.authorized_users})
         except Exception as e:
             logger.error("Не удалось сохранить %s: %s", path, e)
 
@@ -135,6 +144,13 @@ class ImportantData:
             maintenance = {}
         return ImportantData(tickets_seq=tickets_seq, maintenance=maintenance)
 
+    @staticmethod
+    def _needs_rewrite(raw: Dict[str, Any]) -> bool:
+        if raw.get("schema_version") != IMPORTANT_DATA_SCHEMA_VERSION:
+            return True
+        allowed_keys = {"schema_version", "tickets_seq", "maintenance"}
+        return any(k not in allowed_keys for k in raw.keys())
+
     @classmethod
     def load(cls, path: str, legacy_path: Optional[str] = None) -> "ImportantData":
         for pth in [path, legacy_path]:
@@ -147,7 +163,7 @@ class ImportantData:
                 raw = json.loads(p.read_text(encoding="utf-8"))
                 if isinstance(raw, dict):
                     data = cls._migrate(raw)
-                    if pth != path:
+                    if pth != path or cls._needs_rewrite(raw):
                         try:
                             data.save(path)
                         except Exception:
@@ -159,7 +175,11 @@ class ImportantData:
 
     def save(self, path: str) -> None:
         try:
-            payload = {"tickets_seq": self.tickets_seq, "maintenance": self.maintenance}
+            payload = {
+                "schema_version": IMPORTANT_DATA_SCHEMA_VERSION,
+                "tickets_seq": self.tickets_seq,
+                "maintenance": self.maintenance,
+            }
             tmp_path = Path(path)
             tmp_path.parent.mkdir(parents=True, exist_ok=True)
             tmp = tmp_path.with_suffix(tmp_path.suffix + ".tmp")
@@ -170,7 +190,14 @@ class ImportantData:
 
     async def save_async(self, path: str) -> None:
         try:
-            await _write_json_atomic(path, {"tickets_seq": self.tickets_seq, "maintenance": self.maintenance})
+            await _write_json_atomic(
+                path,
+                {
+                    "schema_version": IMPORTANT_DATA_SCHEMA_VERSION,
+                    "tickets_seq": self.tickets_seq,
+                    "maintenance": self.maintenance,
+                },
+            )
         except Exception as e:
             logger.error("Не удалось сохранить %s: %s", path, e)
 
@@ -179,12 +206,34 @@ USER_DATA = UserData.load(USER_DATA_PATH, legacy_path=LEGACY_CONFIG_PATH)
 IMPORTANT_DATA = ImportantData.load(IMPORTANT_DATA_PATH, legacy_path=LEGACY_CONFIG_PATH)
 USER_DATA_LOCK = asyncio.Lock()
 IMPORTANT_DATA_LOCK = asyncio.Lock()
+USER_DATA_SNAPSHOT: Dict[str, Dict[str, Any]] = {}
+IMPORTANT_DATA_SNAPSHOT: Dict[str, Any] = {}
+
+
+def _refresh_user_snapshot() -> None:
+    global USER_DATA_SNAPSHOT
+    USER_DATA_SNAPSHOT = {
+        k: dict(v) for k, v in getattr(USER_DATA, "authorized_users", {}).items() if isinstance(v, dict)
+    }
+
+
+def _refresh_important_snapshot() -> None:
+    global IMPORTANT_DATA_SNAPSHOT
+    IMPORTANT_DATA_SNAPSHOT = {
+        "tickets_seq": int(getattr(IMPORTANT_DATA, "tickets_seq", 0) or 0),
+        "maintenance": dict(getattr(IMPORTANT_DATA, "maintenance", {}) or {}),
+    }
+
+
+_refresh_user_snapshot()
+_refresh_important_snapshot()
 
 
 async def update_user_data(update_fn: Callable[[UserData], T]) -> T:
     async with USER_DATA_LOCK:
         result = update_fn(USER_DATA)
         await USER_DATA.save_async(USER_DATA_PATH)
+        _refresh_user_snapshot()
     return result
 
 
@@ -192,6 +241,7 @@ async def update_important_data(update_fn: Callable[[ImportantData], T]) -> T:
     async with IMPORTANT_DATA_LOCK:
         result = update_fn(IMPORTANT_DATA)
         await IMPORTANT_DATA.save_async(IMPORTANT_DATA_PATH)
+        _refresh_important_snapshot()
     return result
 
 
@@ -219,3 +269,43 @@ def _get_active_maintenance() -> Optional[Dict[str, Any]]:
     if isinstance(m, dict) and m.get("active"):
         return dict(m)
     return None
+
+
+def get_user_meta_copy(uid: int) -> Optional[Dict[str, Any]]:
+    meta = USER_DATA_SNAPSHOT.get(str(uid))
+    return dict(meta) if isinstance(meta, dict) else None
+
+
+def authorized_users_snapshot() -> Dict[str, Dict[str, Any]]:
+    return {k: dict(v) for k, v in USER_DATA_SNAPSHOT.items()}
+
+
+async def upsert_user_meta(uid: int, meta: Dict[str, Any]) -> Dict[str, Any]:
+    return await update_user_data(lambda cfg: _set_user_meta(cfg, uid, meta))
+
+
+async def remove_user_meta(uid: int) -> Optional[Dict[str, Any]]:
+    return await update_user_data(lambda cfg: _remove_user(cfg, uid))
+
+
+async def set_maintenance_record(payload: Dict[str, Any]) -> Dict[str, Any]:
+    return await update_important_data(lambda cfg: _set_maintenance(cfg, payload))
+
+
+async def clear_maintenance_record() -> None:
+    await update_important_data(lambda cfg: _clear_maintenance(cfg))
+
+
+def get_active_maintenance() -> Optional[Dict[str, Any]]:
+    m = IMPORTANT_DATA_SNAPSHOT.get("maintenance")
+    if isinstance(m, dict) and m.get("active"):
+        return dict(m)
+    return None
+
+
+async def next_ticket_seq() -> int:
+    def _next_ticket(cfg: ImportantData) -> int:
+        cfg.tickets_seq += 1
+        return cfg.tickets_seq
+
+    return await update_important_data(_next_ticket)
