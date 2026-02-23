@@ -7,7 +7,7 @@ from telegram.ext import ContextTypes
 
 from ..services.docker_service import docker_inspect_summary, docker_logs_tail, is_valid_container_name
 from ..services.remote_service import remote_docker_inspect_summary, remote_docker_logs_tail
-from .common import clip_text, html_escape, require_admin, wrap_as_codeblock_html
+from .common import breadcrumbs, clip_text, html_escape, require_admin, ui_error_text, wrap_as_codeblock_html
 from .status import build_status_message, get_server_target
 
 
@@ -33,6 +33,7 @@ def _docker_list_kb(server_key: str) -> InlineKeyboardMarkup:
     if row:
         rows.append(row)
     rows.append([InlineKeyboardButton("⬅️ Назад к статусу", callback_data=f"docker:back:{server_key}")])
+    rows.append([InlineKeyboardButton("🏠 Меню", callback_data="menu:home")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -47,6 +48,7 @@ def _docker_item_kb(server_key: str, name: str, tail: int = 120) -> InlineKeyboa
             ],
             [InlineKeyboardButton("⬅️ К списку", callback_data=f"docker:list:{server_key}")],
             [InlineKeyboardButton("⬅️ К статусу", callback_data=f"docker:back:{server_key}")],
+            [InlineKeyboardButton("🏠 Меню", callback_data="menu:home")],
         ]
     )
 
@@ -68,10 +70,10 @@ async def docker_list_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     server_key = m.group(1) if m else None
     srv = get_server_target(server_key)
     if not srv:
-        await q.edit_message_text("Сервер не найден.")
+        await q.edit_message_text(ui_error_text("сервер не найден."))
         return
     await q.edit_message_text(
-        f"<b>Docker: контейнеры ({html_escape(srv.label)})</b>\nВыберите контейнер:",
+        f"<b>{html_escape(breadcrumbs('Статус', srv.label, 'Docker'))}</b>\n\nВыберите контейнер:",
         parse_mode=ParseMode.HTML,
         reply_markup=_docker_list_kb(srv.key),
     )
@@ -97,18 +99,18 @@ async def docker_show(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await q.answer()
     parsed = _parse_server_and_name(q.data or "", "show")
     if not parsed:
-        await q.edit_message_text("Некорректный запрос.")
+        await q.edit_message_text(ui_error_text("некорректный запрос."))
         return
     server_key, name = parsed
     srv = get_server_target(server_key)
     if not srv:
-        await q.edit_message_text("Сервер не найден.")
+        await q.edit_message_text(ui_error_text("сервер не найден."))
         return
     if not _is_server_container_allowed(server_key, name):
-        await q.edit_message_text("Контейнер недоступен.", reply_markup=_docker_list_kb(server_key))
+        await q.edit_message_text(ui_error_text("контейнер недоступен."), reply_markup=_docker_list_kb(server_key))
         return
     await q.edit_message_text(
-        f"<b>Docker ({html_escape(srv.label)}):</b> <code>{html_escape(name)}</code>",
+        f"<b>{html_escape(breadcrumbs('Статус', srv.label, 'Docker', name))}</b>",
         parse_mode=ParseMode.HTML,
         reply_markup=_docker_item_kb(server_key, name),
     )
@@ -126,16 +128,19 @@ async def docker_inspect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     server_key, name = parsed
     srv = get_server_target(server_key)
     if not srv:
-        await q.edit_message_text("Сервер не найден.")
+        await q.edit_message_text(ui_error_text("сервер не найден."))
         return
     if not _is_server_container_allowed(server_key, name):
-        await q.edit_message_text("Контейнер недоступен.", reply_markup=_docker_list_kb(server_key))
+        await q.edit_message_text(ui_error_text("контейнер недоступен."), reply_markup=_docker_list_kb(server_key))
         return
     if srv.mode == "ssh":
         summary = await remote_docker_inspect_summary(srv.ssh_target, name)
     else:
         summary = await docker_inspect_summary(name)
-    payload = f"<b>Inspect ({html_escape(srv.label)})</b>\n" + wrap_as_codeblock_html(clip_text(summary))
+    payload = (
+        f"<b>{html_escape(breadcrumbs('Статус', srv.label, 'Docker', name, 'Inspect'))}</b>\n\n"
+        + wrap_as_codeblock_html(clip_text(summary))
+    )
     await q.edit_message_text(payload, parse_mode=ParseMode.HTML, reply_markup=_docker_item_kb(server_key, name))
 
 
@@ -154,10 +159,10 @@ async def docker_logs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     srv = get_server_target(server_key)
     if not srv:
-        await q.edit_message_text("Сервер не найден.")
+        await q.edit_message_text(ui_error_text("сервер не найден."))
         return
     if not _is_server_container_allowed(server_key, name):
-        await q.edit_message_text("Контейнер недоступен.", reply_markup=_docker_list_kb(server_key))
+        await q.edit_message_text(ui_error_text("контейнер недоступен."), reply_markup=_docker_list_kb(server_key))
         return
 
     if srv.mode == "ssh":
@@ -174,9 +179,12 @@ async def docker_logs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             ],
             [InlineKeyboardButton("⬅️ К списку", callback_data=f"docker:list:{server_key}")],
             [InlineKeyboardButton("⬅️ К статусу", callback_data=f"docker:back:{server_key}")],
+            [InlineKeyboardButton("🏠 Меню", callback_data="menu:home")],
         ]
     )
-    payload = f"<b>Logs ({html_escape(srv.label)})</b> (<code>{html_escape(name)}</code>, tail {tail})\n" + wrap_as_codeblock_html(
-        clip_text(log_text)
+    payload = (
+        f"<b>{html_escape(breadcrumbs('Статус', srv.label, 'Docker', name, 'Logs'))}</b>\n"
+        f"<code>tail={tail}</code>\n\n"
+        + wrap_as_codeblock_html(clip_text(log_text))
     )
     await q.edit_message_text(payload, parse_mode=ParseMode.HTML, reply_markup=kb)

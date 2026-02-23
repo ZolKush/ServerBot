@@ -8,9 +8,9 @@ from functools import wraps
 from datetime import datetime
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
-from telegram import KeyboardButton, ReplyKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, Update
 from telegram.constants import ChatType, ParseMode
-from telegram.error import NetworkError, RetryAfter, TimedOut
+from telegram.error import BadRequest, NetworkError, RetryAfter, TimedOut
 from telegram.ext import ContextTypes, ConversationHandler
 
 from ..config import MENU_MAINT, MENU_STATUS, MENU_TICKET, MENU_USERS, TZ, logger
@@ -19,6 +19,33 @@ from ..storage import authorized_users_snapshot, get_user_meta_copy
 
 def html_escape(s: str) -> str:
     return html.escape(s or "", quote=False)
+
+
+UI_OK = "✅"
+UI_WARN = "⚠️"
+UI_ERR = "❌"
+UI_INFO = "ℹ️"
+
+
+def ui_ok_text(text: str) -> str:
+    return f"{UI_OK} {text}"
+
+
+def ui_warn_text(text: str) -> str:
+    return f"{UI_WARN} {text}"
+
+
+def ui_error_text(text: str) -> str:
+    return f"{UI_ERR} Ошибка: {text}"
+
+
+def ui_info_text(text: str) -> str:
+    return f"{UI_INFO} {text}"
+
+
+def breadcrumbs(*parts: str) -> str:
+    items = [str(p).strip() for p in parts if str(p or "").strip()]
+    return " > ".join(items)
 
 
 def wrap_as_codeblock_html(text: str) -> str:
@@ -166,6 +193,61 @@ def main_menu_kb(update: Update) -> ReplyKeyboardMarkup:
     if is_admin(update):
         rows.append([KeyboardButton(MENU_USERS), KeyboardButton(MENU_MAINT)])
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
+
+
+def main_menu_inline_kb(update: Update) -> InlineKeyboardMarkup:
+    rows: List[List[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton(MENU_STATUS, callback_data="menu:status"),
+            InlineKeyboardButton(MENU_TICKET, callback_data="menu:ticket"),
+        ]
+    ]
+    if is_admin(update):
+        rows.append(
+            [
+                InlineKeyboardButton(MENU_USERS, callback_data="menu:users"),
+                InlineKeyboardButton(MENU_MAINT, callback_data="menu:maint"),
+            ]
+        )
+        rows.append([InlineKeyboardButton("🛡️ Fail2ban", callback_data="menu:fail2ban")])
+    rows.append([InlineKeyboardButton("ℹ️ Помощь", callback_data="menu:help")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def show_main_menu(update: Update, text: str = "Меню:") -> None:
+    q = update.callback_query
+    markup = main_menu_inline_kb(update)
+    if text == "Меню:":
+        if is_admin(update):
+            text = "👑 <b>Админ-панель</b>\n\nВыберите раздел:"
+        else:
+            text = "👤 <b>Главное меню</b>\n\nВыберите раздел:"
+    if q:
+        await q.answer()
+        try:
+            await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+        except BadRequest as e:
+            if "message is not modified" in str(e).lower():
+                return
+            raise
+        return
+    msg = update.effective_message
+    if msg:
+        await msg.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+
+
+@require_auth
+async def menu_home_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await show_main_menu(update)
+
+
+@require_auth
+async def cancel_to_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    for key in tuple(context.user_data.keys()):
+        if key.startswith("ticket_") or key.startswith("maint_") or key == "selected_uid":
+            context.user_data.pop(key, None)
+    await show_main_menu(update)
+    return ConversationHandler.END
 
 
 @dataclass

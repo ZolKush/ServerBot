@@ -29,7 +29,7 @@ from app.config import (
     logger,
 )
 from app.handlers.auth import cmd_auth, cmd_help, cmd_logout, cmd_start
-from app.handlers.common import cancel
+from app.handlers.common import cancel, cancel_to_menu_cb, menu_home_cb
 from app.handlers.docker import docker_back_to_status, docker_inspect, docker_list_menu, docker_logs, docker_show
 from app.handlers.fail2ban import (
     f2b_back_cb,
@@ -55,7 +55,7 @@ from app.handlers.maint import (
     maint_start,
     maint_urgency,
 )
-from app.handlers.status import cmd_health, dns_back_cb, dns_check_cb, status_pick_cb, status_show_cb
+from app.handlers.status import cmd_health, dns_back_cb, dns_check_cb, status_detail_cb, status_pick_cb, status_show_cb
 from app.handlers.tickets import (
     TICKET_CONFIRM,
     TICKET_SUBJECT,
@@ -70,12 +70,14 @@ from app.handlers.tickets import (
 from app.handlers.users import (
     ADMIN_ALL_MENU,
     ADMIN_ALL_MSG_TEXT,
+    ADMIN_ALL_MSG_CONFIRM,
     ADMIN_PICK,
     ADMIN_USER_CFG_TEXT,
     ADMIN_USER_MENU,
     ADMIN_USER_MSG_TEXT,
     ADMIN_USER_NICK_TEXT,
     users_all_menu,
+    users_all_msg_confirm,
     users_all_msg_text,
     users_entry,
     users_pick,
@@ -123,6 +125,7 @@ def build_app() -> Application:
         entry_points=[
             CommandHandler("maint", maint_start),
             MessageHandler(filters.ChatType.PRIVATE & filters.Regex(rf"^{re.escape(MENU_MAINT)}$"), maint_start),
+            CallbackQueryHandler(maint_start, pattern=r"^menu:maint$"),
             CallbackQueryHandler(maint_extend_cb, pattern=r"^maint:extend:[0-9a-f]+$"),
         ],
         states={
@@ -131,7 +134,10 @@ def build_app() -> Application:
             STATE_MAINT_DURATION: [MessageHandler(PRIVATE_TEXT, maint_duration)],
             STATE_MAINT_EXTEND: [MessageHandler(PRIVATE_TEXT, maint_extend_duration)],
         },
-        fallbacks=[CommandHandler("cancel", cancel)],
+        fallbacks=[
+            CommandHandler("cancel", cancel),
+            CallbackQueryHandler(cancel_to_menu_cb, pattern=r"^menu:home$"),
+        ],
         name="maint_flow",
         persistent=False,
     )
@@ -144,14 +150,18 @@ def build_app() -> Application:
         entry_points=[
             CommandHandler("ticket", ticket_start),
             MessageHandler(filters.ChatType.PRIVATE & filters.Regex(rf"^{re.escape(MENU_TICKET)}$"), ticket_start),
+            CallbackQueryHandler(ticket_start, pattern=r"^menu:ticket$"),
         ],
         states={
             TICKET_SUBJECT: [MessageHandler(PRIVATE_TEXT, ticket_subject)],
             TICKET_URGENCY: [CallbackQueryHandler(ticket_urgency, pattern=r"^ticket:(p1|p2|p3)$")],
             TICKET_TEXT: [MessageHandler(PRIVATE_TEXT, ticket_text)],
-            TICKET_CONFIRM: [CallbackQueryHandler(ticket_confirm, pattern=r"^ticket:send$")],
+            TICKET_CONFIRM: [CallbackQueryHandler(ticket_confirm, pattern=r"^ticket:(send|edit_subj|edit_text|cancel)$")],
         },
-        fallbacks=[CommandHandler("cancel", cancel)],
+        fallbacks=[
+            CommandHandler("cancel", cancel),
+            CallbackQueryHandler(cancel_to_menu_cb, pattern=r"^menu:home$"),
+        ],
         name="ticket_flow",
         persistent=False,
     )
@@ -161,10 +171,11 @@ def build_app() -> Application:
         entry_points=[
             MessageHandler(filters.ChatType.PRIVATE & filters.Regex(rf"^{re.escape(MENU_USERS)}$"), users_entry),
             CommandHandler("users", users_entry),
+            CallbackQueryHandler(users_entry, pattern=r"^menu:users$"),
         ],
         states={
             ADMIN_PICK: [
-                CallbackQueryHandler(users_pick, pattern=r"^users:(all|main|user:\d+|back)$"),
+                CallbackQueryHandler(users_pick, pattern=r"^users:(all|main|back|noop|filter:(all|active|disabled|unpaid|admins)|user:\d+)$"),
             ],
             ADMIN_ALL_MENU: [
                 CallbackQueryHandler(users_all_menu, pattern=r"^users:(allmsg|back)$"),
@@ -172,11 +183,15 @@ def build_app() -> Application:
             ADMIN_ALL_MSG_TEXT: [
                 MessageHandler(PRIVATE_TEXT, users_all_msg_text),
             ],
+            ADMIN_ALL_MSG_CONFIRM: [
+                CallbackQueryHandler(users_all_msg_confirm, pattern=r"^users:(allsend|all|back)$"),
+            ],
             ADMIN_USER_MENU: [
                 CallbackQueryHandler(
                     users_user_menu,
-                    pattern=r"^users:(msg:\d+|nick:\d+|cfg:\d+|toggle:\d+|paid:\d+|back)$",
+                    pattern=r"^users:(msg:\d+|nick:\d+|cfg:\d+|toggle:\d+|toggleapply:\d+|paid:\d+|paidapply:\d+|back)$",
                 ),
+                CallbackQueryHandler(users_pick, pattern=r"^users:user:\d+$"),
             ],
             ADMIN_USER_MSG_TEXT: [
                 MessageHandler(PRIVATE_TEXT, users_user_msg_text),
@@ -189,14 +204,22 @@ def build_app() -> Application:
                 CallbackQueryHandler(users_pick, pattern=r"^users:user:\d+$"),
             ],
         },
-        fallbacks=[CommandHandler("cancel", cancel)],
+        fallbacks=[
+            CommandHandler("cancel", cancel),
+            CallbackQueryHandler(cancel_to_menu_cb, pattern=r"^menu:home$"),
+        ],
         name="users_flow",
         persistent=False,
     )
     app.add_handler(users_conv)
+    app.add_handler(CallbackQueryHandler(menu_home_cb, pattern=r"^menu:home$"))
+    app.add_handler(CallbackQueryHandler(cmd_help, pattern=r"^menu:help$"))
+    app.add_handler(CallbackQueryHandler(cmd_health, pattern=r"^menu:status$"))
+    app.add_handler(CallbackQueryHandler(fail2ban_menu, pattern=r"^menu:fail2ban$"))
 
     app.add_handler(CallbackQueryHandler(status_pick_cb, pattern=r"^status:pick$"))
     app.add_handler(CallbackQueryHandler(status_show_cb, pattern=r"^status:show:[a-z0-9_-]{1,12}$"))
+    app.add_handler(CallbackQueryHandler(status_detail_cb, pattern=r"^status:detail:[a-z0-9_-]{1,12}:(full|brief)$"))
     app.add_handler(CallbackQueryHandler(dns_check_cb, pattern=r"^dns:check:[a-z0-9_-]{1,12}$"))
     app.add_handler(CallbackQueryHandler(dns_back_cb, pattern=r"^dns:back:[a-z0-9_-]{1,12}$"))
     app.add_handler(CallbackQueryHandler(docker_list_menu, pattern=r"^docker:list:[a-z0-9_-]{1,12}$"))

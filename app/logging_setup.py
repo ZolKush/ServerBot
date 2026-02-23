@@ -34,6 +34,8 @@ def configure_logging() -> None:
         handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
     root.handlers[:] = [handler]
     root.setLevel(level)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
     root._maintbot_configured = True  # type: ignore[attr-defined]
 
 

@@ -14,9 +14,10 @@ from .common import (
     is_admin,
     is_authorized,
     is_enabled,
-    main_menu_kb,
+    main_menu_inline_kb,
     reply_disabled,
     require_private,
+    show_main_menu,
 )
 
 AUTH_FAIL_WINDOW_SEC = 300
@@ -68,9 +69,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if is_authorized(update) and not is_enabled(update):
         await reply_disabled(update)
         return
-    msg = update.effective_message
-    if msg:
-        await msg.reply_text("Меню:", reply_markup=main_menu_kb(update))
+    await show_main_menu(update)
 
 
 @require_private
@@ -88,9 +87,14 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     ]
     if is_admin(update):
         lines += ["", "<b>Админ</b>", "• кнопка «Пользователи» — сообщения/никнеймы"]
+    q = update.callback_query
     msg = update.effective_message
+    if q and msg:
+        await q.answer()
+        await q.edit_message_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=main_menu_inline_kb(update))
+        return
     if msg:
-        await msg.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+        await msg.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=main_menu_inline_kb(update))
 
 
 @require_private
@@ -160,8 +164,7 @@ async def cmd_auth(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await reply_disabled(update)
         return
 
-    if msg:
-        await msg.reply_text("Авторизация успешна ✅", reply_markup=main_menu_kb(update))
+    await show_main_menu(update, text="Авторизация успешна ✅\n\nМеню:")
 
 
 @require_private

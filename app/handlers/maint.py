@@ -19,6 +19,7 @@ from .maint_helpers import (
     _maint_panel_text,
     _maint_restart_text,
     _normalize_scope,
+    _scope_label,
     format_maint,
     humanize_hhmm,
     parse_hhmm,
@@ -43,11 +44,19 @@ def _clear_maint_ctx(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 @require_admin
 async def maint_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
     active = get_active_maintenance()
     if active and str(active.get("id") or ""):
         _clear_maint_ctx(context)
         msg = update.effective_message
-        if msg:
+        if q and msg:
+            await q.answer()
+            await q.edit_message_text(
+                _maint_panel_text(active),
+                parse_mode=ParseMode.HTML,
+                reply_markup=_maint_control_kb(str(active["id"])),
+            )
+        elif msg:
             await msg.reply_text(
                 _maint_panel_text(active),
                 parse_mode=ParseMode.HTML,
@@ -56,7 +65,10 @@ async def maint_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     msg = update.effective_message
-    if msg:
+    if q and msg:
+        await q.answer()
+        await q.edit_message_text("Выберите область техработ:", reply_markup=scope_kb())
+    elif msg:
         await msg.reply_text("Выберите область техработ:", reply_markup=scope_kb())
     return STATE_MAINT_SCOPE
 

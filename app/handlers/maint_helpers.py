@@ -45,6 +45,7 @@ def scope_kb() -> InlineKeyboardMarkup:
     ]
     for key, label in _server_items():
         rows.append([InlineKeyboardButton(f"🖥 {label}", callback_data=f"maint:scope:{key}")])
+    rows.append([InlineKeyboardButton("🏠 Меню", callback_data="menu:home")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -54,7 +55,8 @@ def urgency_kb() -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton("🔥 Срочные", callback_data="maint:urgency:urgent"),
                 InlineKeyboardButton("🗓 Плановые", callback_data="maint:urgency:planned"),
-            ]
+            ],
+            [InlineKeyboardButton("🏠 Меню", callback_data="menu:home")],
         ]
     )
 
@@ -137,10 +139,13 @@ def _build_maint_record(scope: str, urgency: str, hh: int, mm: int, author_id: O
 
 def _maint_control_kb(maint_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        [[
-            InlineKeyboardButton("✅ Завершить", callback_data=f"maint:endconfirm:{maint_id}"),
-            InlineKeyboardButton("⏳ Продлить", callback_data=f"maint:extend:{maint_id}"),
-        ]]
+        [
+            [
+                InlineKeyboardButton("✅ Завершить", callback_data=f"maint:endconfirm:{maint_id}"),
+                InlineKeyboardButton("⏳ Продлить", callback_data=f"maint:extend:{maint_id}"),
+            ],
+            [InlineKeyboardButton("🏠 Меню", callback_data="menu:home")],
+        ]
     )
 
 
@@ -149,6 +154,7 @@ def _maint_end_confirm_kb(maint_id: str) -> InlineKeyboardMarkup:
         [
             [InlineKeyboardButton("✅ Подтвердить завершение", callback_data=f"maint:end:{maint_id}")],
             [InlineKeyboardButton("⬅️ Назад", callback_data=f"maint:cancelend:{maint_id}")],
+            [InlineKeyboardButton("🏠 Меню", callback_data="menu:home")],
         ]
     )
 
