@@ -6,7 +6,7 @@ from telegram.constants import ParseMode
 from telegram.ext import ContextTypes, ConversationHandler
 
 from ..config import TZ
-from ..storage import ImportantData, update_important_data
+from ..storage import next_ticket_seq
 from .common import (
     authorized_ids,
     clip_text,
@@ -21,6 +21,11 @@ from .common import (
 TICKET_SUBJECT, TICKET_URGENCY, TICKET_TEXT, TICKET_CONFIRM = range(4)
 MAX_TICKET_SUBJECT_LEN = 160
 MAX_TICKET_TEXT_LEN = 3200
+
+
+def _clear_ticket_ctx(context: ContextTypes.DEFAULT_TYPE) -> None:
+    for key in ("ticket_subject", "ticket_urgency", "ticket_text", "ticket_send_in_progress"):
+        context.user_data.pop(key, None)
 
 
 def ticket_urgency_kb() -> InlineKeyboardMarkup:
@@ -39,6 +44,7 @@ def ticket_confirm_kb() -> InlineKeyboardMarkup:
 
 @require_auth
 async def ticket_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    _clear_ticket_ctx(context)
     msg = update.effective_message
     if msg:
         await msg.reply_text("Тема тикета (кратко).\nДля отмены: /cancel")
@@ -116,34 +122,39 @@ async def ticket_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
     if q.data != "ticket:send":
         return ConversationHandler.END
-
-    uid = get_user_id(update)
-    author_name = display_name(update)
-    subj = context.user_data.get("ticket_subject", "-")
-    urg = str(context.user_data.get("ticket_urgency", "p3")).upper()
-    txt = clip_text(str(context.user_data.get("ticket_text", "-")), limit=3000)
-    created = datetime.now(TZ).strftime("%d.%m.%Y %H:%M")
-
-    admins = authorized_ids(role_filter="admin")
-    if not admins:
-        await q.edit_message_text("Тикет не отправлен: нет авторизованных администраторов.")
+    if context.user_data.get("ticket_send_in_progress"):
+        await q.edit_message_text("Тикет уже отправляется, подождите...")
         return ConversationHandler.END
+    context.user_data["ticket_send_in_progress"] = True
 
-    def _next_ticket(cfg: ImportantData) -> int:
-        cfg.tickets_seq += 1
-        return cfg.tickets_seq
+    try:
+        uid = get_user_id(update)
+        author_name = display_name(update)
+        subj = context.user_data.get("ticket_subject", "-")
+        urg = str(context.user_data.get("ticket_urgency", "p3")).upper()
+        txt = clip_text(str(context.user_data.get("ticket_text", "-")), limit=3000)
+        created = datetime.now(TZ).strftime("%d.%m.%Y %H:%M")
 
-    ticket_id = await update_important_data(_next_ticket)
+        admins = authorized_ids(role_filter="admin")
+        if not admins:
+            _clear_ticket_ctx(context)
+            await q.edit_message_text("Тикет не отправлен: нет авторизованных администраторов.")
+            return ConversationHandler.END
 
-    msg_text = (
-        f"🎫 <b>Новый тикет #{ticket_id}</b>\n"
-        f"• От: <b>{html_escape(author_name)}</b> (<code>{html_escape(str(uid) if uid is not None else '-')}</code>)\n"
-        f"• Время: <code>{html_escape(created)}</code>\n"
-        f"• Срочность: <code>{html_escape(str(urg))}</code>\n"
-        f"• Тема: <code>{html_escape(str(subj))}</code>\n\n"
-        f"Описание:\n{wrap_as_codeblock_html(str(txt))}"
-    )
+        ticket_id = await next_ticket_seq()
 
-    ok, fail = await send_to_many(context, admins, msg_text)
-    await q.edit_message_text(f"Тикет отправлен админам ✅ (ok={ok}, fail={fail})")
-    return ConversationHandler.END
+        msg_text = (
+            f"🎫 <b>Новый тикет #{ticket_id}</b>\n"
+            f"• От: <b>{html_escape(author_name)}</b> (<code>{html_escape(str(uid) if uid is not None else '-')}</code>)\n"
+            f"• Время: <code>{html_escape(created)}</code>\n"
+            f"• Срочность: <code>{html_escape(str(urg))}</code>\n"
+            f"• Тема: <code>{html_escape(str(subj))}</code>\n\n"
+            f"Описание:\n{wrap_as_codeblock_html(str(txt))}"
+        )
+
+        ok, fail = await send_to_many(context, admins, msg_text)
+        _clear_ticket_ctx(context)
+        await q.edit_message_text(f"Тикет отправлен админам ✅ (ok={ok}, fail={fail})")
+        return ConversationHandler.END
+    finally:
+        context.user_data.pop("ticket_send_in_progress", None)

@@ -44,8 +44,10 @@ from app.handlers.maint import (
     STATE_MAINT_DURATION,
     STATE_MAINT_EXTEND,
     STATE_MAINT_URGENCY,
+    maint_cancel_end_cb,
     maint_duration,
     maint_end_cb,
+    maint_end_confirm_cb,
     maint_extend_cb,
     maint_extend_duration,
     maint_restart_notify,
@@ -87,12 +89,24 @@ PRIVATE_TEXT = filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND
 
 
 async def on_error(update: object, context) -> None:
-    logger.exception("Unhandled exception in handler: %s", context.error)
+    try:
+        cb_data = getattr(getattr(update, "callback_query", None), "data", None)
+        user_id = getattr(getattr(update, "effective_user", None), "id", None)
+        chat_id = getattr(getattr(update, "effective_chat", None), "id", None)
+    except Exception:
+        cb_data = user_id = chat_id = None
+    logger.exception(
+        "Unhandled exception in handler: %s (user_id=%s chat_id=%s cb=%s)",
+        context.error,
+        user_id,
+        chat_id,
+        cb_data,
+    )
 
 
 def build_app() -> Application:
     if not BOT_TOKEN:
-        raise RuntimeError("Не задан BOT_TOKEN в .env")
+        raise RuntimeError("Не задан BOT_TOKEN в env.secrets")
     if not AUTH_PASSWORD and not ADMIN_PASSWORD:
         logger.warning("Не заданы AUTH_PASSWORD и ADMIN_PASSWORD: авторизация невозможна.")
 
@@ -122,6 +136,8 @@ def build_app() -> Application:
         persistent=False,
     )
     app.add_handler(maint_conv)
+    app.add_handler(CallbackQueryHandler(maint_end_confirm_cb, pattern=r"^maint:endconfirm:[0-9a-f]+$"))
+    app.add_handler(CallbackQueryHandler(maint_cancel_end_cb, pattern=r"^maint:cancelend:[0-9a-f]+$"))
     app.add_handler(CallbackQueryHandler(maint_end_cb, pattern=r"^maint:end:[0-9a-f]+$"))
 
     ticket_conv = ConversationHandler(
@@ -231,7 +247,7 @@ def build_app() -> Application:
 def main() -> None:
     app = build_app()
     logger.info("Bot started")
-    app.run_polling()
+    app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":

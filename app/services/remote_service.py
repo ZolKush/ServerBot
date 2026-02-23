@@ -1,4 +1,3 @@
-import asyncio
 import json
 import re
 import shlex
@@ -6,7 +5,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from ..config import DOCKER_BIN, SSH_BIN, SUBPROC_MEDIUM_TIMEOUT, SUBPROC_SHORT_TIMEOUT, SUDO_BIN, TZ, UFW_BIN, logger
-from .system_service import _fmt_bytes_binary, _parse_ufw_rules, parse_fail2ban_events, run_exec
+from .system_service import Fail2banEvent, _fmt_bytes_binary, _parse_ufw_rules, parse_fail2ban_events, run_exec
 
 _OUT_BEGIN = "__MBOT_OUT_BEGIN_43e1f3c4__"
 _OUT_END = "__MBOT_OUT_END_43e1f3c4__"
@@ -424,7 +423,7 @@ async def remote_fail2ban_stat(ssh_target: str, path: str) -> Optional[Tuple[int
     return None
 
 
-async def remote_fail2ban_events_last_day(ssh_target: str, path: str) -> List:
+async def remote_fail2ban_events_last_day(ssh_target: str, path: str) -> List[Fail2banEvent]:
     raw = await remote_tail_text_file(ssh_target, path=path, n_lines=20000)
     events = parse_fail2ban_events(raw.splitlines())
     until = datetime.now(tz=TZ)

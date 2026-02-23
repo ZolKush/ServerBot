@@ -7,13 +7,12 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
-from ..config import FAIL2BAN_LOG_PATH, FAIL2BAN_STATE_PATH, SERVERS, TZ, logger
+from ..config import FAIL2BAN_STATE_PATH, SERVERS, TZ, logger
 from ..services.remote_service import remote_fail2ban_events_last_day, remote_fail2ban_stat, remote_tail_text_file
 from ..services.system_service import (
     Fail2banEvent,
     load_json_file,
     parse_fail2ban_events,
-    read_fail2ban_new_lines_with_state_async,
     save_json_file,
     tail_text_file_async,
 )
@@ -57,6 +56,42 @@ def _parse_server_tail(data: str) -> Optional[tuple[str, int]]:
     if not m:
         return None
     return m.group(1), int(m.group(2))
+
+
+def _daily_state_path_for_server(server_key: str) -> str:
+    p = Path(FAIL2BAN_STATE_PATH)
+    suffix = p.suffix or ".json"
+    stem = p.name[: -len(suffix)] if p.name.endswith(suffix) else p.name
+    fname = f"{stem}.{server_key}{suffix}"
+    return str(p.with_name(fname))
+
+
+def _window_from_state(st: Dict[str, Any], until: datetime) -> datetime:
+    try:
+        if st.get("updated_at"):
+            return datetime.fromisoformat(str(st["updated_at"])).astimezone(TZ) - timedelta(seconds=1)
+    except Exception:
+        pass
+    return until - timedelta(days=1)
+
+
+async def _daily_digest_events_for_server(server_key: str, since: datetime, until: datetime) -> tuple[Optional[object], Optional[str]]:
+    srv = SERVERS.get(server_key)
+    if not srv:
+        return None, "server_not_found"
+    try:
+        if srv.mode == "ssh":
+            events = await remote_fail2ban_events_last_day(srv.ssh_target, srv.fail2ban_log_path)
+        else:
+            raw_tail = await tail_text_file_async(srv.fail2ban_log_path, n_lines=20000, max_bytes=3_000_000)
+            events = parse_fail2ban_events(raw_tail.splitlines())
+        return [e for e in events if since <= e.ts <= until], None
+    except FileNotFoundError:
+        return None, f"Лог-файл не найден: {srv.fail2ban_log_path}"
+    except PermissionError:
+        return None, f"Нет прав на чтение: {srv.fail2ban_log_path}"
+    except Exception as e:
+        return None, str(e)
 
 
 async def build_fail2ban_menu_text(server_key: str) -> str:
@@ -285,39 +320,34 @@ async def f2b_back_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def fail2ban_daily_digest(context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
-        st_before = await load_json_file(FAIL2BAN_STATE_PATH)
-        raw_lines, new_state = await read_fail2ban_new_lines_with_state_async(FAIL2BAN_LOG_PATH, FAIL2BAN_STATE_PATH)
-        if not raw_lines:
-            if new_state is not None:
-                await save_json_file(FAIL2BAN_STATE_PATH, new_state)
-            return
-        events = parse_fail2ban_events(raw_lines)
-
-        ban_events = [e for e in events if e.action in ("Ban", "Restore Ban")]
-        if not ban_events:
-            if new_state is not None:
-                await save_json_file(FAIL2BAN_STATE_PATH, new_state)
+        admin_ids = authorized_ids(role_filter="admin")
+        if not admin_ids:
             return
 
         until = datetime.now(tz=TZ)
-        since = None
-        try:
-            if st_before.get("updated_at"):
-                since = datetime.fromisoformat(st_before["updated_at"]).astimezone(TZ) - timedelta(seconds=1)
-        except Exception:
-            since = None
-        if since is None:
-            since = until - timedelta(days=1)
+        for server_key, srv in SERVERS.items():
+            state_path = _daily_state_path_for_server(server_key)
+            st_before = await load_json_file(state_path)
+            since = _window_from_state(st_before, until)
 
-        payload = build_fail2ban_digest_text(events, since=since, until=until)
+            events, err = await _daily_digest_events_for_server(server_key, since=since, until=until)
+            new_state = {"updated_at": until.isoformat(), "server_key": server_key}
 
-        admin_ids = authorized_ids(role_filter="admin")
-        if not admin_ids:
-            if new_state is not None:
-                await save_json_file(FAIL2BAN_STATE_PATH, new_state)
-            return
-        await send_to_many(context, admin_ids, payload)
-        if new_state is not None:
-            await save_json_file(FAIL2BAN_STATE_PATH, new_state)
+            if err:
+                logger.warning("fail2ban_daily_digest %s (%s) skipped: %s", server_key, srv.label, err)
+                await save_json_file(state_path, new_state)
+                continue
+            if not isinstance(events, list):
+                await save_json_file(state_path, new_state)
+                continue
+
+            ban_events = [e for e in events if e.action in ("Ban", "Restore Ban")]
+            if not ban_events:
+                await save_json_file(state_path, new_state)
+                continue
+
+            payload = f"🌍 <b>Сервер:</b> {html_escape(srv.label)}\n" + build_fail2ban_digest_text(events, since=since, until=until)
+            await send_to_many(context, admin_ids, payload)
+            await save_json_file(state_path, new_state)
     except Exception:
         logger.exception("fail2ban_daily_digest error")

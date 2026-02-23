@@ -5,10 +5,17 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
-from ..services.docker_service import docker_inspect_summary, docker_logs_tail, is_allowed_container
+from ..services.docker_service import docker_inspect_summary, docker_logs_tail, is_valid_container_name
 from ..services.remote_service import remote_docker_inspect_summary, remote_docker_logs_tail
 from .common import clip_text, html_escape, require_admin, wrap_as_codeblock_html
 from .status import build_status_message, get_server_target
+
+
+def _is_server_container_allowed(server_key: str, name: str) -> bool:
+    srv = get_server_target(server_key)
+    if not srv:
+        return False
+    return bool(is_valid_container_name(name) and name in srv.monitor_containers)
 
 
 def _docker_list_kb(server_key: str) -> InlineKeyboardMarkup:
@@ -17,7 +24,7 @@ def _docker_list_kb(server_key: str) -> InlineKeyboardMarkup:
     row: List[InlineKeyboardButton] = []
     containers = srv.monitor_containers if srv else []
     for nm in containers:
-        if not is_allowed_container(nm):
+        if not is_valid_container_name(nm):
             continue
         row.append(InlineKeyboardButton(nm[:32], callback_data=f"docker:show:{server_key}:{nm}"))
         if len(row) == 2:
@@ -97,7 +104,7 @@ async def docker_show(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not srv:
         await q.edit_message_text("Сервер не найден.")
         return
-    if not is_allowed_container(name) or name not in set(srv.monitor_containers):
+    if not _is_server_container_allowed(server_key, name):
         await q.edit_message_text("Контейнер недоступен.", reply_markup=_docker_list_kb(server_key))
         return
     await q.edit_message_text(
@@ -121,7 +128,7 @@ async def docker_inspect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not srv:
         await q.edit_message_text("Сервер не найден.")
         return
-    if not is_allowed_container(name) or name not in set(srv.monitor_containers):
+    if not _is_server_container_allowed(server_key, name):
         await q.edit_message_text("Контейнер недоступен.", reply_markup=_docker_list_kb(server_key))
         return
     if srv.mode == "ssh":
@@ -149,7 +156,7 @@ async def docker_logs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not srv:
         await q.edit_message_text("Сервер не найден.")
         return
-    if not is_allowed_container(name) or name not in set(srv.monitor_containers):
+    if not _is_server_container_allowed(server_key, name):
         await q.edit_message_text("Контейнер недоступен.", reply_markup=_docker_list_kb(server_key))
         return
 
