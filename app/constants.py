@@ -1,0 +1,5 @@
+MENU_STATUS = "📊 Статус сервера"
+MENU_TICKET = "🎫 Создать тикет"
+MENU_USERS = "👥 Пользователи"
+MENU_MAINT = "🛠 Техработы"
+MENU_FAIL2BAN = "🛡 Fail2ban"

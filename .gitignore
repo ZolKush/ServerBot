@@ -3,6 +3,12 @@
 **/.env
 .env.*
 **/.env.*
+env.secrets
+**/env.secrets
+!.env.example
+!**/.env.example
+!env.secrets.example
+!**/env.secrets.example
 
 # runtime data
 data/

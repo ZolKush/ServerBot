@@ -1,23 +1,67 @@
 from datetime import datetime
+from time import monotonic
 from typing import Optional
 
 from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
-from ..config import ADMIN_PASSWORD, AUTH_PASSWORD, TZ
-from ..storage import USER_DATA, update_user_data
-from ..storage import _remove_user, _set_user_meta
+from ..config import ADMIN_PASSWORD, AUTH_PASSWORD, TZ, logger
+from ..storage import get_user_meta_copy, remove_user_meta, upsert_user_meta
 from .common import (
     get_user_id,
     get_user_meta,
     is_admin,
     is_authorized,
     is_enabled,
-    main_menu_kb,
+    main_menu_inline_kb,
     reply_disabled,
     require_private,
+    show_main_menu,
 )
+
+AUTH_FAIL_WINDOW_SEC = 300
+AUTH_MAX_FAILS_IN_WINDOW = 5
+AUTH_LOCKOUT_SEC = 600
+_AUTH_FAILS: dict[str, list[float]] = {}
+_AUTH_LOCKED_UNTIL: dict[str, float] = {}
+
+
+def _auth_actor_key(update: Update) -> str:
+    u = update.effective_user
+    if u:
+        return f"user:{u.id}"
+    chat = update.effective_chat
+    if chat:
+        return f"chat:{chat.id}"
+    return "unknown"
+
+
+def _auth_lock_remaining_sec(update: Update) -> int:
+    key = _auth_actor_key(update)
+    now = monotonic()
+    until = _AUTH_LOCKED_UNTIL.get(key, 0.0)
+    if until <= now:
+        _AUTH_LOCKED_UNTIL.pop(key, None)
+        return 0
+    return int(until - now) + 1
+
+
+def _auth_register_failure(update: Update) -> None:
+    key = _auth_actor_key(update)
+    now = monotonic()
+    attempts = [ts for ts in _AUTH_FAILS.get(key, []) if (now - ts) <= AUTH_FAIL_WINDOW_SEC]
+    attempts.append(now)
+    _AUTH_FAILS[key] = attempts
+    if len(attempts) >= AUTH_MAX_FAILS_IN_WINDOW:
+        _AUTH_LOCKED_UNTIL[key] = now + AUTH_LOCKOUT_SEC
+        _AUTH_FAILS[key] = []
+
+
+def _auth_reset_limits(update: Update) -> None:
+    key = _auth_actor_key(update)
+    _AUTH_FAILS.pop(key, None)
+    _AUTH_LOCKED_UNTIL.pop(key, None)
 
 
 @require_private
@@ -25,9 +69,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if is_authorized(update) and not is_enabled(update):
         await reply_disabled(update)
         return
-    msg = update.effective_message
-    if msg:
-        await msg.reply_text("Меню:", reply_markup=main_menu_kb(update))
+    await show_main_menu(update)
 
 
 @require_private
@@ -45,14 +87,25 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     ]
     if is_admin(update):
         lines += ["", "<b>Админ</b>", "• кнопка «Пользователи» — сообщения/никнеймы"]
+    q = update.callback_query
     msg = update.effective_message
+    if q and msg:
+        await q.answer()
+        await q.edit_message_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=main_menu_inline_kb(update))
+        return
     if msg:
-        await msg.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+        await msg.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=main_menu_inline_kb(update))
 
 
 @require_private
 async def cmd_auth(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     msg = update.effective_message
+    left = _auth_lock_remaining_sec(update)
+    if left > 0:
+        if msg:
+            await msg.reply_text(f"Слишком много попыток. Повторите через {left} сек.")
+        return
+
     text = (msg.text if msg else "") or ""
     parts = text.split(maxsplit=1)
     if len(parts) < 2:
@@ -73,6 +126,8 @@ async def cmd_auth(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         role = "user"
 
     if role is None:
+        _auth_register_failure(update)
+        logger.warning("Auth failed for %s", _auth_actor_key(update))
         if msg:
             await msg.reply_text("Пароль неверный.")
         return
@@ -102,14 +157,14 @@ async def cmd_auth(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "auth_at": datetime.now(TZ).isoformat(),
         "is_paid": preserved_paid,
     }
-    await update_user_data(lambda cfg: _set_user_meta(cfg, u.id, meta))
+    await upsert_user_meta(u.id, meta)
+    _auth_reset_limits(update)
 
     if not preserved_enabled:
         await reply_disabled(update)
         return
 
-    if msg:
-        await msg.reply_text("Авторизация успешна ✅", reply_markup=main_menu_kb(update))
+    await show_main_menu(update, text="Авторизация успешна ✅\n\nМеню:")
 
 
 @require_private
@@ -123,8 +178,8 @@ async def cmd_logout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if uid is None:
         return
 
-    if str(uid) in USER_DATA.authorized_users:
-        await update_user_data(lambda cfg: _remove_user(cfg, uid))
+    if get_user_meta_copy(uid) is not None:
+        await remove_user_meta(uid)
         if msg:
             await msg.reply_text("Вы удалены из списка авторизованных.")
     else:
