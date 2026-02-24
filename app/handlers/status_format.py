@@ -40,6 +40,8 @@ def _dns_summary_line(snapshot: StatusSnapshot) -> str:
     unknown = int(snapshot.dns_unknown_domains or 0)
     if total <= 0:
         return "🌐 DNS: ⚠️ не настроено"
+    if ok == 0 and bad == 0 and unknown == 0:
+        return f"🌐 DNS: ⚠️ нет свежих данных ({total} доменов)"
     if bad == 0 and unknown == 0:
         return f"🌐 DNS: ✅ {ok}/{total} доменов OK"
     parts = [f"ok={ok}/{total}"]

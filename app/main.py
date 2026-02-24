@@ -53,9 +53,11 @@ from app.handlers.maint import (
 )
 from app.handlers.status import (
     cmd_health,
+    dns_daily_refresh,
     dns_back_cb,
     dns_check_cb,
     status_detail_cb,
+    status_dns_refresh_cb,
     status_pick_cb,
     status_show_cb,
     status_ufw_cb,
@@ -221,6 +223,7 @@ def build_app() -> Application:
     app.add_handler(CallbackQueryHandler(status_show_cb, pattern=r"^status:show:[a-z0-9_-]{1,12}$"))
     app.add_handler(CallbackQueryHandler(status_detail_cb, pattern=r"^status:detail:[a-z0-9_-]{1,12}:(full|brief)$"))
     app.add_handler(CallbackQueryHandler(status_ufw_cb, pattern=r"^status:ufw:[a-z0-9_-]{1,12}$"))
+    app.add_handler(CallbackQueryHandler(status_dns_refresh_cb, pattern=r"^status:dnsrefresh:[a-z0-9_-]{1,12}$"))
     app.add_handler(CallbackQueryHandler(dns_check_cb, pattern=r"^dns:check:[a-z0-9_-]{1,12}$"))
     app.add_handler(CallbackQueryHandler(dns_back_cb, pattern=r"^dns:back:[a-z0-9_-]{1,12}$"))
     app.add_handler(CallbackQueryHandler(docker_list_menu, pattern=r"^docker:list:[a-z0-9_-]{1,12}$"))
@@ -253,6 +256,12 @@ def build_app() -> Application:
             time=dtime(hour=hh, minute=mm, tzinfo=TZ),
             name="fail2ban_digest",
         )
+        app.job_queue.run_daily(
+            dns_daily_refresh,
+            time=dtime(hour=3, minute=5, tzinfo=TZ),
+            name="dns_daily_refresh",
+        )
+        app.job_queue.run_once(dns_daily_refresh, when=5, name="dns_refresh_startup")
         app.job_queue.run_once(maint_restart_notify, when=2, name="maint_restart_notify")
     else:
         logger.warning("JobQueue недоступен: для ежедневной выжимки установите python-telegram-bot[job-queue].")

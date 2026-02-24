@@ -135,6 +135,7 @@ class UserData:
 class ImportantData:
     tickets_seq: int = 0
     maintenance: Dict[str, Any] = field(default_factory=dict)
+    dns_status: Dict[str, Any] = field(default_factory=dict)
 
     @staticmethod
     def _migrate(raw: Dict[str, Any]) -> "ImportantData":
@@ -142,13 +143,16 @@ class ImportantData:
         maintenance = raw.get("maintenance", {})
         if not isinstance(maintenance, dict):
             maintenance = {}
-        return ImportantData(tickets_seq=tickets_seq, maintenance=maintenance)
+        dns_status = raw.get("dns_status", {})
+        if not isinstance(dns_status, dict):
+            dns_status = {}
+        return ImportantData(tickets_seq=tickets_seq, maintenance=maintenance, dns_status=dns_status)
 
     @staticmethod
     def _needs_rewrite(raw: Dict[str, Any]) -> bool:
         if raw.get("schema_version") != IMPORTANT_DATA_SCHEMA_VERSION:
             return True
-        allowed_keys = {"schema_version", "tickets_seq", "maintenance"}
+        allowed_keys = {"schema_version", "tickets_seq", "maintenance", "dns_status"}
         return any(k not in allowed_keys for k in raw.keys())
 
     @classmethod
@@ -179,6 +183,7 @@ class ImportantData:
                 "schema_version": IMPORTANT_DATA_SCHEMA_VERSION,
                 "tickets_seq": self.tickets_seq,
                 "maintenance": self.maintenance,
+                "dns_status": self.dns_status,
             }
             tmp_path = Path(path)
             tmp_path.parent.mkdir(parents=True, exist_ok=True)
@@ -196,6 +201,7 @@ class ImportantData:
                     "schema_version": IMPORTANT_DATA_SCHEMA_VERSION,
                     "tickets_seq": self.tickets_seq,
                     "maintenance": self.maintenance,
+                    "dns_status": self.dns_status,
                 },
             )
         except Exception as e:
@@ -222,6 +228,7 @@ def _refresh_important_snapshot() -> None:
     IMPORTANT_DATA_SNAPSHOT = {
         "tickets_seq": int(getattr(IMPORTANT_DATA, "tickets_seq", 0) or 0),
         "maintenance": dict(getattr(IMPORTANT_DATA, "maintenance", {}) or {}),
+        "dns_status": dict(getattr(IMPORTANT_DATA, "dns_status", {}) or {}),
     }
 
 
@@ -264,6 +271,13 @@ def _clear_maintenance(cfg: ImportantData) -> None:
     cfg.maintenance = {}
 
 
+def _set_dns_status(cfg: ImportantData, server_key: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    cur = dict(getattr(cfg, "dns_status", {}) or {})
+    cur[str(server_key)] = dict(payload or {})
+    cfg.dns_status = cur
+    return dict(cur[str(server_key)])
+
+
 def _get_active_maintenance() -> Optional[Dict[str, Any]]:
     m = getattr(IMPORTANT_DATA, "maintenance", None)
     if isinstance(m, dict) and m.get("active"):
@@ -301,6 +315,18 @@ def get_active_maintenance() -> Optional[Dict[str, Any]]:
     if isinstance(m, dict) and m.get("active"):
         return dict(m)
     return None
+
+
+def get_dns_status_cache(server_key: str) -> Optional[Dict[str, Any]]:
+    dns = IMPORTANT_DATA_SNAPSHOT.get("dns_status")
+    if not isinstance(dns, dict):
+        return None
+    item = dns.get(str(server_key))
+    return dict(item) if isinstance(item, dict) else None
+
+
+async def set_dns_status_cache(server_key: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    return await update_important_data(lambda cfg: _set_dns_status(cfg, server_key, payload))
 
 
 async def next_ticket_seq() -> int:

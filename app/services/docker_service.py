@@ -19,27 +19,41 @@ def is_allowed_container(name: str) -> bool:
 
 
 async def docker_containers(names: Sequence[str]) -> List[Tuple[str, bool, str, str]]:
-    rc, _, _ = await run_exec([DOCKER_BIN, "info"], timeout=SUBPROC_SHORT_TIMEOUT)
-    if rc != 0:
-        return [(n, False, "docker недоступен", "-") for n in names]
-
-    rc, out, _ = await run_exec([DOCKER_BIN, "ps", "-a", "--format", "{{.Names}}|{{.Status}}"], timeout=SUBPROC_MEDIUM_TIMEOUT)
-    if rc != 0:
-        return [(n, False, "ошибка docker ps", "-") for n in names]
-
+    # Fast path: try to get status + restart count in one command.
+    rc, out, _ = await run_exec(
+        [DOCKER_BIN, "ps", "-a", "--format", "{{.Names}}|{{.Status}}|{{.RestartCount}}"],
+        timeout=SUBPROC_MEDIUM_TIMEOUT,
+    )
+    single_pass = rc == 0 and ("|" in out)
     info: Dict[str, str] = {}
-    for line in out.splitlines():
-        parts = line.split("|", 1)
-        if len(parts) == 2:
-            info[parts[0].strip()] = parts[1].strip()
-
-    rc2, out2, _ = await run_exec([DOCKER_BIN, "ps", "-a", "--format", "{{.Names}}|{{.RestartCount}}"], timeout=SUBPROC_MEDIUM_TIMEOUT)
     restarts: Dict[str, str] = {}
-    if rc2 == 0:
-        for ln in out2.splitlines():
-            p = ln.split("|", 1)
-            if len(p) == 2:
-                restarts[p[0].strip()] = p[1].strip()
+    if single_pass:
+        for line in out.splitlines():
+            parts = line.split("|", 2)
+            if len(parts) >= 2:
+                nm = parts[0].strip()
+                info[nm] = parts[1].strip()
+                if len(parts) == 3 and parts[2].strip():
+                    restarts[nm] = parts[2].strip()
+    else:
+        rc, out, _ = await run_exec([DOCKER_BIN, "ps", "-a", "--format", "{{.Names}}|{{.Status}}"], timeout=SUBPROC_MEDIUM_TIMEOUT)
+        if rc != 0:
+            return [(n, False, "docker недоступен", "-") for n in names]
+
+        for line in out.splitlines():
+            parts = line.split("|", 1)
+            if len(parts) == 2:
+                info[parts[0].strip()] = parts[1].strip()
+
+        rc2, out2, _ = await run_exec(
+            [DOCKER_BIN, "ps", "-a", "--format", "{{.Names}}|{{.RestartCount}}"],
+            timeout=SUBPROC_MEDIUM_TIMEOUT,
+        )
+        if rc2 == 0:
+            for ln in out2.splitlines():
+                p = ln.split("|", 1)
+                if len(p) == 2:
+                    restarts[p[0].strip()] = p[1].strip()
 
     result: List[Tuple[str, bool, str, str]] = []
     for n in names:
