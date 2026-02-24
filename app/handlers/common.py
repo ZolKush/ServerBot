@@ -8,7 +8,7 @@ from functools import wraps
 from datetime import datetime
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove, Update
 from telegram.constants import ChatType, ParseMode
 from telegram.error import BadRequest, NetworkError, RetryAfter, TimedOut
 from telegram.ext import ContextTypes, ConversationHandler
@@ -209,7 +209,6 @@ def main_menu_inline_kb(update: Update) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(MENU_MAINT, callback_data="menu:maint"),
             ]
         )
-        rows.append([InlineKeyboardButton("🛡️ Fail2ban", callback_data="menu:fail2ban")])
     rows.append([InlineKeyboardButton("ℹ️ Помощь", callback_data="menu:help")])
     return InlineKeyboardMarkup(rows)
 
@@ -233,6 +232,11 @@ async def show_main_menu(update: Update, text: str = "Меню:") -> None:
         return
     msg = update.effective_message
     if msg:
+        # Remove legacy reply keyboard (from older versions) before showing inline menu.
+        try:
+            await msg.reply_text("ℹ️ Обновлён интерфейс: используйте кнопки в сообщении ниже.", reply_markup=ReplyKeyboardRemove())
+        except Exception:
+            pass
         await msg.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
 
 

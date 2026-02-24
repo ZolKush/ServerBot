@@ -24,6 +24,7 @@ class StatusSnapshot:
     dns_total_domains: int = 0
     dns_bad_domains: int = 0
     dns_unknown_domains: int = 0
+    dns_error_details: List[str] = field(default_factory=list)
     ufw_allow: List[str] = field(default_factory=list)
     ufw_deny: List[str] = field(default_factory=list)
     ufw_reject: List[str] = field(default_factory=list)

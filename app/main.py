@@ -21,10 +21,6 @@ from app.config import (
     AUTH_PASSWORD,
     BOT_TOKEN,
     FAIL2BAN_DAILY_AT,
-    MENU_MAINT,
-    MENU_STATUS,
-    MENU_TICKET,
-    MENU_USERS,
     TZ,
     logger,
 )
@@ -55,7 +51,15 @@ from app.handlers.maint import (
     maint_start,
     maint_urgency,
 )
-from app.handlers.status import cmd_health, dns_back_cb, dns_check_cb, status_detail_cb, status_pick_cb, status_show_cb
+from app.handlers.status import (
+    cmd_health,
+    dns_back_cb,
+    dns_check_cb,
+    status_detail_cb,
+    status_pick_cb,
+    status_show_cb,
+    status_ufw_cb,
+)
 from app.handlers.tickets import (
     TICKET_CONFIRM,
     TICKET_SUBJECT,
@@ -124,7 +128,6 @@ def build_app() -> Application:
     maint_conv = ConversationHandler(
         entry_points=[
             CommandHandler("maint", maint_start),
-            MessageHandler(filters.ChatType.PRIVATE & filters.Regex(rf"^{re.escape(MENU_MAINT)}$"), maint_start),
             CallbackQueryHandler(maint_start, pattern=r"^menu:maint$"),
             CallbackQueryHandler(maint_extend_cb, pattern=r"^maint:extend:[0-9a-f]+$"),
         ],
@@ -149,7 +152,6 @@ def build_app() -> Application:
     ticket_conv = ConversationHandler(
         entry_points=[
             CommandHandler("ticket", ticket_start),
-            MessageHandler(filters.ChatType.PRIVATE & filters.Regex(rf"^{re.escape(MENU_TICKET)}$"), ticket_start),
             CallbackQueryHandler(ticket_start, pattern=r"^menu:ticket$"),
         ],
         states={
@@ -169,7 +171,6 @@ def build_app() -> Application:
 
     users_conv = ConversationHandler(
         entry_points=[
-            MessageHandler(filters.ChatType.PRIVATE & filters.Regex(rf"^{re.escape(MENU_USERS)}$"), users_entry),
             CommandHandler("users", users_entry),
             CallbackQueryHandler(users_entry, pattern=r"^menu:users$"),
         ],
@@ -215,11 +216,11 @@ def build_app() -> Application:
     app.add_handler(CallbackQueryHandler(menu_home_cb, pattern=r"^menu:home$"))
     app.add_handler(CallbackQueryHandler(cmd_help, pattern=r"^menu:help$"))
     app.add_handler(CallbackQueryHandler(cmd_health, pattern=r"^menu:status$"))
-    app.add_handler(CallbackQueryHandler(fail2ban_menu, pattern=r"^menu:fail2ban$"))
 
     app.add_handler(CallbackQueryHandler(status_pick_cb, pattern=r"^status:pick$"))
     app.add_handler(CallbackQueryHandler(status_show_cb, pattern=r"^status:show:[a-z0-9_-]{1,12}$"))
     app.add_handler(CallbackQueryHandler(status_detail_cb, pattern=r"^status:detail:[a-z0-9_-]{1,12}:(full|brief)$"))
+    app.add_handler(CallbackQueryHandler(status_ufw_cb, pattern=r"^status:ufw:[a-z0-9_-]{1,12}$"))
     app.add_handler(CallbackQueryHandler(dns_check_cb, pattern=r"^dns:check:[a-z0-9_-]{1,12}$"))
     app.add_handler(CallbackQueryHandler(dns_back_cb, pattern=r"^dns:back:[a-z0-9_-]{1,12}$"))
     app.add_handler(CallbackQueryHandler(docker_list_menu, pattern=r"^docker:list:[a-z0-9_-]{1,12}$"))
@@ -239,13 +240,6 @@ def build_app() -> Application:
     app.add_handler(CallbackQueryHandler(f2b_tail_cb, pattern=r"^f2b:tail:[a-z0-9_-]{1,12}:\d{1,5}$"))
     app.add_handler(CallbackQueryHandler(f2b_digest_cb, pattern=r"^f2b:digest:[a-z0-9_-]{1,12}$"))
     app.add_handler(CallbackQueryHandler(f2b_back_cb, pattern=r"^f2b:back:[a-z0-9_-]{1,12}$"))
-
-    app.add_handler(
-        MessageHandler(
-            filters.ChatType.PRIVATE & filters.Regex(rf"^{re.escape(MENU_STATUS)}$"),
-            cmd_health,
-        )
-    )
 
     if app.job_queue:
         try:

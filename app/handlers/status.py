@@ -26,7 +26,7 @@ from ..services.system_service import (
     check_uptime,
 )
 from .common import breadcrumbs, html_escape, is_admin, now_str, require_auth, ui_error_text
-from .status_format import format_status_message
+from .status_format import format_status_message, format_ufw_message
 from .status_models import DockerContainerView, StatusSnapshot
 
 
@@ -74,18 +74,10 @@ def _server_flag(server: ServerTarget) -> str:
 def _status_actions_kb(admin_mode: bool, server_key: str, *, detailed: bool = False) -> InlineKeyboardMarkup:
     rows: List[List[InlineKeyboardButton]] = []
     rows.append([InlineKeyboardButton("🔄 Обновить", callback_data=f"status:show:{server_key}")])
-    rows.append(
-        [
-            InlineKeyboardButton(
-                "📖 Скрыть детали" if detailed else "📖 Подробнее",
-                callback_data=f"status:detail:{server_key}:{'brief' if detailed else 'full'}",
-            )
-        ]
-    )
+    rows.append([InlineKeyboardButton("🛡️ UFW", callback_data=f"status:ufw:{server_key}")])
     if admin_mode:
         rows.append([InlineKeyboardButton("🐳 Docker: inspect/logs", callback_data=f"docker:list:{server_key}")])
         rows.append([InlineKeyboardButton("🛡️ Fail2ban: logs", callback_data=f"f2b:menu:{server_key}")])
-    rows.append([InlineKeyboardButton("DNS проверка", callback_data=f"dns:check:{server_key}")])
     if len(SERVERS) > 1:
         rows.append([InlineKeyboardButton("⬅️ К выбору сервера", callback_data="status:pick")])
     rows.append([InlineKeyboardButton("🏠 Меню", callback_data="menu:home")])
@@ -102,6 +94,11 @@ def _parse_status_detail_callback(data: str) -> Optional[Tuple[str, bool]]:
     if not m:
         return None
     return m.group(1), (m.group(2) == "full")
+
+
+def _parse_status_ufw_callback(data: str) -> Optional[str]:
+    m = re.fullmatch(r"status:ufw:([a-z0-9_-]{1,12})", data or "")
+    return m.group(1) if m else None
 
 
 def _exc_brief(value: object) -> str:
@@ -174,6 +171,37 @@ async def status_detail_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
 
 
+def _ufw_actions_kb(server_key: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("🔄 Обновить UFW", callback_data=f"status:ufw:{server_key}")],
+            [InlineKeyboardButton("⬅️ Назад к статусу", callback_data=f"status:show:{server_key}")],
+            [InlineKeyboardButton("🏠 Меню", callback_data="menu:home")],
+        ]
+    )
+
+
+@require_auth
+async def status_ufw_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    if not q:
+        return
+    await q.answer()
+    server_key = _parse_status_ufw_callback(q.data or "")
+    if not server_key or not get_server_target(server_key):
+        await q.edit_message_text(ui_error_text("сервер не найден."), reply_markup=_status_pick_kb())
+        return
+    snapshot, server = await _build_status_snapshot_and_server(update, server_key)
+    if not snapshot or not server:
+        await q.edit_message_text(ui_error_text("сервер не найден."), reply_markup=_status_pick_kb())
+        return
+    await q.edit_message_text(
+        format_ufw_message(snapshot),
+        parse_mode=ParseMode.HTML,
+        reply_markup=_ufw_actions_kb(server.key),
+    )
+
+
 async def _build_status_payload_local(admin_mode: bool, server: ServerTarget):
     up, mem, disk, cont, ufw_data = await asyncio.gather(
         check_uptime(),
@@ -229,12 +257,13 @@ async def _build_status_payload_remote(admin_mode: bool, server: ServerTarget):
     return up, mem, disk, cont, ufw_s, allow, deny, reject
 
 
-async def _build_dns_summary(server: ServerTarget) -> Tuple[int, int, int]:
+async def _build_dns_summary(server: ServerTarget) -> Tuple[int, int, int, List[str]]:
     domains = list(server.check_a_domains)
     if not domains:
-        return 0, 0, 0
+        return 0, 0, 0, []
     expected_ip = (server.expected_a_ip or "").strip()
     ok = bad = unknown = 0
+    details: List[str] = []
     custom_resolvers_supported = dns_supports_custom_resolver()
     if custom_resolvers_supported and DNS_RESOLVERS:
         for dom in domains:
@@ -250,8 +279,13 @@ async def _build_dns_summary(server: ServerTarget) -> Tuple[int, int, int]:
                         merged.append(ip)
             if not merged:
                 unknown += 1
+                details.append(f"• <code>{html_escape(dom)}</code>: ⚠️ нет ответа")
             elif expected_ip and expected_ip not in merged:
                 bad += 1
+                details.append(
+                    f"• <code>{html_escape(dom)}</code>: ❌ ожидался <code>{html_escape(expected_ip)}</code>, "
+                    f"получено <code>{html_escape(', '.join(merged))}</code>"
+                )
             else:
                 ok += 1
     else:
@@ -262,11 +296,16 @@ async def _build_dns_summary(server: ServerTarget) -> Tuple[int, int, int]:
                 ips = []
             if not ips:
                 unknown += 1
+                details.append(f"• <code>{html_escape(dom)}</code>: ⚠️ нет ответа")
             elif expected_ip and expected_ip not in ips:
                 bad += 1
+                details.append(
+                    f"• <code>{html_escape(dom)}</code>: ❌ ожидался <code>{html_escape(expected_ip)}</code>, "
+                    f"получено <code>{html_escape(', '.join(ips))}</code>"
+                )
             else:
                 ok += 1
-    return ok, bad, unknown
+    return ok, bad, unknown, details
 
 
 async def _build_status_snapshot(update: Update, server: ServerTarget) -> StatusSnapshot:
@@ -279,7 +318,7 @@ async def _build_status_snapshot(update: Update, server: ServerTarget) -> Status
         status_task,
         _build_dns_summary(server),
     )
-    dns_ok, dns_bad, dns_unknown = dns_summary
+    dns_ok, dns_bad, dns_unknown, dns_error_details = dns_summary
 
     containers = [
         DockerContainerView(name=name, is_up=upb, status_text=st, restarts=rst)
@@ -298,12 +337,20 @@ async def _build_status_snapshot(update: Update, server: ServerTarget) -> Status
         dns_total_domains=len(list(server.check_a_domains)),
         dns_bad_domains=dns_bad,
         dns_unknown_domains=dns_unknown,
+        dns_error_details=dns_error_details,
         ufw_allow=list(allow),
         ufw_deny=list(deny),
         ufw_reject=list(reject),
         containers=containers,
         admin_mode=admin_mode,
     )
+
+
+async def _build_status_snapshot_and_server(update: Update, server_key: Optional[str]) -> Tuple[Optional[StatusSnapshot], Optional[ServerTarget]]:
+    server = get_server_target(server_key) if server_key else _default_server_target()
+    if not server:
+        return None, None
+    return await _build_status_snapshot(update, server), server
 
 
 async def build_status_message(
