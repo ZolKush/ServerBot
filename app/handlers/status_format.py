@@ -62,11 +62,9 @@ def _docker_summary_lines(snapshot: StatusSnapshot, detailed: bool) -> List[str]
     for c in snapshot.containers:
         emoji = "🟢" if c.is_up else "🔴"
         if detailed:
-            lines.append(
-                f"{emoji} {html_escape(c.name)} — {html_escape(c.status_text)} (r:{html_escape(c.restarts)})"
-            )
+            lines.append(f"{emoji} {html_escape(c.name)} — {html_escape(c.status_text)}")
         else:
-            lines.append(f"{emoji} {html_escape(c.name)} (r:{html_escape(c.restarts)})")
+            lines.append(f"{emoji} {html_escape(c.name)}")
     return lines
 
 

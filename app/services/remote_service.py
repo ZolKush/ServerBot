@@ -14,7 +14,6 @@ _SEC_MEMINFO = "__MBOT_SEC_MEMINFO__"
 _SEC_DF = "__MBOT_SEC_DF__"
 _SEC_UFW = "__MBOT_SEC_UFW__"
 _SEC_DOCKER_STATUS = "__MBOT_SEC_DOCKER_STATUS__"
-_SEC_DOCKER_RESTARTS = "__MBOT_SEC_DOCKER_RESTARTS__"
 
 
 def _extract_wrapped_stdout(text: str) -> str:
@@ -41,7 +40,6 @@ def _split_sections(text: str) -> Dict[str, str]:
         _SEC_DF,
         _SEC_UFW,
         _SEC_DOCKER_STATUS,
-        _SEC_DOCKER_RESTARTS,
     }
     cur = None
     buf: Dict[str, List[str]] = {}
@@ -294,10 +292,6 @@ done
 if [ -n "$docker_cmd" ]; then
   sh -c "$docker_cmd ps -a --format '{{{{.Names}}}}|{{{{.Status}}}}' 2>/dev/null" || true
 fi
-echo {_SEC_DOCKER_RESTARTS}
-if [ -n "$docker_cmd" ]; then
-  sh -c "$docker_cmd ps -a --format '{{{{.Names}}}}|{{{{.RestartCount}}}}' 2>/dev/null" || true
-fi
 """.strip()
     rc, out, _ = await ssh_run_shell(ssh_target, shell, timeout=max(SUBPROC_MEDIUM_TIMEOUT, SUBPROC_SHORT_TIMEOUT) + 4)
     if rc != 0 and not out.strip():
@@ -323,22 +317,16 @@ fi
         p = line.split("|", 1)
         if len(p) == 2:
             info[p[0].strip()] = p[1].strip()
-    restarts: Dict[str, str] = {}
-    for line in (sec.get(_SEC_DOCKER_RESTARTS, "") or "").splitlines():
-        p = line.split("|", 1)
-        if len(p) == 2:
-            restarts[p[0].strip()] = p[1].strip()
-
     cont: List[Tuple[str, bool, str, str]] = []
-    if not info and not restarts:
+    if not info:
         cont = [(n, False, "docker недоступен", "-") for n in name_list]
     else:
         for n in name_list:
             st = info.get(n)
             if st is None:
-                cont.append((n, False, "не найден", restarts.get(n, "-")))
+                cont.append((n, False, "не найден", "-"))
             else:
-                cont.append((n, st.lower().startswith("up"), st, restarts.get(n, "-")))
+                cont.append((n, st.lower().startswith("up"), st, "-"))
     return up, mem, disk, cont, ufw_status, allow, deny, reject
 
 
