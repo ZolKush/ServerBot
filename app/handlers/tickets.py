@@ -36,9 +36,9 @@ def _clear_ticket_ctx(context: ContextTypes.DEFAULT_TYPE) -> None:
 def ticket_urgency_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("P1 (критично)", callback_data="ticket:p1")],
-            [InlineKeyboardButton("P2 (важно)", callback_data="ticket:p2")],
-            [InlineKeyboardButton("P3 (обычно)", callback_data="ticket:p3")],
+            [InlineKeyboardButton("Критично", callback_data="ticket:p1")],
+            [InlineKeyboardButton("Важно", callback_data="ticket:p2")],
+            [InlineKeyboardButton("Обычно", callback_data="ticket:p3")],
             [InlineKeyboardButton("🏠 Меню", callback_data="menu:home")],
         ]
     )

@@ -58,7 +58,11 @@ def _status_pick_kb() -> InlineKeyboardMarkup:
 
 
 def _status_pick_text() -> str:
-    return "<b>Выберите сервер</b>\nКакой статус показать?"
+    return (
+        "<b>Выберите сервер</b>\n"
+        "Какой статус показать?\n\n"
+        "ℹ️ Нажмите кнопку сервера один раз и подождите загрузку."
+    )
 
 
 def _server_flag(server: ServerTarget) -> str:
