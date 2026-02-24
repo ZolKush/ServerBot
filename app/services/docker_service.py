@@ -19,36 +19,37 @@ def is_allowed_container(name: str) -> bool:
 
 
 async def docker_containers(names: Sequence[str]) -> List[Tuple[str, bool, str, str]]:
-    rc, _, _ = await run_exec([DOCKER_BIN, "info"], timeout=SUBPROC_SHORT_TIMEOUT)
-    if rc != 0:
-        return [(n, False, "docker недоступен", "-") for n in names]
-
-    rc, out, _ = await run_exec([DOCKER_BIN, "ps", "-a", "--format", "{{.Names}}|{{.Status}}"], timeout=SUBPROC_MEDIUM_TIMEOUT)
-    if rc != 0:
-        return [(n, False, "ошибка docker ps", "-") for n in names]
-
+    # Status page only needs "docker ps" status; restart count is left for inspect.
+    rc, out, _ = await run_exec(
+        [DOCKER_BIN, "ps", "-a", "--format", "{{.Names}}|{{.Status}}"],
+        timeout=SUBPROC_MEDIUM_TIMEOUT,
+    )
+    single_pass = rc == 0 and ("|" in out)
     info: Dict[str, str] = {}
-    for line in out.splitlines():
-        parts = line.split("|", 1)
-        if len(parts) == 2:
-            info[parts[0].strip()] = parts[1].strip()
+    if single_pass:
+        for line in out.splitlines():
+            parts = line.split("|", 1)
+            if len(parts) >= 2:
+                nm = parts[0].strip()
+                info[nm] = parts[1].strip()
+    else:
+        rc, out, _ = await run_exec([DOCKER_BIN, "ps", "-a", "--format", "{{.Names}}|{{.Status}}"], timeout=SUBPROC_MEDIUM_TIMEOUT)
+        if rc != 0:
+            return [(n, False, "docker недоступен", "-") for n in names]
 
-    rc2, out2, _ = await run_exec([DOCKER_BIN, "ps", "-a", "--format", "{{.Names}}|{{.RestartCount}}"], timeout=SUBPROC_MEDIUM_TIMEOUT)
-    restarts: Dict[str, str] = {}
-    if rc2 == 0:
-        for ln in out2.splitlines():
-            p = ln.split("|", 1)
-            if len(p) == 2:
-                restarts[p[0].strip()] = p[1].strip()
+        for line in out.splitlines():
+            parts = line.split("|", 1)
+            if len(parts) == 2:
+                info[parts[0].strip()] = parts[1].strip()
 
     result: List[Tuple[str, bool, str, str]] = []
     for n in names:
         st = info.get(n)
         if st is None:
-            result.append((n, False, "не найден", restarts.get(n, "-")))
+            result.append((n, False, "не найден", "-"))
         else:
             up = st.lower().startswith("up")
-            result.append((n, up, st, restarts.get(n, "-")))
+            result.append((n, up, st, "-"))
     return result
 
 

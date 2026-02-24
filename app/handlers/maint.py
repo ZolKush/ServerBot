@@ -42,6 +42,26 @@ def _clear_maint_ctx(context: ContextTypes.DEFAULT_TYPE) -> None:
         context.user_data.pop(key, None)
 
 
+async def _send_maint_notice_with_admin_copy(
+    context: ContextTypes.DEFAULT_TYPE,
+    author_id: int | None,
+    text: str,
+) -> tuple[tuple[int, int], tuple[int, int]]:
+    user_ids = authorized_ids(role_filter="user", exclude=set())
+    admin_ids = authorized_ids(role_filter="admin", exclude={author_id} if author_id else set())
+    user_res = await send_to_many(context, user_ids, text) if user_ids else (0, 0)
+    admin_res = await send_to_many(context, admin_ids, text) if admin_ids else (0, 0)
+    return (int(user_res[0]), int(user_res[1])), (int(admin_res[0]), int(admin_res[1]))
+
+
+def _maint_delivery_status(users_ok: int, users_fail: int, admins_ok: int, admins_fail: int) -> str:
+    return (
+        "Статус отправки:\n"
+        f"• Пользователи: ✅ {users_ok}, ❌ {users_fail}\n"
+        f"• Админы (кроме инициатора): ✅ {admins_ok}, ❌ {admins_fail}"
+    )
+
+
 @require_admin
 async def maint_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -124,14 +144,11 @@ async def maint_duration(update: Update, context: ContextTypes.DEFAULT_TYPE):
     author_id = get_user_id(update)
     msg_text = format_maint(scope, urgency, hh, mm, author)
 
-    recipients = authorized_ids(role_filter="user", exclude=set())
-    if not recipients:
-        if msg:
-            await msg.reply_text("Нет получателей: отсутствуют авторизованные пользователи.")
-        _clear_maint_ctx(context)
-        return ConversationHandler.END
-
-    ok, fail = await send_to_many(context, recipients, msg_text)
+    (users_ok, users_fail), (admins_ok, admins_fail) = await _send_maint_notice_with_admin_copy(
+        context,
+        author_id=author_id,
+        text=msg_text,
+    )
 
     maint = _build_maint_record(scope, urgency, hh, mm, author_id, author)
     maint_id = maint.get("id")
@@ -139,7 +156,7 @@ async def maint_duration(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await set_maintenance_record(maint)
     logger.info("Maintenance started by user_id=%s scope=%s urgency=%s duration_min=%s", author_id, scope, urgency, _hhmm_to_minutes(hh, mm))
 
-    panel_text = f"{_maint_panel_text(maint)}\n\nОповещены: ✅ {ok}, ❌ {fail}"
+    panel_text = f"{_maint_panel_text(maint)}\n\n{_maint_delivery_status(users_ok, users_fail, admins_ok, admins_fail)}"
     panel_chat_id = context.user_data.get("maint_panel_chat_id")
     panel_msg_id = context.user_data.get("maint_panel_msg_id")
     if panel_chat_id and panel_msg_id:
@@ -228,10 +245,14 @@ async def maint_extend_duration(update: Update, context: ContextTypes.DEFAULT_TY
     author = display_name(update)
     logger.info("Maintenance extended by user_id=%s duration_min=%s maint_id=%s", get_user_id(update), duration_min, maint_id)
     notice = _maint_extend_notice(maint, hh, mm, author)
-    recipients = authorized_ids(role_filter="user", exclude=set())
-    ok, fail = await send_to_many(context, recipients, notice) if recipients else (0, 0)
+    author_id = get_user_id(update)
+    (users_ok, users_fail), (admins_ok, admins_fail) = await _send_maint_notice_with_admin_copy(
+        context,
+        author_id=author_id,
+        text=notice,
+    )
 
-    panel_text = f"{_maint_panel_text(maint)}\n\nОповещены: ✅ {ok}, ❌ {fail}"
+    panel_text = f"{_maint_panel_text(maint)}\n\n{_maint_delivery_status(users_ok, users_fail, admins_ok, admins_fail)}"
     context.user_data.pop("maint_extend_id", None)
     if msg:
         await msg.reply_text(panel_text, parse_mode=ParseMode.HTML, reply_markup=_maint_control_kb(str(maint_id)))
@@ -256,12 +277,19 @@ async def maint_end_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     author = display_name(update)
     notice = _maint_end_notice(maint, author)
-    recipients = authorized_ids(role_filter="user", exclude=set())
-    ok, fail = await send_to_many(context, recipients, notice) if recipients else (0, 0)
+    author_id = get_user_id(update)
+    (users_ok, users_fail), (admins_ok, admins_fail) = await _send_maint_notice_with_admin_copy(
+        context,
+        author_id=author_id,
+        text=notice,
+    )
 
     await clear_maintenance_record()
     logger.info("Maintenance ended by user_id=%s maint_id=%s", get_user_id(update), maint_id)
-    await q.edit_message_text(f"✅ Техработы завершены. Оповещены: ✅ {ok}, ❌ {fail}")
+    await q.edit_message_text(
+        "✅ Техработы завершены.\n\n"
+        + _maint_delivery_status(users_ok, users_fail, admins_ok, admins_fail)
+    )
 
 
 @require_admin

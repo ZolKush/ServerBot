@@ -36,12 +36,16 @@ def _clear_ticket_ctx(context: ContextTypes.DEFAULT_TYPE) -> None:
 def ticket_urgency_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("P1 (критично)", callback_data="ticket:p1")],
-            [InlineKeyboardButton("P2 (важно)", callback_data="ticket:p2")],
-            [InlineKeyboardButton("P3 (обычно)", callback_data="ticket:p3")],
+            [InlineKeyboardButton("Критично", callback_data="ticket:p1")],
+            [InlineKeyboardButton("Важно", callback_data="ticket:p2")],
+            [InlineKeyboardButton("Обычно", callback_data="ticket:p3")],
             [InlineKeyboardButton("🏠 Меню", callback_data="menu:home")],
         ]
     )
+
+
+def ticket_input_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Меню", callback_data="menu:home")]])
 
 
 def ticket_confirm_kb() -> InlineKeyboardMarkup:
@@ -81,9 +85,17 @@ async def ticket_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     if q and msg:
         await q.answer()
-        await q.edit_message_text("<b>Тикет > Тема</b>\n\nВведите тему тикета (кратко).\nДля отмены: /cancel", parse_mode=ParseMode.HTML)
+        await q.edit_message_text(
+            "<b>Тикет > Тема</b>\n\nВведите тему тикета (кратко).\nДля отмены: /cancel",
+            parse_mode=ParseMode.HTML,
+            reply_markup=ticket_input_kb(),
+        )
     elif msg:
-        await msg.reply_text("<b>Тикет > Тема</b>\n\nВведите тему тикета (кратко).\nДля отмены: /cancel", parse_mode=ParseMode.HTML)
+        await msg.reply_text(
+            "<b>Тикет > Тема</b>\n\nВведите тему тикета (кратко).\nДля отмены: /cancel",
+            parse_mode=ParseMode.HTML,
+            reply_markup=ticket_input_kb(),
+        )
     return TICKET_SUBJECT
 
 
@@ -120,7 +132,11 @@ async def ticket_urgency(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if q.data not in ("ticket:p1", "ticket:p2", "ticket:p3"):
         return ConversationHandler.END
     context.user_data["ticket_urgency"] = q.data.split(":")[1]
-    await q.edit_message_text("<b>Тикет > Описание</b>\n\nОпишите проблему (лучше одним сообщением). Для отмены: /cancel", parse_mode=ParseMode.HTML)
+    await q.edit_message_text(
+        "<b>Тикет > Описание</b>\n\nОпишите проблему (лучше одним сообщением). Для отмены: /cancel",
+        parse_mode=ParseMode.HTML,
+        reply_markup=ticket_input_kb(),
+    )
     return TICKET_TEXT
 
 
@@ -157,11 +173,19 @@ async def ticket_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     if q.data == "ticket:edit_subj":
         context.user_data["ticket_edit_field"] = "subject"
-        await q.edit_message_text("<b>Тикет > Тема</b>\n\nВведите новую тему:", parse_mode=ParseMode.HTML)
+        await q.edit_message_text(
+            "<b>Тикет > Тема</b>\n\nВведите новую тему:",
+            parse_mode=ParseMode.HTML,
+            reply_markup=ticket_input_kb(),
+        )
         return TICKET_SUBJECT
     if q.data == "ticket:edit_text":
         context.user_data["ticket_edit_field"] = "text"
-        await q.edit_message_text("<b>Тикет > Описание</b>\n\nВведите новое описание:", parse_mode=ParseMode.HTML)
+        await q.edit_message_text(
+            "<b>Тикет > Описание</b>\n\nВведите новое описание:",
+            parse_mode=ParseMode.HTML,
+            reply_markup=ticket_input_kb(),
+        )
         return TICKET_TEXT
     if q.data != "ticket:send":
         return ConversationHandler.END

@@ -9,6 +9,11 @@ from .system_service import Fail2banEvent, _fmt_bytes_binary, _parse_ufw_rules, 
 
 _OUT_BEGIN = "__MBOT_OUT_BEGIN_43e1f3c4__"
 _OUT_END = "__MBOT_OUT_END_43e1f3c4__"
+_SEC_UPTIME = "__MBOT_SEC_UPTIME__"
+_SEC_MEMINFO = "__MBOT_SEC_MEMINFO__"
+_SEC_DF = "__MBOT_SEC_DF__"
+_SEC_UFW = "__MBOT_SEC_UFW__"
+_SEC_DOCKER_STATUS = "__MBOT_SEC_DOCKER_STATUS__"
 
 
 def _extract_wrapped_stdout(text: str) -> str:
@@ -25,6 +30,27 @@ def _extract_wrapped_stdout(text: str) -> str:
         return raw[start:]
     payload = raw[start:end]
     return payload[:-1] if payload.endswith("\n") else payload
+
+
+def _split_sections(text: str) -> Dict[str, str]:
+    lines = (text or "").splitlines()
+    markers = {
+        _SEC_UPTIME,
+        _SEC_MEMINFO,
+        _SEC_DF,
+        _SEC_UFW,
+        _SEC_DOCKER_STATUS,
+    }
+    cur = None
+    buf: Dict[str, List[str]] = {}
+    for ln in lines:
+        if ln in markers:
+            cur = ln
+            buf.setdefault(cur, [])
+            continue
+        if cur:
+            buf[cur].append(ln)
+    return {k: "\n".join(v).strip("\n") for k, v in buf.items()}
 
 
 async def ssh_run_shell(target: str, command: str, timeout: int) -> Tuple[int, str, str]:
@@ -222,6 +248,86 @@ async def remote_ufw_summary_for_admin(ssh_target: str) -> Tuple[str, List[str],
             allow, deny, reject = _parse_ufw_rules(out)
             return status, allow, deny, reject
     return "н/д", [], [], []
+
+
+async def remote_status_bundle(
+    ssh_target: str,
+    names: Sequence[str],
+    *,
+    admin_mode: bool,
+) -> Tuple[str, str, str, List[Tuple[str, bool, str, str]], str, List[str], List[str], List[str]]:
+    name_list = [n for n in names if n]
+    shell = f"""
+PATH=/usr/sbin:/usr/bin:/sbin:/bin:$PATH; export PATH
+echo {_SEC_UPTIME}
+cat /proc/uptime 2>/dev/null || true
+echo {_SEC_MEMINFO}
+cat /proc/meminfo 2>/dev/null || true
+echo {_SEC_DF}
+df -B1 / 2>/dev/null || true
+echo {_SEC_UFW}
+ufw_out=""
+for u in {shlex.quote(UFW_BIN)} /usr/sbin/ufw ufw; do
+  [ -n "$u" ] || continue
+  if command -v "$u" >/dev/null 2>&1 || [ -x "$u" ]; then
+    ufw_out=$("$u" status 2>/dev/null) && break
+    if [ -n {shlex.quote(SUDO_BIN)} ]; then
+      ufw_out=$({shlex.quote(SUDO_BIN)} -n "$u" status 2>/dev/null) && break
+    fi
+  fi
+done
+printf "%s\\n" "$ufw_out"
+echo {_SEC_DOCKER_STATUS}
+docker_cmd=""
+for d in {shlex.quote(DOCKER_BIN)} /usr/bin/docker docker; do
+  [ -n "$d" ] || continue
+  if command -v "$d" >/dev/null 2>&1 || [ -x "$d" ]; then
+    "$d" ps -a --format '{{{{.Names}}}}|{{{{.Status}}}}' >/dev/null 2>&1 && docker_cmd="$d" && break
+    if [ -n {shlex.quote(SUDO_BIN)} ] && {shlex.quote(SUDO_BIN)} -n "$d" ps -a --format '{{{{.Names}}}}|{{{{.Status}}}}' >/dev/null 2>&1; then
+      docker_cmd="{shlex.quote(SUDO_BIN)} -n $d"
+      break
+    fi
+  fi
+done
+if [ -n "$docker_cmd" ]; then
+  sh -c "$docker_cmd ps -a --format '{{{{.Names}}}}|{{{{.Status}}}}' 2>/dev/null" || true
+fi
+""".strip()
+    rc, out, _ = await ssh_run_shell(ssh_target, shell, timeout=max(SUBPROC_MEDIUM_TIMEOUT, SUBPROC_SHORT_TIMEOUT) + 4)
+    if rc != 0 and not out.strip():
+        return "н/д", "н/д", "н/д", [(n, False, "ssh ошибка", "-") for n in name_list], "н/д", [], [], []
+
+    sec = _split_sections(out)
+    up = _parse_uptime_from_proc(sec.get(_SEC_UPTIME, "") or "") or "н/д"
+    if up == "н/д":
+        up = "н/д"
+    mem = _parse_meminfo_text(sec.get(_SEC_MEMINFO, "") or "") or "н/д"
+    disk = _parse_df_bytes_text(sec.get(_SEC_DF, "") or "") or "н/д"
+
+    ufw_out = sec.get(_SEC_UFW, "") or ""
+    first = (ufw_out.strip().splitlines()[:1] or [""])[0].lower()
+    ufw_status = "active" if "active" in first else ("inactive" if "inactive" in first else "н/д")
+    if admin_mode:
+        allow, deny, reject = _parse_ufw_rules(ufw_out)
+    else:
+        allow, deny, reject = [], [], []
+
+    info: Dict[str, str] = {}
+    for line in (sec.get(_SEC_DOCKER_STATUS, "") or "").splitlines():
+        p = line.split("|", 1)
+        if len(p) == 2:
+            info[p[0].strip()] = p[1].strip()
+    cont: List[Tuple[str, bool, str, str]] = []
+    if not info:
+        cont = [(n, False, "docker недоступен", "-") for n in name_list]
+    else:
+        for n in name_list:
+            st = info.get(n)
+            if st is None:
+                cont.append((n, False, "не найден", "-"))
+            else:
+                cont.append((n, st.lower().startswith("up"), st, "-"))
+    return up, mem, disk, cont, ufw_status, allow, deny, reject
 
 
 async def remote_docker_containers(ssh_target: str, names: Sequence[str]) -> List[Tuple[str, bool, str, str]]:
