@@ -49,9 +49,13 @@ async def _send_maint_notice_with_admin_copy(
 ) -> tuple[tuple[int, int], tuple[int, int]]:
     user_ids = authorized_ids(role_filter="user", exclude=set())
     admin_ids = authorized_ids(role_filter="admin", exclude={author_id} if author_id else set())
-    user_res = await send_to_many(context, user_ids, text) if user_ids else (0, 0)
-    admin_res = await send_to_many(context, admin_ids, text) if admin_ids else (0, 0)
-    return (int(user_res[0]), int(user_res[1])), (int(admin_res[0]), int(admin_res[1]))
+    user_res = await send_to_many(context, user_ids, text) if user_ids else None
+    admin_res = await send_to_many(context, admin_ids, text) if admin_ids else None
+    users_ok = int(user_res.ok) if user_res is not None else 0
+    users_fail = int(user_res.fail) if user_res is not None else 0
+    admins_ok = int(admin_res.ok) if admin_res is not None else 0
+    admins_fail = int(admin_res.fail) if admin_res is not None else 0
+    return (users_ok, users_fail), (admins_ok, admins_fail)
 
 
 def _maint_delivery_status(users_ok: int, users_fail: int, admins_ok: int, admins_fail: int) -> str:
