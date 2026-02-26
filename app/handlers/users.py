@@ -149,7 +149,8 @@ async def users_all_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if q.data == "users:allmsg":
         await q.edit_message_text(
             f"<b>{html_escape(breadcrumbs('Админ-панель', 'Пользователи', 'Рассылка', 'Текст'))}</b>\n\n"
-            "Введите текст сообщения всем пользователям:"
+            "Введите текст сообщения всем пользователям:",
+            parse_mode=ParseMode.HTML,
         )
         return ADMIN_ALL_MSG_TEXT
 
@@ -213,7 +214,10 @@ async def users_all_msg_confirm(update: Update, context: ContextTypes.DEFAULT_TY
     ok, fail = await send_to_many(context, recipients, payload)
     logger.info("Admin user_id=%s broadcast message ok=%s fail=%s recipients=%s", sender, ok, fail, len(recipients))
     context.user_data.pop("users_all_broadcast_text", None)
-    await q.edit_message_text(ui_ok_text(f"Рассылка завершена (ok={ok}, fail={fail})"))
+    await q.edit_message_text(
+        ui_ok_text(f"Рассылка завершена (ok={ok}, fail={fail})"),
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Меню", callback_data="menu:home")]]),
+    )
     return ADMIN_PICK
 
 

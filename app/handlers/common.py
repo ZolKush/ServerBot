@@ -8,7 +8,7 @@ from functools import wraps
 from datetime import datetime
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, Update
 from telegram.constants import ChatType, ParseMode
 from telegram.error import BadRequest, NetworkError, RetryAfter, TimedOut
 from telegram.ext import ContextTypes, ConversationHandler
@@ -232,11 +232,6 @@ async def show_main_menu(update: Update, text: str = "Меню:") -> None:
         return
     msg = update.effective_message
     if msg:
-        # Remove legacy reply keyboard (from older versions) before showing inline menu.
-        try:
-            await msg.reply_text("ℹ️ Обновлён интерфейс: используйте кнопки в сообщении ниже.", reply_markup=ReplyKeyboardRemove())
-        except Exception:
-            pass
         await msg.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
 
 
@@ -285,6 +280,7 @@ async def send_to_many(
     user_ids: Iterable[int],
     text: str,
     *,
+    reply_markup: Optional[InlineKeyboardMarkup] = None,
     max_concurrency: int = 8,
     max_attempts: int = 3,
 ) -> SendManyReport:
@@ -296,7 +292,12 @@ async def send_to_many(
         for attempt in range(1, max(1, max_attempts) + 1):
             try:
                 async with sem:
-                    await context.bot.send_message(chat_id=uid, text=text, parse_mode=ParseMode.HTML)
+                    await context.bot.send_message(
+                        chat_id=uid,
+                        text=text,
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=reply_markup,
+                    )
                 return True, None
             except RetryAfter as e:
                 last_exc = e

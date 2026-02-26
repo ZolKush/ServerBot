@@ -2,7 +2,7 @@ import re
 from datetime import datetime, timedelta
 from typing import Any
 
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes, ConversationHandler
 
@@ -31,6 +31,10 @@ from .maint_helpers import (
 STATE_MAINT_SCOPE, STATE_MAINT_URGENCY, STATE_MAINT_DURATION, STATE_MAINT_EXTEND = range(4)
 
 
+def _maint_notice_menu_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Меню", callback_data="menu:home")]])
+
+
 def _clear_maint_ctx(context: ContextTypes.DEFAULT_TYPE) -> None:
     for key in (
         "maint_scope",
@@ -49,8 +53,9 @@ async def _send_maint_notice_with_admin_copy(
 ) -> tuple[tuple[int, int], tuple[int, int]]:
     user_ids = authorized_ids(role_filter="user", exclude=set())
     admin_ids = authorized_ids(role_filter="admin", exclude={author_id} if author_id else set())
-    user_res = await send_to_many(context, user_ids, text) if user_ids else None
-    admin_res = await send_to_many(context, admin_ids, text) if admin_ids else None
+    menu_kb = _maint_notice_menu_kb()
+    user_res = await send_to_many(context, user_ids, text, reply_markup=menu_kb) if user_ids else None
+    admin_res = await send_to_many(context, admin_ids, text, reply_markup=menu_kb) if admin_ids else None
     users_ok = int(user_res.ok) if user_res is not None else 0
     users_fail = int(user_res.fail) if user_res is not None else 0
     admins_ok = int(admin_res.ok) if admin_res is not None else 0
