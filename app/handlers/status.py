@@ -10,7 +10,6 @@ from telegram.ext import ContextTypes
 from ..config import DNS_RESOLVERS, SERVERS, ServerTarget, TZ, logger
 from ..services.docker_service import docker_containers
 from ..services.remote_service import (
-    remote_docker_containers,
     remote_status_bundle,
 )
 from ..services.system_service import (

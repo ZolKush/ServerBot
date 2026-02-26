@@ -82,71 +82,7 @@ async def tail_text_file_async(path: str, n_lines: int, max_bytes: int = 2_000_0
     return await asyncio.to_thread(tail_text_file, path, n_lines, max_bytes)
 
 
-def _read_fail2ban_chunk_sync(
-    log_path: str,
-    state: Dict[str, Any],
-    max_read_bytes: int,
-) -> Tuple[List[str], Optional[Dict[str, Any]]]:
-    p = Path(log_path)
-    if not p.exists():
-        return [], None
-    try:
-        stat = p.stat()
-        inode = int(getattr(stat, "st_ino", 0) or 0)
-        size = int(stat.st_size)
-    except Exception:
-        return [], None
-
-    offset = int(state.get("offset", 0) or 0)
-    last_inode = int(state.get("inode", 0) or 0)
-    if last_inode and inode and inode != last_inode:
-        offset = 0
-    if offset > size:
-        offset = 0
-    if size - offset > max_read_bytes:
-        offset = max(0, size - max_read_bytes)
-
-    try:
-        with p.open("rb") as f:
-            f.seek(offset, os.SEEK_SET)
-            chunk = f.read(max_read_bytes)
-            new_offset = f.tell()
-        text = chunk.decode("utf-8", errors="replace")
-        lines_out = text.splitlines()
-    except Exception as e:
-        logger.warning("fail2ban log read error (%s): %s", log_path, e)
-        return [], None
-
-    new_state = {
-        "inode": inode,
-        "offset": new_offset,
-        "updated_at": datetime.now(tz=TZ).isoformat(),
-    }
-    return lines_out, new_state
-
-
 FAIL2BAN_STATE_LOCK = asyncio.Lock()
-
-
-async def read_fail2ban_new_lines_async(
-    log_path: str,
-    state_path: str,
-    max_read_bytes: int = 5_000_000,
-) -> List[str]:
-    lines_out, new_state = await read_fail2ban_new_lines_with_state_async(log_path, state_path, max_read_bytes)
-    if new_state is not None:
-        await save_json_file(state_path, new_state)
-    return lines_out
-
-
-async def read_fail2ban_new_lines_with_state_async(
-    log_path: str,
-    state_path: str,
-    max_read_bytes: int = 5_000_000,
-) -> Tuple[List[str], Optional[Dict[str, Any]]]:
-    async with FAIL2BAN_STATE_LOCK:
-        state = await load_json_file(state_path)
-        return await asyncio.to_thread(_read_fail2ban_chunk_sync, log_path, state, max_read_bytes)
 
 
 @dataclass(frozen=True)

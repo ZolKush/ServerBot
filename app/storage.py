@@ -278,13 +278,6 @@ def _set_dns_status(cfg: ImportantData, server_key: str, payload: Dict[str, Any]
     return dict(cur[str(server_key)])
 
 
-def _get_active_maintenance() -> Optional[Dict[str, Any]]:
-    m = getattr(IMPORTANT_DATA, "maintenance", None)
-    if isinstance(m, dict) and m.get("active"):
-        return dict(m)
-    return None
-
-
 def get_user_meta_copy(uid: int) -> Optional[Dict[str, Any]]:
     meta = USER_DATA_SNAPSHOT.get(str(uid))
     return dict(meta) if isinstance(meta, dict) else None

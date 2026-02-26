@@ -8,7 +8,7 @@ from functools import wraps
 from datetime import datetime
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatType, ParseMode
 from telegram.error import BadRequest, NetworkError, RetryAfter, TimedOut
 from telegram.ext import ContextTypes, ConversationHandler
@@ -186,13 +186,6 @@ def display_name(update: Update) -> str:
         return f"@{u.username}"
     nm = " ".join([x for x in [u.first_name, u.last_name] if x])
     return nm if nm else str(u.id)
-
-
-def main_menu_kb(update: Update) -> ReplyKeyboardMarkup:
-    rows = [[KeyboardButton(MENU_STATUS), KeyboardButton(MENU_TICKET)]]
-    if is_admin(update):
-        rows.append([KeyboardButton(MENU_USERS), KeyboardButton(MENU_MAINT)])
-    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
 
 def main_menu_inline_kb(update: Update) -> InlineKeyboardMarkup:
