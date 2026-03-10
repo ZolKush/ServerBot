@@ -309,7 +309,7 @@ async def remote_docker_logs_tail(ssh_target: str, name: str, tail: int) -> str:
                 break
     if rc != 0:
         return f"docker logs error: {err.strip() or out.strip() or 'н/д'}"
-    return out
+    return out if out.strip() else err
 
 
 async def remote_tail_text_file(ssh_target: str, path: str, n_lines: int) -> str:

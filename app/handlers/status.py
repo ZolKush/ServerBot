@@ -72,7 +72,7 @@ def _server_flag(server: ServerTarget) -> str:
     return "🖥"
 
 
-def _status_actions_kb(admin_mode: bool, server_key: str, *, detailed: bool = False) -> InlineKeyboardMarkup:
+def _status_actions_kb(admin_mode: bool, server_key: str) -> InlineKeyboardMarkup:
     rows: List[List[InlineKeyboardButton]] = []
     rows.append([InlineKeyboardButton("🔄 Обновить", callback_data=f"status:show:{server_key}")])
     rows.append([InlineKeyboardButton("🌐 Обновить DNS статус", callback_data=f"status:dnsrefresh:{server_key}")])
@@ -90,13 +90,6 @@ def _status_actions_kb(admin_mode: bool, server_key: str, *, detailed: bool = Fa
 def _resolve_server_key_from_callback(data: str, prefix: str) -> Optional[str]:
     m = re.fullmatch(prefix + r":([a-z0-9_-]{1,12})", data or "")
     return m.group(1) if m else None
-
-
-def _parse_status_detail_callback(data: str) -> Optional[Tuple[str, bool]]:
-    m = re.fullmatch(r"status:detail:([a-z0-9_-]{1,12}):(full|brief)", data or "")
-    if not m:
-        return None
-    return m.group(1), (m.group(2) == "full")
 
 
 def _parse_status_ufw_callback(data: str) -> Optional[str]:
@@ -158,24 +151,7 @@ async def status_show_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not get_server_target(server_key):
         await q.edit_message_text(ui_error_text("сервер не найден."), reply_markup=_status_pick_kb())
         return
-    text, markup = await build_status_message(update, server_key=server_key, detailed=False)
-    await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
-
-
-@require_auth
-async def status_detail_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    q = update.callback_query
-    if not q:
-        return
-    await q.answer()
-    parsed = _parse_status_detail_callback(q.data or "")
-    if not parsed:
-        return
-    server_key, detailed = parsed
-    if not get_server_target(server_key):
-        await q.edit_message_text(ui_error_text("сервер не найден."), reply_markup=_status_pick_kb())
-        return
-    text, markup = await build_status_message(update, server_key=server_key, detailed=detailed)
+    text, markup = await build_status_message(update, server_key=server_key)
     await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
 
 
@@ -234,7 +210,7 @@ async def status_dns_refresh_cb(update: Update, context: ContextTypes.DEFAULT_TY
         payload.get("unknown"),
         payload.get("total"),
     )
-    text, markup = await build_status_message(update, server_key=server.key, detailed=False)
+    text, markup = await build_status_message(update, server_key=server.key)
     await q.edit_message_text(
         text + "\n\n" + ui_info_text("DNS статус обновлён в реальном времени."),
         parse_mode=ParseMode.HTML,
@@ -445,111 +421,14 @@ async def dns_daily_refresh(context: ContextTypes.DEFAULT_TYPE) -> None:
 async def build_status_message(
     update: Update,
     server_key: Optional[str] = None,
-    *,
-    detailed: bool = False,
 ) -> Tuple[str, Optional[InlineKeyboardMarkup]]:
     server = get_server_target(server_key) if server_key else _default_server_target()
     if not server:
         return "Сервер не настроен.", _status_pick_kb() if len(SERVERS) > 1 else None
 
     snapshot = await _build_status_snapshot(update, server)
-    markup = _status_actions_kb(admin_mode=snapshot.admin_mode, server_key=server.key, detailed=detailed)
-    return format_status_message(snapshot, detailed=detailed), markup
-
-
-async def build_dns_status_message(server_key: Optional[str]) -> str:
-    server = get_server_target(server_key) if server_key else _default_server_target()
-    if not server:
-        return "Сервер не найден."
-
-    domains = list(server.check_a_domains)
-    expected_ip = server.expected_a_ip
-    dns_map: Dict[str, Dict[str, List[str]]] = {}
-    lines: List[str] = []
-    lines.append(f"<b>{html_escape(breadcrumbs('Статус', server.label, 'DNS'))}</b>")
-    if expected_ip:
-        lines.append(f"• Ожидаемый IP: <code>{html_escape(expected_ip)}</code>")
-
-    custom_resolvers_supported = dns_supports_custom_resolver()
-    ok_domains = 0
-    bad_domains = 0
-    unknown_domains = 0
-
-    if custom_resolvers_supported:
-        for d in domains:
-            ips_by = await asyncio.gather(
-                *[resolve_a_record(d, resolver=r) for r in DNS_RESOLVERS],
-                return_exceptions=True,
-            )
-            normalized: Dict[str, List[str]] = {}
-            for r, ips in zip(DNS_RESOLVERS, ips_by):
-                normalized[r] = ips if isinstance(ips, list) else []
-            dns_map[d] = normalized
-        resolver_labels = list(DNS_RESOLVERS)
-    else:
-        lines.append("• Режим проверки: <code>system resolver fallback</code> (aiodns не установлен)")
-        for d in domains:
-            dns_map[d] = {"system": await resolve_a_record(d, resolver=None)}
-        resolver_labels = ["system"]
-
-    if not domains:
-        lines.append("• Домены для проверки не настроены.")
-        return "\n".join(lines)
-
-    for dom in domains:
-        per = dns_map.get(dom, {})
-        merged: List[str] = []
-        for r in resolver_labels:
-            for ip in per.get(r, []) or []:
-                if ip not in merged:
-                    merged.append(ip)
-        if not merged:
-            unknown_domains += 1
-        elif expected_ip and expected_ip not in merged:
-            bad_domains += 1
-        else:
-            ok_domains += 1
-
-    if bad_domains == 0 and unknown_domains == 0:
-        lines.append(f"• Итог: ✅ <b>{ok_domains}/{len(domains)}</b> доменов совпадают")
-    else:
-        lines.append(
-            f"• Итог: ❌ <b>{ok_domains}/{len(domains)}</b> OK, "
-            f"<b>{bad_domains}</b> неверный IP, <b>{unknown_domains}</b> без ответа"
-        )
-    lines.append("")
-
-    for dom in domains:
-        lines.append(f"• <b><code>{html_escape(dom)}</code></b>")
-        per = dns_map.get(dom, {})
-        for r in resolver_labels:
-            ips = per.get(r, []) or []
-            ips_s = ", ".join(ips) if ips else "н/д"
-            ok = bool(ips) and (expected_ip in ips if expected_ip else True)
-            flag = "✅" if ok else ("⚠️" if not ips else "❌")
-            lines.append(f"  {flag} <code>{html_escape(r)}</code> | <code>{html_escape(ips_s)}</code>")
-
-    return "\n".join(lines)
-
-
-@require_auth
-async def dns_check_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    q = update.callback_query
-    if not q:
-        return
-    await q.answer("Проверяю...")
-    server_key = _resolve_server_key_from_callback(q.data or "", r"dns:check")
-    if not server_key:
-        server_key = _first_server_key()
-    text = await build_dns_status_message(server_key)
-    kb = InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("🔄 Повторить", callback_data=f"dns:check:{server_key}")],
-            [InlineKeyboardButton("⬅️ Назад к статусу", callback_data=f"dns:back:{server_key}")],
-            [InlineKeyboardButton("🏠 Меню", callback_data="menu:home")],
-        ]
-    )
-    await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    markup = _status_actions_kb(admin_mode=snapshot.admin_mode, server_key=server.key)
+    return format_status_message(snapshot), markup
 
 
 @require_auth
@@ -561,5 +440,5 @@ async def dns_back_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     server_key = _resolve_server_key_from_callback(q.data or "", r"dns:back")
     if not server_key:
         server_key = _first_server_key()
-    text, markup = await build_status_message(update, server_key=server_key, detailed=False)
+    text, markup = await build_status_message(update, server_key=server_key)
     await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)

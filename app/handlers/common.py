@@ -278,19 +278,24 @@ async def send_to_many(
     max_attempts: int = 3,
 ) -> SendManyReport:
     ids = sorted(set(int(uid) for uid in user_ids))
-    sem = asyncio.Semaphore(max(1, max_concurrency))
+    if not ids:
+        return SendManyReport()
+    report = SendManyReport()
+    report_lock = asyncio.Lock()
+    queue: asyncio.Queue[int] = asyncio.Queue()
+    for uid in ids:
+        queue.put_nowait(uid)
 
     async def _send_one(uid: int) -> tuple[bool, Optional[SendErrorInfo]]:
         last_exc: Optional[Exception] = None
         for attempt in range(1, max(1, max_attempts) + 1):
             try:
-                async with sem:
-                    await context.bot.send_message(
-                        chat_id=uid,
-                        text=text,
-                        parse_mode=ParseMode.HTML,
-                        reply_markup=reply_markup,
-                    )
+                await context.bot.send_message(
+                    chat_id=uid,
+                    text=text,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=reply_markup,
+                )
                 return True, None
             except RetryAfter as e:
                 last_exc = e
@@ -312,16 +317,25 @@ async def send_to_many(
         )
         return False, err
 
-    results = await asyncio.gather(*[_send_one(uid) for uid in ids])
-    report = SendManyReport()
-    for ok, err in results:
-        if ok:
-            report.ok += 1
-        else:
-            report.fail += 1
-            if err:
-                report.errors.append(err)
-                logger.warning("Не удалось отправить пользователю %s: %s: %s", err.user_id, err.error_type, err.message)
+    async def _worker() -> None:
+        while True:
+            try:
+                uid = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+            ok, err = await _send_one(uid)
+            async with report_lock:
+                if ok:
+                    report.ok += 1
+                else:
+                    report.fail += 1
+                    if err:
+                        report.errors.append(err)
+                        logger.warning("Не удалось отправить пользователю %s: %s: %s", err.user_id, err.error_type, err.message)
+            queue.task_done()
+
+    workers = [asyncio.create_task(_worker()) for _ in range(min(len(ids), max(1, max_concurrency)))]
+    await asyncio.gather(*workers)
     return report
 
 

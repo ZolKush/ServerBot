@@ -1,11 +1,13 @@
 import re
 import sys
+import warnings
 from datetime import datetime, time as dtime
 from pathlib import Path
 
 if __package__ is None or __package__ == "":
     sys.path.append(str(Path(__file__).resolve().parent.parent))
 
+from telegram.warnings import PTBUserWarning
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -55,8 +57,6 @@ from app.handlers.status import (
     cmd_health,
     dns_daily_refresh,
     dns_back_cb,
-    dns_check_cb,
-    status_detail_cb,
     status_dns_refresh_cb,
     status_pick_cb,
     status_show_cb,
@@ -94,6 +94,12 @@ from app.handlers.users import (
 )
 
 PRIVATE_TEXT = filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND
+
+warnings.filterwarnings(
+    "ignore",
+    message=r"If 'per_message=False', 'CallbackQueryHandler' will not be tracked for every message\..*",
+    category=PTBUserWarning,
+)
 
 
 async def on_error(update: object, context) -> None:
@@ -221,10 +227,8 @@ def build_app() -> Application:
 
     app.add_handler(CallbackQueryHandler(status_pick_cb, pattern=r"^status:pick$"))
     app.add_handler(CallbackQueryHandler(status_show_cb, pattern=r"^status:show:[a-z0-9_-]{1,12}$"))
-    app.add_handler(CallbackQueryHandler(status_detail_cb, pattern=r"^status:detail:[a-z0-9_-]{1,12}:(full|brief)$"))
     app.add_handler(CallbackQueryHandler(status_ufw_cb, pattern=r"^status:ufw:[a-z0-9_-]{1,12}$"))
     app.add_handler(CallbackQueryHandler(status_dns_refresh_cb, pattern=r"^status:dnsrefresh:[a-z0-9_-]{1,12}$"))
-    app.add_handler(CallbackQueryHandler(dns_check_cb, pattern=r"^dns:check:[a-z0-9_-]{1,12}$"))
     app.add_handler(CallbackQueryHandler(dns_back_cb, pattern=r"^dns:back:[a-z0-9_-]{1,12}$"))
     app.add_handler(CallbackQueryHandler(docker_list_menu, pattern=r"^docker:list:[a-z0-9_-]{1,12}$"))
     app.add_handler(CallbackQueryHandler(docker_back_to_status, pattern=r"^docker:back:[a-z0-9_-]{1,12}$"))

@@ -27,6 +27,21 @@ _AUTH_FAILS: dict[str, list[float]] = {}
 _AUTH_LOCKED_UNTIL: dict[str, float] = {}
 
 
+def _auth_prune(now: Optional[float] = None) -> None:
+    now = monotonic() if now is None else now
+    active_fails: dict[str, list[float]] = {}
+    for key, attempts in _AUTH_FAILS.items():
+        filtered = [ts for ts in attempts if (now - ts) <= AUTH_FAIL_WINDOW_SEC]
+        if filtered:
+            active_fails[key] = filtered
+    _AUTH_FAILS.clear()
+    _AUTH_FAILS.update(active_fails)
+
+    expired_keys = [key for key, until in _AUTH_LOCKED_UNTIL.items() if until <= now]
+    for key in expired_keys:
+        _AUTH_LOCKED_UNTIL.pop(key, None)
+
+
 def _auth_actor_key(update: Update) -> str:
     u = update.effective_user
     if u:
@@ -40,6 +55,7 @@ def _auth_actor_key(update: Update) -> str:
 def _auth_lock_remaining_sec(update: Update) -> int:
     key = _auth_actor_key(update)
     now = monotonic()
+    _auth_prune(now)
     until = _AUTH_LOCKED_UNTIL.get(key, 0.0)
     if until <= now:
         _AUTH_LOCKED_UNTIL.pop(key, None)
@@ -50,6 +66,7 @@ def _auth_lock_remaining_sec(update: Update) -> int:
 def _auth_register_failure(update: Update) -> None:
     key = _auth_actor_key(update)
     now = monotonic()
+    _auth_prune(now)
     attempts = [ts for ts in _AUTH_FAILS.get(key, []) if (now - ts) <= AUTH_FAIL_WINDOW_SEC]
     attempts.append(now)
     _AUTH_FAILS[key] = attempts
@@ -59,6 +76,7 @@ def _auth_register_failure(update: Update) -> None:
 
 
 def _auth_reset_limits(update: Update) -> None:
+    _auth_prune()
     key = _auth_actor_key(update)
     _AUTH_FAILS.pop(key, None)
     _AUTH_LOCKED_UNTIL.pop(key, None)

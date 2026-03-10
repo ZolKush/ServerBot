@@ -107,4 +107,4 @@ async def docker_logs_tail(name: str, tail: int) -> str:
     rc, out, err = await run_exec([DOCKER_BIN, "logs", "--tail", str(tail), name], timeout=SUBPROC_MEDIUM_TIMEOUT)
     if rc != 0:
         return f"docker logs error: {err.strip() or out.strip() or 'н/д'}"
-    return out
+    return out if out.strip() else err

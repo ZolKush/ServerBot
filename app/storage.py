@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -114,21 +115,15 @@ class UserData:
         return cls()
 
     def save(self, path: str) -> None:
-        try:
-            payload = {"schema_version": USER_DATA_SCHEMA_VERSION, "authorized_users": self.authorized_users}
-            tmp_path = Path(path)
-            tmp_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = tmp_path.with_suffix(tmp_path.suffix + ".tmp")
-            tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-            tmp.replace(tmp_path)
-        except Exception as e:
-            logger.error("Не удалось сохранить %s: %s", path, e)
+        payload = {"schema_version": USER_DATA_SCHEMA_VERSION, "authorized_users": self.authorized_users}
+        tmp_path = Path(path)
+        tmp_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = tmp_path.with_suffix(tmp_path.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(tmp_path)
 
     async def save_async(self, path: str) -> None:
-        try:
-            await _write_json_atomic(path, {"schema_version": USER_DATA_SCHEMA_VERSION, "authorized_users": self.authorized_users})
-        except Exception as e:
-            logger.error("Не удалось сохранить %s: %s", path, e)
+        await _write_json_atomic(path, {"schema_version": USER_DATA_SCHEMA_VERSION, "authorized_users": self.authorized_users})
 
 
 @dataclass
@@ -178,34 +173,28 @@ class ImportantData:
         return cls()
 
     def save(self, path: str) -> None:
-        try:
-            payload = {
+        payload = {
+            "schema_version": IMPORTANT_DATA_SCHEMA_VERSION,
+            "tickets_seq": self.tickets_seq,
+            "maintenance": self.maintenance,
+            "dns_status": self.dns_status,
+        }
+        tmp_path = Path(path)
+        tmp_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = tmp_path.with_suffix(tmp_path.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(tmp_path)
+
+    async def save_async(self, path: str) -> None:
+        await _write_json_atomic(
+            path,
+            {
                 "schema_version": IMPORTANT_DATA_SCHEMA_VERSION,
                 "tickets_seq": self.tickets_seq,
                 "maintenance": self.maintenance,
                 "dns_status": self.dns_status,
-            }
-            tmp_path = Path(path)
-            tmp_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = tmp_path.with_suffix(tmp_path.suffix + ".tmp")
-            tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-            tmp.replace(tmp_path)
-        except Exception as e:
-            logger.error("Не удалось сохранить %s: %s", path, e)
-
-    async def save_async(self, path: str) -> None:
-        try:
-            await _write_json_atomic(
-                path,
-                {
-                    "schema_version": IMPORTANT_DATA_SCHEMA_VERSION,
-                    "tickets_seq": self.tickets_seq,
-                    "maintenance": self.maintenance,
-                    "dns_status": self.dns_status,
-                },
-            )
-        except Exception as e:
-            logger.error("Не удалось сохранить %s: %s", path, e)
+            },
+        )
 
 
 USER_DATA = UserData.load(USER_DATA_PATH, legacy_path=LEGACY_CONFIG_PATH)
@@ -238,16 +227,32 @@ _refresh_important_snapshot()
 
 async def update_user_data(update_fn: Callable[[UserData], T]) -> T:
     async with USER_DATA_LOCK:
-        result = update_fn(USER_DATA)
-        await USER_DATA.save_async(USER_DATA_PATH)
+        prev_authorized_users = copy.deepcopy(USER_DATA.authorized_users)
+        try:
+            result = update_fn(USER_DATA)
+            await USER_DATA.save_async(USER_DATA_PATH)
+        except Exception:
+            USER_DATA.authorized_users = prev_authorized_users
+            logger.exception("Не удалось обновить user_data")
+            raise
         _refresh_user_snapshot()
     return result
 
 
 async def update_important_data(update_fn: Callable[[ImportantData], T]) -> T:
     async with IMPORTANT_DATA_LOCK:
-        result = update_fn(IMPORTANT_DATA)
-        await IMPORTANT_DATA.save_async(IMPORTANT_DATA_PATH)
+        prev_tickets_seq = IMPORTANT_DATA.tickets_seq
+        prev_maintenance = copy.deepcopy(IMPORTANT_DATA.maintenance)
+        prev_dns_status = copy.deepcopy(IMPORTANT_DATA.dns_status)
+        try:
+            result = update_fn(IMPORTANT_DATA)
+            await IMPORTANT_DATA.save_async(IMPORTANT_DATA_PATH)
+        except Exception:
+            IMPORTANT_DATA.tickets_seq = prev_tickets_seq
+            IMPORTANT_DATA.maintenance = prev_maintenance
+            IMPORTANT_DATA.dns_status = prev_dns_status
+            logger.exception("Не удалось обновить important_data")
+            raise
         _refresh_important_snapshot()
     return result
 
