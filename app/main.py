@@ -72,15 +72,23 @@ from app.handlers.status import (
     status_ufw_cb,
 )
 from app.handlers.tickets import (
+    TICKET_ADMIN_REPLY_TEXT,
     TICKET_CONFIRM,
     TICKET_SUBJECT,
     TICKET_TEXT,
     TICKET_URGENCY,
+    TICKET_USER_REPLY_TEXT,
+    ticket_admin_reply_start,
+    ticket_admin_reply_text,
+    ticket_close_cb,
     ticket_confirm,
     ticket_start,
     ticket_subject,
+    ticket_take_cb,
     ticket_text,
     ticket_urgency,
+    ticket_user_reply_start,
+    ticket_user_reply_text,
 )
 from app.handlers.users import (
     ADMIN_ALL_MENU,
@@ -183,12 +191,16 @@ def build_app() -> Application:
         entry_points=[
             CommandHandler("ticket", ticket_start),
             CallbackQueryHandler(ticket_start, pattern=r"^menu:ticket$"),
+            CallbackQueryHandler(ticket_admin_reply_start, pattern=r"^ticket:adminreply:\d+$"),
+            CallbackQueryHandler(ticket_user_reply_start, pattern=r"^ticket:userreply:\d+$"),
         ],
         states={
             TICKET_SUBJECT: [MessageHandler(PRIVATE_TEXT, ticket_subject)],
             TICKET_URGENCY: [CallbackQueryHandler(ticket_urgency, pattern=r"^ticket:(p1|p2|p3)$")],
             TICKET_TEXT: [MessageHandler(PRIVATE_TEXT, ticket_text)],
             TICKET_CONFIRM: [CallbackQueryHandler(ticket_confirm, pattern=r"^ticket:(send|edit_subj|edit_text|cancel)$")],
+            TICKET_USER_REPLY_TEXT: [MessageHandler(PRIVATE_TEXT, ticket_user_reply_text)],
+            TICKET_ADMIN_REPLY_TEXT: [MessageHandler(PRIVATE_TEXT, ticket_admin_reply_text)],
         },
         fallbacks=[
             CommandHandler("cancel", cancel),
@@ -198,6 +210,8 @@ def build_app() -> Application:
         persistent=False,
     )
     app.add_handler(ticket_conv)
+    app.add_handler(CallbackQueryHandler(ticket_take_cb, pattern=r"^ticket:take:\d+$"))
+    app.add_handler(CallbackQueryHandler(ticket_close_cb, pattern=r"^ticket:close:\d+$"))
 
     users_conv = ConversationHandler(
         entry_points=[

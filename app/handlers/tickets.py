@@ -1,12 +1,14 @@
+from __future__ import annotations
+
 from datetime import datetime
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes, ConversationHandler
 
-from ..config import TZ
-from ..storage import next_ticket_seq
+from ..config import TZ, logger
+from ..storage import get_ticket_copy, next_ticket_seq, set_ticket_record, update_important_data
 from .common import (
     authorized_ids,
     breadcrumbs,
@@ -14,8 +16,8 @@ from .common import (
     display_name,
     get_user_id,
     html_escape,
+    require_admin,
     require_auth,
-    send_to_many,
     show_main_menu,
     ui_error_text,
     ui_ok_text,
@@ -23,14 +25,284 @@ from .common import (
     wrap_as_codeblock_html,
 )
 
-TICKET_SUBJECT, TICKET_URGENCY, TICKET_TEXT, TICKET_CONFIRM = range(4)
+TICKET_SUBJECT, TICKET_URGENCY, TICKET_TEXT, TICKET_CONFIRM, TICKET_USER_REPLY_TEXT, TICKET_ADMIN_REPLY_TEXT = range(6)
 MAX_TICKET_SUBJECT_LEN = 160
 MAX_TICKET_TEXT_LEN = 3200
+MAX_TICKET_HISTORY_ITEMS = 6
+
+
+class TicketFlowError(RuntimeError):
+    pass
+
+
+def _now_iso() -> str:
+    return datetime.now(TZ).isoformat()
 
 
 def _clear_ticket_ctx(context: ContextTypes.DEFAULT_TYPE) -> None:
-    for key in ("ticket_subject", "ticket_urgency", "ticket_text", "ticket_send_in_progress", "ticket_edit_field"):
+    for key in (
+        "ticket_subject",
+        "ticket_urgency",
+        "ticket_text",
+        "ticket_send_in_progress",
+        "ticket_edit_field",
+        "ticket_reply_ticket_id",
+        "ticket_reply_role",
+    ):
         context.user_data.pop(key, None)
+
+
+def _ticket_status_label(ticket: Dict[str, Any]) -> str:
+    status = str(ticket.get("status", "open"))
+    if status == "in_progress":
+        return "в работе"
+    if status == "closed":
+        return "закрыт"
+    return "ожидает исполнителя"
+
+
+def _ticket_can_user_reply(ticket: Dict[str, Any], uid: int) -> bool:
+    return (
+        int(ticket.get("user_id", 0) or 0) == uid
+        and str(ticket.get("status", "open")) != "closed"
+        and bool(ticket.get("assignee_id"))
+        and bool(ticket.get("user_reply_allowed", False))
+    )
+
+
+def _ticket_is_assignee(ticket: Dict[str, Any], uid: int) -> bool:
+    return int(ticket.get("assignee_id", 0) or 0) == uid
+
+
+def _ticket_messages(ticket: Dict[str, Any]) -> list[Dict[str, Any]]:
+    items = ticket.get("messages", [])
+    return [dict(x) for x in items] if isinstance(items, list) else []
+
+
+def _append_ticket_message(ticket: Dict[str, Any], *, sender_role: str, sender_id: Optional[int], sender_name: str, text: str, kind: str) -> Dict[str, Any]:
+    updated = dict(ticket)
+    messages = _ticket_messages(updated)
+    messages.append(
+        {
+            "ts": _now_iso(),
+            "sender_role": sender_role,
+            "sender_id": sender_id,
+            "sender_name": sender_name,
+            "text": text,
+            "kind": kind,
+        }
+    )
+    updated["messages"] = messages
+    updated["updated_at"] = _now_iso()
+    return updated
+
+
+def _format_ticket_history(ticket: Dict[str, Any]) -> str:
+    messages = _ticket_messages(ticket)[-MAX_TICKET_HISTORY_ITEMS:]
+    if not messages:
+        return "История пуста."
+    parts: list[str] = []
+    for item in messages:
+        sender_role = "Админ" if item.get("sender_role") == "admin" else "Пользователь"
+        sender_name = str(item.get("sender_name") or sender_role)
+        ts = str(item.get("ts") or "-")
+        text = clip_text(str(item.get("text") or ""), limit=900)
+        parts.append(f"<b>{html_escape(sender_role)}:</b> {html_escape(sender_name)}")
+        parts.append(f"• Время: <code>{html_escape(ts)}</code>")
+        parts.append(wrap_as_codeblock_html(text))
+    return "\n".join(parts)
+
+
+def _ticket_user_kb(ticket: Dict[str, Any], uid: int) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    ticket_id = int(ticket.get("id", 0) or 0)
+    if ticket_id and _ticket_can_user_reply(ticket, uid):
+        rows.append([InlineKeyboardButton("💬 Ответить администратору", callback_data=f"ticket:userreply:{ticket_id}")])
+    rows.append([InlineKeyboardButton("🏠 Меню", callback_data="menu:home")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _ticket_admin_kb(ticket: Dict[str, Any], admin_uid: int) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    ticket_id = int(ticket.get("id", 0) or 0)
+    status = str(ticket.get("status", "open"))
+    assignee_id = int(ticket.get("assignee_id", 0) or 0)
+    if ticket_id and status != "closed":
+        if not assignee_id:
+            rows.append([InlineKeyboardButton("🫳 Взять в работу", callback_data=f"ticket:take:{ticket_id}")])
+        elif assignee_id == admin_uid:
+            rows.append([InlineKeyboardButton("💬 Ответить пользователю", callback_data=f"ticket:adminreply:{ticket_id}")])
+            rows.append([InlineKeyboardButton("✅ Закрыть тикет", callback_data=f"ticket:close:{ticket_id}")])
+    rows.append([InlineKeyboardButton("🏠 Меню", callback_data="menu:home")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _format_ticket_for_admin(ticket: Dict[str, Any], admin_uid: int, *, event_line: Optional[str] = None) -> str:
+    ticket_no = f"#{ticket.get('id', '-')}"
+    assignee_name = str(ticket.get("assignee_name") or "-")
+    user_name = str(ticket.get("user_name") or "пользователь")
+    user_username = str(ticket.get("user_username") or "").strip()
+    user_id = int(ticket.get("user_id", 0) or 0)
+    subject = str(ticket.get("subject") or "-")
+    urgency = str(ticket.get("urgency") or "p3").upper()
+    status_label = _ticket_status_label(ticket)
+    created_at = str(ticket.get("created_at") or "-")
+    lines = [
+        f"<b>{html_escape(breadcrumbs('Тикеты', ticket_no))}</b>",
+        "",
+        f"• Статус: <b>{html_escape(status_label)}</b>",
+        f"• Исполнитель: <b>{html_escape(assignee_name)}</b>",
+        f"• Пользователь: <b>{html_escape(user_name)}</b> (<code>{html_escape(str(user_id))}</code>)",
+        f"• Срочность: <code>{html_escape(urgency)}</code>",
+        f"• Тема: <code>{html_escape(subject)}</code>",
+        f"• Создан: <code>{html_escape(created_at)}</code>",
+    ]
+    if user_username:
+        lines.append(f"• Username: <code>@{html_escape(user_username.lstrip('@'))}</code>")
+    if status_label == "закрыт":
+        lines.append(f"• Закрыт: <code>{html_escape(str(ticket.get('closed_at') or '-'))}</code>")
+    if event_line:
+        lines.extend(["", event_line])
+    if _ticket_is_assignee(ticket, admin_uid):
+        lines.extend(["", "<b>Доступ:</b> вы исполнитель этого тикета."])
+    lines.extend(["", "<b>История</b>", _format_ticket_history(ticket)])
+    return "\n".join(lines)
+
+
+def _format_ticket_for_user(ticket: Dict[str, Any], *, event_line: Optional[str] = None) -> str:
+    ticket_no = f"#{ticket.get('id', '-')}"
+    assignee_name = str(ticket.get("assignee_name") or "ещё не назначен")
+    subject = str(ticket.get("subject") or "-")
+    urgency = str(ticket.get("urgency") or "p3").upper()
+    status_label = _ticket_status_label(ticket)
+    lines = [
+        f"<b>{html_escape(breadcrumbs('Мой тикет', ticket_no))}</b>",
+        "",
+        f"• Статус: <b>{html_escape(status_label)}</b>",
+        f"• Исполнитель: <b>{html_escape(assignee_name)}</b>",
+        f"• Срочность: <code>{html_escape(urgency)}</code>",
+        f"• Тема: <code>{html_escape(subject)}</code>",
+    ]
+    if status_label == "закрыт":
+        lines.append(f"• Закрыт: <code>{html_escape(str(ticket.get('closed_at') or '-'))}</code>")
+    if event_line:
+        lines.extend(["", event_line])
+    lines.extend(["", "<b>История</b>", _format_ticket_history(ticket)])
+    return "\n".join(lines)
+
+
+def _build_ticket_record(
+    ticket_id: int,
+    *,
+    user_id: int,
+    user_name: str,
+    user_username: Optional[str],
+    subject: str,
+    urgency: str,
+    text: str,
+) -> Dict[str, Any]:
+    now = _now_iso()
+    return {
+        "id": ticket_id,
+        "status": "open",
+        "subject": subject,
+        "urgency": urgency,
+        "user_id": user_id,
+        "user_name": user_name,
+        "user_username": (user_username or None),
+        "assignee_id": None,
+        "assignee_name": None,
+        "created_at": now,
+        "updated_at": now,
+        "closed_at": None,
+        "closed_by_id": None,
+        "closed_by_name": None,
+        "user_reply_allowed": False,
+        "messages": [
+            {
+                "ts": now,
+                "sender_role": "user",
+                "sender_id": user_id,
+                "sender_name": user_name,
+                "text": text,
+                "kind": "initial",
+            }
+        ],
+    }
+
+
+async def _notify_admins(context: ContextTypes.DEFAULT_TYPE, ticket: Dict[str, Any], *, exclude: Optional[set[int]] = None, event_line: Optional[str] = None) -> None:
+    exclude = exclude or set()
+    sent = 0
+    failed = 0
+    for admin_id in authorized_ids(role_filter="admin"):
+        if admin_id in exclude:
+            continue
+        try:
+            await context.bot.send_message(
+                chat_id=admin_id,
+                text=_format_ticket_for_admin(ticket, admin_id, event_line=event_line),
+                parse_mode=ParseMode.HTML,
+                reply_markup=_ticket_admin_kb(ticket, admin_id),
+            )
+            sent += 1
+        except Exception as e:
+            failed += 1
+            logger.warning("Не удалось отправить ticket update админу %s ticket_id=%s: %s", admin_id, ticket.get("id"), e)
+    logger.info(
+        "Ticket admin notifications ticket_id=%s sent=%s failed=%s event=%s",
+        ticket.get("id"),
+        sent,
+        failed,
+        event_line or "",
+    )
+
+
+async def _notify_user(context: ContextTypes.DEFAULT_TYPE, ticket: Dict[str, Any], *, event_line: Optional[str] = None) -> None:
+    uid = int(ticket.get("user_id", 0) or 0)
+    if not uid:
+        return
+    try:
+        await context.bot.send_message(
+            chat_id=uid,
+            text=_format_ticket_for_user(ticket, event_line=event_line),
+            parse_mode=ParseMode.HTML,
+            reply_markup=_ticket_user_kb(ticket, uid),
+        )
+        logger.info("Ticket user notification ticket_id=%s user_id=%s event=%s", ticket.get("id"), uid, event_line or "")
+    except Exception as e:
+        logger.warning("Не удалось отправить ticket update пользователю %s ticket_id=%s: %s", uid, ticket.get("id"), e)
+
+
+async def _ticket_update(ticket_id: int, mutator) -> Dict[str, Any]:
+    flow_state: Dict[str, str] = {}
+
+    def _apply(cfg):
+        tickets = dict(getattr(cfg, "tickets", {}) or {})
+        raw = tickets.get(str(ticket_id))
+        if not isinstance(raw, dict):
+            flow_state["error"] = "ticket_not_found"
+            return None
+        try:
+            updated = mutator(dict(raw))
+        except TicketFlowError as exc:
+            flow_state["error"] = str(exc) or "ticket_error"
+            return None
+        tickets[str(ticket_id)] = dict(updated)
+        cfg.tickets = tickets
+        return dict(updated)
+
+    result = await update_important_data(_apply)
+    if result is None:
+        raise TicketFlowError(flow_state.get("error", "ticket_error"))
+    return result
+
+
+def _parse_ticket_callback_id(data: Optional[str], action: str) -> int:
+    parts = (data or "").split(":")
+    if len(parts) != 3 or parts[0] != "ticket" or parts[1] != action or not parts[2].isdigit():
+        return 0
+    return int(parts[2])
 
 
 def ticket_urgency_kb() -> InlineKeyboardMarkup:
@@ -197,31 +469,333 @@ async def ticket_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         uid = get_user_id(update)
         author_name = display_name(update)
-        subj = context.user_data.get("ticket_subject", "-")
-        urg = str(context.user_data.get("ticket_urgency", "p3")).upper()
-        txt = clip_text(str(context.user_data.get("ticket_text", "-")), limit=3000)
-        created = datetime.now(TZ).strftime("%d.%m.%Y %H:%M")
-
+        author_username = getattr(update.effective_user, "username", None)
+        subj = str(context.user_data.get("ticket_subject", "-"))
+        urg = str(context.user_data.get("ticket_urgency", "p3")).lower()
+        txt = str(context.user_data.get("ticket_text", "-"))
         admins = authorized_ids(role_filter="admin")
+        if uid is None:
+            _clear_ticket_ctx(context)
+            await q.edit_message_text(ui_error_text("не удалось определить пользователя."))
+            return ConversationHandler.END
         if not admins:
             _clear_ticket_ctx(context)
             await q.edit_message_text(ui_error_text("нет авторизованных администраторов."))
             return ConversationHandler.END
 
         ticket_id = await next_ticket_seq()
-
-        msg_text = (
-            f"🎫 <b>Новый тикет #{ticket_id}</b>\n"
-            f"• От: <b>{html_escape(author_name)}</b> (<code>{html_escape(str(uid) if uid is not None else '-')}</code>)\n"
-            f"• Время: <code>{html_escape(created)}</code>\n"
-            f"• Срочность: <code>{html_escape(str(urg))}</code>\n"
-            f"• Тема: <code>{html_escape(str(subj))}</code>\n\n"
-            f"Описание:\n{wrap_as_codeblock_html(str(txt))}"
+        ticket = _build_ticket_record(
+            ticket_id,
+            user_id=uid,
+            user_name=author_name,
+            user_username=author_username,
+            subject=subj,
+            urgency=urg,
+            text=txt,
         )
+        await set_ticket_record(ticket_id, ticket)
+        logger.info("Ticket created ticket_id=%s user_id=%s urgency=%s subject=%s", ticket_id, uid, urg, subj)
 
-        ok, fail = await send_to_many(context, admins, msg_text)
+        await _notify_admins(context, ticket, event_line="🆕 <b>Новый тикет ожидает исполнителя</b>")
+        await _notify_user(context, ticket, event_line="✅ <b>Тикет создан и отправлен администраторам</b>")
         _clear_ticket_ctx(context)
-        await q.edit_message_text(ui_ok_text(f"Тикет отправлен админам (ok={ok}, fail={fail})"))
+        await q.edit_message_text(ui_ok_text(f"Тикет #{ticket_id} создан. Ожидайте ответа администратора."))
         return ConversationHandler.END
     finally:
         context.user_data.pop("ticket_send_in_progress", None)
+
+
+@require_admin
+async def ticket_take_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    if not q:
+        return
+    await q.answer()
+    ticket_id = _parse_ticket_callback_id(q.data, "take")
+    admin_id = get_user_id(update)
+    if not ticket_id or admin_id is None:
+        return
+    admin_name = display_name(update)
+
+    try:
+        def _assign(ticket: Dict[str, Any]) -> Dict[str, Any]:
+            if str(ticket.get("status", "open")) == "closed":
+                raise TicketFlowError("ticket_closed")
+            assignee_id = int(ticket.get("assignee_id", 0) or 0)
+            if assignee_id and assignee_id != admin_id:
+                raise TicketFlowError("ticket_taken")
+            if assignee_id == admin_id:
+                raise TicketFlowError("already_assigned")
+            updated = dict(ticket)
+            updated["assignee_id"] = admin_id
+            updated["assignee_name"] = admin_name
+            updated["status"] = "in_progress"
+            updated["updated_at"] = _now_iso()
+            return updated
+
+        ticket = await _ticket_update(ticket_id, _assign)
+    except TicketFlowError as e:
+        code = str(e)
+        logger.warning("Ticket take denied ticket_id=%s admin_id=%s reason=%s", ticket_id, admin_id, code)
+        if code == "ticket_taken":
+            await q.answer("Тикет уже взят другим администратором.", show_alert=True)
+        elif code == "already_assigned":
+            await q.answer("Этот тикет уже назначен вам.", show_alert=True)
+        elif code == "ticket_not_found":
+            await q.answer("Тикет не найден.", show_alert=True)
+        else:
+            await q.answer("Тикет уже закрыт.", show_alert=True)
+        return
+
+    logger.info(
+        "Ticket assigned ticket_id=%s admin_id=%s user_id=%s",
+        ticket_id,
+        admin_id,
+        ticket.get("user_id"),
+    )
+    await _notify_admins(context, ticket, exclude={admin_id}, event_line=f"🫳 <b>Тикет взят в работу:</b> {html_escape(admin_name)}")
+    await _notify_user(context, ticket, event_line=f"👤 <b>Исполнитель назначен:</b> {html_escape(admin_name)}")
+    await q.edit_message_text(
+        _format_ticket_for_admin(ticket, admin_id, event_line="🫳 <b>Вы взяли тикет в работу</b>"),
+        parse_mode=ParseMode.HTML,
+        reply_markup=_ticket_admin_kb(ticket, admin_id),
+    )
+
+
+@require_admin
+async def ticket_admin_reply_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if not q:
+        return ConversationHandler.END
+    await q.answer()
+    ticket_id = _parse_ticket_callback_id(q.data, "adminreply")
+    admin_id = get_user_id(update)
+    ticket = get_ticket_copy(ticket_id) if ticket_id else None
+    if not ticket or admin_id is None:
+        logger.warning("Ticket admin reply start failed ticket_id=%s admin_id=%s reason=ticket_not_found", ticket_id, admin_id)
+        await q.answer("Тикет не найден.", show_alert=True)
+        return ConversationHandler.END
+    if str(ticket.get("status", "open")) == "closed":
+        logger.warning("Ticket admin reply start denied ticket_id=%s admin_id=%s reason=ticket_closed", ticket_id, admin_id)
+        await q.answer("Тикет уже закрыт.", show_alert=True)
+        return ConversationHandler.END
+    if not _ticket_is_assignee(ticket, admin_id):
+        logger.warning("Ticket admin reply denied ticket_id=%s admin_id=%s reason=not_assignee", ticket_id, admin_id)
+        await q.answer("Ответить может только исполнитель тикета.", show_alert=True)
+        return ConversationHandler.END
+    context.user_data["ticket_reply_ticket_id"] = ticket_id
+    context.user_data["ticket_reply_role"] = "admin"
+    await q.edit_message_text(
+        f"<b>{html_escape(breadcrumbs('Тикет', f'#{ticket_id}', 'Ответ пользователю'))}</b>\n\nВведите ответ пользователю:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=ticket_input_kb(),
+    )
+    return TICKET_ADMIN_REPLY_TEXT
+
+
+@require_auth
+async def ticket_user_reply_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if not q:
+        return ConversationHandler.END
+    await q.answer()
+    ticket_id = _parse_ticket_callback_id(q.data, "userreply")
+    uid = get_user_id(update)
+    ticket = get_ticket_copy(ticket_id) if ticket_id else None
+    if not ticket or uid is None:
+        logger.warning("Ticket user reply start failed ticket_id=%s user_id=%s reason=ticket_not_found", ticket_id, uid)
+        await q.answer("Тикет не найден.", show_alert=True)
+        return ConversationHandler.END
+    if not _ticket_can_user_reply(ticket, uid):
+        logger.warning(
+            "Ticket user reply denied ticket_id=%s user_id=%s reason=reply_not_allowed assignee_id=%s status=%s",
+            ticket_id,
+            uid,
+            ticket.get("assignee_id"),
+            ticket.get("status"),
+        )
+        await q.answer("Сейчас ответить на этот тикет нельзя.", show_alert=True)
+        return ConversationHandler.END
+    context.user_data["ticket_reply_ticket_id"] = ticket_id
+    context.user_data["ticket_reply_role"] = "user"
+    await q.edit_message_text(
+        f"<b>{html_escape(breadcrumbs('Мой тикет', f'#{ticket_id}', 'Ответ администратору'))}</b>\n\nВведите ответ администратору:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=ticket_input_kb(),
+    )
+    return TICKET_USER_REPLY_TEXT
+
+
+@require_admin
+async def ticket_admin_reply_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    text = (msg.text if msg else "").strip()
+    ticket_id = int(context.user_data.get("ticket_reply_ticket_id", 0) or 0)
+    admin_id = get_user_id(update)
+    if not ticket_id or admin_id is None:
+        return ConversationHandler.END
+    if len(text) < 1:
+        if msg:
+            await msg.reply_text("Пустой ответ. Введите текст.")
+        return TICKET_ADMIN_REPLY_TEXT
+    if len(text) > MAX_TICKET_TEXT_LEN:
+        if msg:
+            await msg.reply_text(f"Ответ слишком длинный. Максимум {MAX_TICKET_TEXT_LEN} символов.")
+        return TICKET_ADMIN_REPLY_TEXT
+
+    admin_name = display_name(update)
+    try:
+        def _reply(ticket: Dict[str, Any]) -> Dict[str, Any]:
+            if str(ticket.get("status", "open")) == "closed":
+                raise TicketFlowError("ticket_closed")
+            if not _ticket_is_assignee(ticket, admin_id):
+                raise TicketFlowError("not_assignee")
+            updated = _append_ticket_message(
+                ticket,
+                sender_role="admin",
+                sender_id=admin_id,
+                sender_name=admin_name,
+                text=text,
+                kind="reply",
+            )
+            updated["status"] = "in_progress"
+            updated["user_reply_allowed"] = True
+            return updated
+
+        ticket = await _ticket_update(ticket_id, _reply)
+    except TicketFlowError as e:
+        logger.warning("Ticket admin reply failed ticket_id=%s admin_id=%s reason=%s", ticket_id, admin_id, e)
+        if msg:
+            await msg.reply_text("Не удалось отправить ответ: тикет закрыт или закреплён за другим администратором.")
+        _clear_ticket_ctx(context)
+        return ConversationHandler.END
+
+    logger.info(
+        "Ticket admin reply ticket_id=%s admin_id=%s user_id=%s text_len=%s",
+        ticket_id,
+        admin_id,
+        ticket.get("user_id"),
+        len(text),
+    )
+    await _notify_user(context, ticket, event_line="💬 <b>Администратор ответил на ваш тикет</b>")
+    await _notify_admins(context, ticket, exclude={admin_id}, event_line=f"💬 <b>Ответ исполнителя:</b> {html_escape(admin_name)}")
+    if msg:
+        await msg.reply_text(
+            _format_ticket_for_admin(ticket, admin_id, event_line="✅ <b>Ответ отправлен пользователю</b>"),
+            parse_mode=ParseMode.HTML,
+            reply_markup=_ticket_admin_kb(ticket, admin_id),
+        )
+    _clear_ticket_ctx(context)
+    return ConversationHandler.END
+
+
+@require_auth
+async def ticket_user_reply_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    text = (msg.text if msg else "").strip()
+    ticket_id = int(context.user_data.get("ticket_reply_ticket_id", 0) or 0)
+    uid = get_user_id(update)
+    if not ticket_id or uid is None:
+        return ConversationHandler.END
+    if len(text) < 1:
+        if msg:
+            await msg.reply_text("Пустой ответ. Введите текст.")
+        return TICKET_USER_REPLY_TEXT
+    if len(text) > MAX_TICKET_TEXT_LEN:
+        if msg:
+            await msg.reply_text(f"Ответ слишком длинный. Максимум {MAX_TICKET_TEXT_LEN} символов.")
+        return TICKET_USER_REPLY_TEXT
+
+    user_name = display_name(update)
+    try:
+        def _reply(ticket: Dict[str, Any]) -> Dict[str, Any]:
+            if not _ticket_can_user_reply(ticket, uid):
+                raise TicketFlowError("user_reply_not_allowed")
+            updated = _append_ticket_message(
+                ticket,
+                sender_role="user",
+                sender_id=uid,
+                sender_name=user_name,
+                text=text,
+                kind="reply",
+            )
+            updated["user_reply_allowed"] = False
+            updated["updated_at"] = _now_iso()
+            return updated
+
+        ticket = await _ticket_update(ticket_id, _reply)
+    except TicketFlowError as e:
+        logger.warning("Ticket user reply failed ticket_id=%s user_id=%s reason=%s", ticket_id, uid, e)
+        if msg:
+            await msg.reply_text("Сейчас ответить на этот тикет нельзя.")
+        _clear_ticket_ctx(context)
+        return ConversationHandler.END
+
+    logger.info(
+        "Ticket user reply ticket_id=%s user_id=%s assignee_id=%s text_len=%s",
+        ticket_id,
+        uid,
+        ticket.get("assignee_id"),
+        len(text),
+    )
+    await _notify_admins(context, ticket, event_line="💬 <b>Пользователь ответил по тикету</b>")
+    if msg:
+        await msg.reply_text(
+            _format_ticket_for_user(ticket, event_line="✅ <b>Ваш ответ отправлен администратору</b>"),
+            parse_mode=ParseMode.HTML,
+            reply_markup=_ticket_user_kb(ticket, uid),
+        )
+    _clear_ticket_ctx(context)
+    return ConversationHandler.END
+
+
+@require_admin
+async def ticket_close_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    if not q:
+        return
+    await q.answer()
+    ticket_id = _parse_ticket_callback_id(q.data, "close")
+    admin_id = get_user_id(update)
+    if not ticket_id or admin_id is None:
+        return
+    admin_name = display_name(update)
+    try:
+        def _close(ticket: Dict[str, Any]) -> Dict[str, Any]:
+            if str(ticket.get("status", "open")) == "closed":
+                raise TicketFlowError("ticket_closed")
+            if not _ticket_is_assignee(ticket, admin_id):
+                raise TicketFlowError("not_assignee")
+            updated = dict(ticket)
+            updated["status"] = "closed"
+            updated["closed_at"] = _now_iso()
+            updated["closed_by_id"] = admin_id
+            updated["closed_by_name"] = admin_name
+            updated["user_reply_allowed"] = False
+            updated["updated_at"] = _now_iso()
+            return updated
+
+        ticket = await _ticket_update(ticket_id, _close)
+    except TicketFlowError as e:
+        logger.warning("Ticket close failed ticket_id=%s admin_id=%s reason=%s", ticket_id, admin_id, e)
+        if str(e) == "ticket_closed":
+            await q.answer("Тикет уже закрыт.", show_alert=True)
+        elif str(e) == "ticket_not_found":
+            await q.answer("Тикет не найден.", show_alert=True)
+        else:
+            await q.answer("Закрыть тикет может только его исполнитель.", show_alert=True)
+        return
+
+    logger.info(
+        "Ticket closed ticket_id=%s admin_id=%s user_id=%s",
+        ticket_id,
+        admin_id,
+        ticket.get("user_id"),
+    )
+    await _notify_user(context, ticket, event_line=f"✅ <b>Тикет закрыт администратором:</b> {html_escape(admin_name)}")
+    await _notify_admins(context, ticket, exclude={admin_id}, event_line=f"✅ <b>Тикет закрыт:</b> {html_escape(admin_name)}")
+    await q.edit_message_text(
+        _format_ticket_for_admin(ticket, admin_id, event_line="✅ <b>Вы закрыли тикет</b>"),
+        parse_mode=ParseMode.HTML,
+        reply_markup=_ticket_admin_kb(ticket, admin_id),
+    )

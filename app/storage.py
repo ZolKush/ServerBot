@@ -129,6 +129,7 @@ class UserData:
 @dataclass
 class ImportantData:
     tickets_seq: int = 0
+    tickets: Dict[str, Any] = field(default_factory=dict)
     maintenance: Dict[str, Any] = field(default_factory=dict)
     scheduled_maintenance: Dict[str, Any] = field(default_factory=dict)
     dns_status: Dict[str, Any] = field(default_factory=dict)
@@ -136,6 +137,9 @@ class ImportantData:
     @staticmethod
     def _migrate(raw: Dict[str, Any]) -> "ImportantData":
         tickets_seq = int(raw.get("tickets_seq", 0) or 0)
+        tickets = raw.get("tickets", {})
+        if not isinstance(tickets, dict):
+            tickets = {}
         maintenance = raw.get("maintenance", {})
         if not isinstance(maintenance, dict):
             maintenance = {}
@@ -147,6 +151,7 @@ class ImportantData:
             dns_status = {}
         return ImportantData(
             tickets_seq=tickets_seq,
+            tickets=tickets,
             maintenance=maintenance,
             scheduled_maintenance=scheduled_maintenance,
             dns_status=dns_status,
@@ -156,7 +161,7 @@ class ImportantData:
     def _needs_rewrite(raw: Dict[str, Any]) -> bool:
         if raw.get("schema_version") != IMPORTANT_DATA_SCHEMA_VERSION:
             return True
-        allowed_keys = {"schema_version", "tickets_seq", "maintenance", "scheduled_maintenance", "dns_status"}
+        allowed_keys = {"schema_version", "tickets_seq", "tickets", "maintenance", "scheduled_maintenance", "dns_status"}
         return any(k not in allowed_keys for k in raw.keys())
 
     @classmethod
@@ -185,6 +190,7 @@ class ImportantData:
         payload = {
             "schema_version": IMPORTANT_DATA_SCHEMA_VERSION,
             "tickets_seq": self.tickets_seq,
+            "tickets": self.tickets,
             "maintenance": self.maintenance,
             "scheduled_maintenance": self.scheduled_maintenance,
             "dns_status": self.dns_status,
@@ -201,6 +207,7 @@ class ImportantData:
             {
                 "schema_version": IMPORTANT_DATA_SCHEMA_VERSION,
                 "tickets_seq": self.tickets_seq,
+                "tickets": self.tickets,
                 "maintenance": self.maintenance,
                 "scheduled_maintenance": self.scheduled_maintenance,
                 "dns_status": self.dns_status,
@@ -227,6 +234,7 @@ def _refresh_important_snapshot() -> None:
     global IMPORTANT_DATA_SNAPSHOT
     IMPORTANT_DATA_SNAPSHOT = {
         "tickets_seq": int(getattr(IMPORTANT_DATA, "tickets_seq", 0) or 0),
+        "tickets": dict(getattr(IMPORTANT_DATA, "tickets", {}) or {}),
         "maintenance": dict(getattr(IMPORTANT_DATA, "maintenance", {}) or {}),
         "scheduled_maintenance": dict(getattr(IMPORTANT_DATA, "scheduled_maintenance", {}) or {}),
         "dns_status": dict(getattr(IMPORTANT_DATA, "dns_status", {}) or {}),
@@ -254,6 +262,7 @@ async def update_user_data(update_fn: Callable[[UserData], T]) -> T:
 async def update_important_data(update_fn: Callable[[ImportantData], T]) -> T:
     async with IMPORTANT_DATA_LOCK:
         prev_tickets_seq = IMPORTANT_DATA.tickets_seq
+        prev_tickets = copy.deepcopy(IMPORTANT_DATA.tickets)
         prev_maintenance = copy.deepcopy(IMPORTANT_DATA.maintenance)
         prev_scheduled_maintenance = copy.deepcopy(IMPORTANT_DATA.scheduled_maintenance)
         prev_dns_status = copy.deepcopy(IMPORTANT_DATA.dns_status)
@@ -262,6 +271,7 @@ async def update_important_data(update_fn: Callable[[ImportantData], T]) -> T:
             await IMPORTANT_DATA.save_async(IMPORTANT_DATA_PATH)
         except Exception:
             IMPORTANT_DATA.tickets_seq = prev_tickets_seq
+            IMPORTANT_DATA.tickets = prev_tickets
             IMPORTANT_DATA.maintenance = prev_maintenance
             IMPORTANT_DATA.scheduled_maintenance = prev_scheduled_maintenance
             IMPORTANT_DATA.dns_status = prev_dns_status
@@ -306,6 +316,13 @@ def _set_dns_status(cfg: ImportantData, server_key: str, payload: Dict[str, Any]
     return dict(cur[str(server_key)])
 
 
+def _set_ticket(cfg: ImportantData, ticket_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
+    cur = dict(getattr(cfg, "tickets", {}) or {})
+    cur[str(ticket_id)] = dict(payload or {})
+    cfg.tickets = cur
+    return dict(cur[str(ticket_id)])
+
+
 def get_user_meta_copy(uid: int) -> Optional[Dict[str, Any]]:
     meta = USER_DATA_SNAPSHOT.get(str(uid))
     return dict(meta) if isinstance(meta, dict) else None
@@ -345,6 +362,21 @@ def get_scheduled_maintenance() -> Optional[Dict[str, Any]]:
     return None
 
 
+def get_ticket_copy(ticket_id: int) -> Optional[Dict[str, Any]]:
+    tickets = IMPORTANT_DATA_SNAPSHOT.get("tickets")
+    if not isinstance(tickets, dict):
+        return None
+    item = tickets.get(str(ticket_id))
+    return dict(item) if isinstance(item, dict) else None
+
+
+def tickets_snapshot() -> Dict[str, Dict[str, Any]]:
+    tickets = IMPORTANT_DATA_SNAPSHOT.get("tickets")
+    if not isinstance(tickets, dict):
+        return {}
+    return {str(k): dict(v) for k, v in tickets.items() if isinstance(v, dict)}
+
+
 def get_dns_status_cache(server_key: str) -> Optional[Dict[str, Any]]:
     dns = IMPORTANT_DATA_SNAPSHOT.get("dns_status")
     if not isinstance(dns, dict):
@@ -371,3 +403,7 @@ async def next_ticket_seq() -> int:
         return cfg.tickets_seq
 
     return await update_important_data(_next_ticket)
+
+
+async def set_ticket_record(ticket_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
+    return await update_important_data(lambda cfg: _set_ticket(cfg, ticket_id, payload))
