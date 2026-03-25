@@ -41,9 +41,11 @@ from app.handlers.fail2ban import (
     fail2ban_menu,
 )
 from app.handlers.maint import (
+    STATE_MAINT_MODE,
     STATE_MAINT_SCOPE,
     STATE_MAINT_DURATION,
     STATE_MAINT_EXTEND,
+    STATE_MAINT_SCHEDULE_RANGE,
     STATE_MAINT_URGENCY,
     maint_cancel_end_cb,
     maint_duration,
@@ -51,7 +53,10 @@ from app.handlers.maint import (
     maint_end_confirm_cb,
     maint_extend_cb,
     maint_extend_duration,
+    maint_mode,
     maint_restart_notify,
+    maint_schedule_range,
+    maint_schedule_tick,
     maint_scope,
     maint_start,
     maint_urgency,
@@ -155,10 +160,12 @@ def build_app() -> Application:
             CallbackQueryHandler(maint_extend_cb, pattern=r"^maint:extend:[0-9a-f]+$"),
         ],
         states={
+            STATE_MAINT_MODE: [CallbackQueryHandler(maint_mode, pattern=r"^maint:mode:(announce|schedule)$")],
             STATE_MAINT_SCOPE: [CallbackQueryHandler(maint_scope, pattern=r"^maint:scope:[a-z0-9_-]{1,12}$")],
             STATE_MAINT_URGENCY: [CallbackQueryHandler(maint_urgency, pattern=r"^maint:urgency:(urgent|planned)$")],
             STATE_MAINT_DURATION: [MessageHandler(PRIVATE_TEXT, maint_duration)],
             STATE_MAINT_EXTEND: [MessageHandler(PRIVATE_TEXT, maint_extend_duration)],
+            STATE_MAINT_SCHEDULE_RANGE: [MessageHandler(PRIVATE_TEXT, maint_schedule_range)],
         },
         fallbacks=[
             CommandHandler("cancel", cancel),
@@ -282,6 +289,12 @@ def build_app() -> Application:
             maint_restart_notify,
             when=MAINT_RESTART_NOTIFY_DELAY_SEC,
             name="maint_restart_notify",
+        )
+        app.job_queue.run_repeating(
+            maint_schedule_tick,
+            interval=60,
+            first=10,
+            name="maint_schedule_tick",
         )
     else:
         logger.warning("JobQueue недоступен: для ежедневной выжимки установите python-telegram-bot[job-queue].")

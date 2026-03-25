@@ -130,6 +130,7 @@ class UserData:
 class ImportantData:
     tickets_seq: int = 0
     maintenance: Dict[str, Any] = field(default_factory=dict)
+    scheduled_maintenance: Dict[str, Any] = field(default_factory=dict)
     dns_status: Dict[str, Any] = field(default_factory=dict)
 
     @staticmethod
@@ -138,16 +139,24 @@ class ImportantData:
         maintenance = raw.get("maintenance", {})
         if not isinstance(maintenance, dict):
             maintenance = {}
+        scheduled_maintenance = raw.get("scheduled_maintenance", {})
+        if not isinstance(scheduled_maintenance, dict):
+            scheduled_maintenance = {}
         dns_status = raw.get("dns_status", {})
         if not isinstance(dns_status, dict):
             dns_status = {}
-        return ImportantData(tickets_seq=tickets_seq, maintenance=maintenance, dns_status=dns_status)
+        return ImportantData(
+            tickets_seq=tickets_seq,
+            maintenance=maintenance,
+            scheduled_maintenance=scheduled_maintenance,
+            dns_status=dns_status,
+        )
 
     @staticmethod
     def _needs_rewrite(raw: Dict[str, Any]) -> bool:
         if raw.get("schema_version") != IMPORTANT_DATA_SCHEMA_VERSION:
             return True
-        allowed_keys = {"schema_version", "tickets_seq", "maintenance", "dns_status"}
+        allowed_keys = {"schema_version", "tickets_seq", "maintenance", "scheduled_maintenance", "dns_status"}
         return any(k not in allowed_keys for k in raw.keys())
 
     @classmethod
@@ -177,6 +186,7 @@ class ImportantData:
             "schema_version": IMPORTANT_DATA_SCHEMA_VERSION,
             "tickets_seq": self.tickets_seq,
             "maintenance": self.maintenance,
+            "scheduled_maintenance": self.scheduled_maintenance,
             "dns_status": self.dns_status,
         }
         tmp_path = Path(path)
@@ -192,6 +202,7 @@ class ImportantData:
                 "schema_version": IMPORTANT_DATA_SCHEMA_VERSION,
                 "tickets_seq": self.tickets_seq,
                 "maintenance": self.maintenance,
+                "scheduled_maintenance": self.scheduled_maintenance,
                 "dns_status": self.dns_status,
             },
         )
@@ -217,6 +228,7 @@ def _refresh_important_snapshot() -> None:
     IMPORTANT_DATA_SNAPSHOT = {
         "tickets_seq": int(getattr(IMPORTANT_DATA, "tickets_seq", 0) or 0),
         "maintenance": dict(getattr(IMPORTANT_DATA, "maintenance", {}) or {}),
+        "scheduled_maintenance": dict(getattr(IMPORTANT_DATA, "scheduled_maintenance", {}) or {}),
         "dns_status": dict(getattr(IMPORTANT_DATA, "dns_status", {}) or {}),
     }
 
@@ -243,6 +255,7 @@ async def update_important_data(update_fn: Callable[[ImportantData], T]) -> T:
     async with IMPORTANT_DATA_LOCK:
         prev_tickets_seq = IMPORTANT_DATA.tickets_seq
         prev_maintenance = copy.deepcopy(IMPORTANT_DATA.maintenance)
+        prev_scheduled_maintenance = copy.deepcopy(IMPORTANT_DATA.scheduled_maintenance)
         prev_dns_status = copy.deepcopy(IMPORTANT_DATA.dns_status)
         try:
             result = update_fn(IMPORTANT_DATA)
@@ -250,6 +263,7 @@ async def update_important_data(update_fn: Callable[[ImportantData], T]) -> T:
         except Exception:
             IMPORTANT_DATA.tickets_seq = prev_tickets_seq
             IMPORTANT_DATA.maintenance = prev_maintenance
+            IMPORTANT_DATA.scheduled_maintenance = prev_scheduled_maintenance
             IMPORTANT_DATA.dns_status = prev_dns_status
             logger.exception("Не удалось обновить important_data")
             raise
@@ -274,6 +288,15 @@ def _set_maintenance(cfg: ImportantData, payload: Dict[str, Any]) -> Dict[str, A
 
 def _clear_maintenance(cfg: ImportantData) -> None:
     cfg.maintenance = {}
+
+
+def _set_scheduled_maintenance(cfg: ImportantData, payload: Dict[str, Any]) -> Dict[str, Any]:
+    cfg.scheduled_maintenance = payload
+    return payload
+
+
+def _clear_scheduled_maintenance(cfg: ImportantData) -> None:
+    cfg.scheduled_maintenance = {}
 
 
 def _set_dns_status(cfg: ImportantData, server_key: str, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -315,6 +338,13 @@ def get_active_maintenance() -> Optional[Dict[str, Any]]:
     return None
 
 
+def get_scheduled_maintenance() -> Optional[Dict[str, Any]]:
+    m = IMPORTANT_DATA_SNAPSHOT.get("scheduled_maintenance")
+    if isinstance(m, dict) and m.get("id"):
+        return dict(m)
+    return None
+
+
 def get_dns_status_cache(server_key: str) -> Optional[Dict[str, Any]]:
     dns = IMPORTANT_DATA_SNAPSHOT.get("dns_status")
     if not isinstance(dns, dict):
@@ -325,6 +355,14 @@ def get_dns_status_cache(server_key: str) -> Optional[Dict[str, Any]]:
 
 async def set_dns_status_cache(server_key: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     return await update_important_data(lambda cfg: _set_dns_status(cfg, server_key, payload))
+
+
+async def set_scheduled_maintenance_record(payload: Dict[str, Any]) -> Dict[str, Any]:
+    return await update_important_data(lambda cfg: _set_scheduled_maintenance(cfg, payload))
+
+
+async def clear_scheduled_maintenance_record() -> None:
+    await update_important_data(lambda cfg: _clear_scheduled_maintenance(cfg))
 
 
 async def next_ticket_seq() -> int:

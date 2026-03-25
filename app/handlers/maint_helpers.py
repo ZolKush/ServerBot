@@ -61,6 +61,16 @@ def urgency_kb() -> InlineKeyboardMarkup:
     )
 
 
+def maint_mode_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("🗓 Запланировать техработы", callback_data="maint:mode:schedule")],
+            [InlineKeyboardButton("🚨 Объявить техработы", callback_data="maint:mode:announce")],
+            [InlineKeyboardButton("🏠 Меню", callback_data="menu:home")],
+        ]
+    )
+
+
 def parse_hhmm(text: str) -> Optional[Tuple[int, int]]:
     m = re.fullmatch(r"\s*(\d{1,3})\s*:\s*([0-5]\d)\s*", text or "")
     if not m:
@@ -69,6 +79,16 @@ def parse_hhmm(text: str) -> Optional[Tuple[int, int]]:
     if hh > MAX_MAINT_HOURS:
         return None
     return hh, mm
+
+
+def parse_clock_range(text: str) -> Optional[Tuple[int, int, int, int]]:
+    m = re.fullmatch(r"\s*(\d{1,2})\s*:\s*([0-5]\d)\s*[-–]\s*(\d{1,2})\s*:\s*([0-5]\d)\s*", text or "")
+    if not m:
+        return None
+    sh, sm, eh, em = (int(m.group(i)) for i in range(1, 5))
+    if not (0 <= sh <= 23 and 0 <= eh <= 23):
+        return None
+    return sh, sm, eh, em
 
 
 def plural_ru(n: int, one: str, few: str, many: str) -> str:
@@ -105,6 +125,16 @@ def format_maint(scope: str, urgency: str, hh: int, mm: int, author: str) -> str
     )
 
 
+def format_scheduled_maint(scope: str, start_at: datetime, end_at: datetime, author: str) -> str:
+    return (
+        "🗓 <b>Запланированы технические работы</b>\n"
+        f"{_scope_line(scope)}\n"
+        f"• Начало: <code>{html_escape(_fmt_dt_short(start_at))}</code> ({html_escape(TZ_NAME)})\n"
+        f"• Окончание: <code>{html_escape(_fmt_dt_short(end_at))}</code> ({html_escape(TZ_NAME)})\n"
+        f"• Ответственный: <b>{html_escape(author)}</b>"
+    )
+
+
 def _hhmm_to_minutes(hh: int, mm: int) -> int:
     return max(0, (int(hh) * 60) + int(mm))
 
@@ -134,6 +164,49 @@ def _build_maint_record(scope: str, urgency: str, hh: int, mm: int, author_id: O
         "author_id": author_id,
         "author_name": author_name,
         "updated_at": now.isoformat(),
+    }
+
+
+def _build_scheduled_maint_record(
+    scope: str,
+    start_at: datetime,
+    end_at: datetime,
+    author_id: Optional[int],
+    author_name: str,
+) -> Dict[str, Any]:
+    duration_min = max(1, int((end_at - start_at).total_seconds() // 60))
+    now = datetime.now(TZ)
+    return {
+        "id": uuid4().hex,
+        "scope": _normalize_scope(scope),
+        "urgency": "planned",
+        "duration_min": duration_min,
+        "scheduled_start": start_at.isoformat(),
+        "scheduled_end": end_at.isoformat(),
+        "author_id": author_id,
+        "author_name": author_name,
+        "created_at": now.isoformat(),
+        "updated_at": now.isoformat(),
+        "notified_before": False,
+        "notified_start": False,
+    }
+
+
+def _scheduled_to_active_record(scheduled: Dict[str, Any]) -> Dict[str, Any]:
+    start_at = datetime.now(TZ)
+    duration_min = int(scheduled.get("duration_min", 0) or 0)
+    expected_end = start_at + timedelta(minutes=max(duration_min, 1))
+    return {
+        "id": str(scheduled.get("id") or uuid4().hex),
+        "active": True,
+        "scope": _normalize_scope(str(scheduled.get("scope") or MAINT_SCOPE_ALL)),
+        "urgency": "planned",
+        "duration_min": max(duration_min, 1),
+        "started_at": start_at.isoformat(),
+        "expected_end": expected_end.isoformat(),
+        "author_id": scheduled.get("author_id"),
+        "author_name": scheduled.get("author_name") or "администратор",
+        "updated_at": start_at.isoformat(),
     }
 
 
@@ -188,6 +261,28 @@ def _maint_panel_text(maint: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _scheduled_panel_text(scheduled: Dict[str, Any]) -> str:
+    scope = scheduled.get("scope", MAINT_SCOPE_ALL)
+    try:
+        start_dt = datetime.fromisoformat(str(scheduled.get("scheduled_start") or ""))
+    except Exception:
+        start_dt = None
+    try:
+        end_dt = datetime.fromisoformat(str(scheduled.get("scheduled_end") or ""))
+    except Exception:
+        end_dt = None
+    lines = [
+        "🗓️ <b>Техработы запланированы</b>",
+        _scope_line(str(scope)),
+    ]
+    if start_dt:
+        lines.append(f"• Начало: <code>{html_escape(_fmt_dt_short(start_dt))}</code> ({html_escape(TZ_NAME)})")
+    if end_dt:
+        lines.append(f"• Окончание: <code>{html_escape(_fmt_dt_short(end_dt))}</code> ({html_escape(TZ_NAME)})")
+    lines.append("• Уведомления уйдут за 30 минут и в момент начала.")
+    return "\n".join(lines)
+
+
 def _maint_extend_notice(maint: Dict[str, Any], hh: int, mm: int, author: str) -> str:
     expected_end = maint.get("expected_end")
     end_dt = None
@@ -221,3 +316,35 @@ def _maint_end_notice(maint: Dict[str, Any], author: str) -> str:
 
 def _maint_restart_text(maint: Dict[str, Any]) -> str:
     return "♻️ <b>Бот перезапущен</b>\n\n" + _maint_panel_text(maint)
+
+
+def _maint_scheduled_soon_notice(scheduled: Dict[str, Any]) -> str:
+    try:
+        start_dt = datetime.fromisoformat(str(scheduled.get("scheduled_start") or ""))
+        end_dt = datetime.fromisoformat(str(scheduled.get("scheduled_end") or ""))
+    except Exception:
+        start_dt = end_dt = None
+    scope = scheduled.get("scope", MAINT_SCOPE_ALL)
+    author = scheduled.get("author_name") or "администратор"
+    return (
+        "⏳ <b>Технические работы начнутся через 30 минут</b>\n"
+        f"{_scope_line(str(scope))}\n"
+        f"• Начало: <code>{html_escape(_fmt_dt_short(start_dt) if start_dt else '-')}</code> ({html_escape(TZ_NAME)})\n"
+        f"• Окончание: <code>{html_escape(_fmt_dt_short(end_dt) if end_dt else '-')}</code> ({html_escape(TZ_NAME)})\n"
+        f"• Ответственный: <b>{html_escape(str(author))}</b>"
+    )
+
+
+def _maint_scheduled_start_notice(scheduled: Dict[str, Any]) -> str:
+    try:
+        end_dt = datetime.fromisoformat(str(scheduled.get("scheduled_end") or ""))
+    except Exception:
+        end_dt = None
+    scope = scheduled.get("scope", MAINT_SCOPE_ALL)
+    author = scheduled.get("author_name") or "администратор"
+    return (
+        "⚠️ <b>Технические работы начались</b>\n"
+        f"{_scope_line(str(scope))}\n"
+        f"• Плановое окончание: <code>{html_escape(_fmt_dt_short(end_dt) if end_dt else '-')}</code> ({html_escape(TZ_NAME)})\n"
+        f"• Ответственный: <b>{html_escape(str(author))}</b>"
+    )
