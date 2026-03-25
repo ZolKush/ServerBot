@@ -30,7 +30,7 @@ from app.config import (
     logger,
 )
 from app.handlers.auth import cmd_auth, cmd_help, cmd_logout, cmd_start
-from app.handlers.common import cancel, cancel_to_menu_cb, menu_home_cb
+from app.handlers.common import MENU_HOME_TEXT_PATTERN, cancel, cancel_to_menu_cb, menu_home_cb, menu_home_text
 from app.handlers.docker import docker_back_to_status, docker_inspect, docker_list_menu, docker_logs, docker_show
 from app.handlers.fail2ban import (
     f2b_back_cb,
@@ -178,6 +178,7 @@ def build_app() -> Application:
         fallbacks=[
             CommandHandler("cancel", cancel),
             CallbackQueryHandler(cancel_to_menu_cb, pattern=r"^menu:home$"),
+            MessageHandler(PRIVATE_TEXT & filters.Regex(MENU_HOME_TEXT_PATTERN), menu_home_text),
         ],
         name="maint_flow",
         persistent=False,
@@ -205,6 +206,7 @@ def build_app() -> Application:
         fallbacks=[
             CommandHandler("cancel", cancel),
             CallbackQueryHandler(cancel_to_menu_cb, pattern=r"^menu:home$"),
+            MessageHandler(PRIVATE_TEXT & filters.Regex(MENU_HOME_TEXT_PATTERN), menu_home_text),
         ],
         name="ticket_flow",
         persistent=False,
@@ -252,11 +254,13 @@ def build_app() -> Application:
         fallbacks=[
             CommandHandler("cancel", cancel),
             CallbackQueryHandler(cancel_to_menu_cb, pattern=r"^menu:home$"),
+            MessageHandler(PRIVATE_TEXT & filters.Regex(MENU_HOME_TEXT_PATTERN), menu_home_text),
         ],
         name="users_flow",
         persistent=False,
     )
     app.add_handler(users_conv)
+    app.add_handler(MessageHandler(PRIVATE_TEXT & filters.Regex(MENU_HOME_TEXT_PATTERN), menu_home_text))
     app.add_handler(CallbackQueryHandler(menu_home_cb, pattern=r"^menu:home$"))
     app.add_handler(CallbackQueryHandler(cmd_help, pattern=r"^menu:help$"))
     app.add_handler(CallbackQueryHandler(cmd_health, pattern=r"^menu:status$"))

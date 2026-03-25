@@ -3,12 +3,13 @@ from __future__ import annotations
 import asyncio
 import html
 import random
+import re
 from dataclasses import dataclass, field
 from functools import wraps
 from datetime import datetime
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, Update
 from telegram.constants import ChatType, ParseMode
 from telegram.error import BadRequest, NetworkError, RetryAfter, TimedOut
 from telegram.ext import ContextTypes, ConversationHandler
@@ -25,6 +26,8 @@ UI_OK = "✅"
 UI_WARN = "⚠️"
 UI_ERR = "❌"
 UI_INFO = "ℹ️"
+CONTEXT_MENU_BUTTON = "📋 Меню"
+MENU_HOME_TEXT_PATTERN = rf"^(?:{re.escape(CONTEXT_MENU_BUTTON)}|Меню)$"
 
 
 def ui_ok_text(text: str) -> str:
@@ -188,6 +191,36 @@ def display_name(update: Update) -> str:
     return nm if nm else str(u.id)
 
 
+def context_menu_reply_kb() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        [[KeyboardButton(CONTEXT_MENU_BUTTON)]],
+        resize_keyboard=True,
+        is_persistent=True,
+        input_field_placeholder="Нажмите «Меню» для вызова главного меню",
+    )
+
+
+async def ensure_context_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = get_user_id(update)
+    if uid is None:
+        return
+    activated = context.bot_data.setdefault("context_menu_button_users", set())
+    if not isinstance(activated, set):
+        activated = set()
+        context.bot_data["context_menu_button_users"] = activated
+    if uid in activated:
+        return
+    activated.add(uid)
+    try:
+        await context.bot.send_message(
+            chat_id=uid,
+            text="Контекстная кнопка меню закреплена возле поля ввода.",
+            reply_markup=context_menu_reply_kb(),
+        )
+    except Exception as e:
+        logger.warning("Не удалось включить контекстную кнопку меню для user_id=%s: %s", uid, e)
+
+
 def main_menu_inline_kb_for_admin(is_admin_user: bool) -> InlineKeyboardMarkup:
     rows: List[List[InlineKeyboardButton]] = [
         [
@@ -240,11 +273,34 @@ async def menu_home_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await show_main_menu(update)
 
 
-@require_auth
-async def cancel_to_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def _clear_transient_user_context(context: ContextTypes.DEFAULT_TYPE) -> None:
     for key in tuple(context.user_data.keys()):
         if key.startswith("ticket_") or key.startswith("maint_") or key in {"selected_uid", "subscription_delivery_mode"}:
             context.user_data.pop(key, None)
+
+
+@require_private
+async def menu_home_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    text = ((msg.text if msg else "") or "").strip()
+    if not re.fullmatch(MENU_HOME_TEXT_PATTERN, text):
+        return ConversationHandler.END
+    _clear_transient_user_context(context)
+    if is_authorized(update) and not is_enabled(update):
+        await reply_disabled(update)
+        return ConversationHandler.END
+    if not is_authorized(update):
+        await reply_need_auth(update)
+        await ensure_context_menu_button(update, context)
+        return ConversationHandler.END
+    await show_main_menu(update)
+    await ensure_context_menu_button(update, context)
+    return ConversationHandler.END
+
+
+@require_auth
+async def cancel_to_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    _clear_transient_user_context(context)
     await show_main_menu(update)
     return ConversationHandler.END
 
@@ -365,9 +421,7 @@ def authorized_ids(role_filter: Optional[str] = None, exclude: Optional[Set[int]
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    for key in tuple(context.user_data.keys()):
-        if key.startswith("ticket_") or key.startswith("maint_") or key in {"selected_uid", "subscription_delivery_mode"}:
-            context.user_data.pop(key, None)
+    _clear_transient_user_context(context)
     msg = update.effective_message
     if msg:
         await msg.reply_text("Действие отменено.")
