@@ -201,24 +201,7 @@ def context_menu_reply_kb() -> ReplyKeyboardMarkup:
 
 
 async def ensure_context_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    uid = get_user_id(update)
-    if uid is None:
-        return
-    activated = context.bot_data.setdefault("context_menu_button_users", set())
-    if not isinstance(activated, set):
-        activated = set()
-        context.bot_data["context_menu_button_users"] = activated
-    if uid in activated:
-        return
-    activated.add(uid)
-    try:
-        await context.bot.send_message(
-            chat_id=uid,
-            text="Контекстная кнопка меню закреплена возле поля ввода.",
-            reply_markup=context_menu_reply_kb(),
-        )
-    except Exception as e:
-        logger.warning("Не удалось включить контекстную кнопку меню для user_id=%s: %s", uid, e)
+    return None
 
 
 async def try_delete_message(update: Update) -> None:
