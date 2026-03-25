@@ -66,6 +66,20 @@ def _set_users_filter(context: ContextTypes.DEFAULT_TYPE, value: str) -> str:
     return v
 
 
+def _subscription_mode_prompt(mode: str) -> str:
+    if mode == "assign":
+        return (
+            "Вставьте подписку одним сообщением. Она будет только сохранена за пользователем в "
+            "<code>data/user_data.json</code> без отправки уведомления."
+            "\n\nПодсказка: можно вставлять vless/URL/JSON без изменений."
+        )
+    return (
+        "Вставьте подписку одним сообщением. Она будет сохранена за пользователем в "
+        "<code>data/user_data.json</code> и сразу отправлена ему уведомлением."
+        "\n\nПодсказка: можно вставлять vless/URL/JSON без изменений."
+    )
+
+
 @require_admin
 async def users_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -342,15 +356,14 @@ async def users_user_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text("Введите никнейм (как должен отображаться в списке):")
         return ADMIN_USER_NICK_TEXT
 
-    m_cfg = re.fullmatch(r"users:cfg:(\d+)", data)
-    if m_cfg:
-        uid = int(m_cfg.group(1))
+    m_subscription = re.fullmatch(r"users:(cfg|subassign|subsend):(\d+)", data)
+    if m_subscription:
+        action, uid_s = m_subscription.group(1), m_subscription.group(2)
+        uid = int(uid_s)
         context.user_data["selected_uid"] = uid
+        context.user_data["subscription_delivery_mode"] = "assign" if action == "subassign" else "send"
         await q.edit_message_text(
-            "Вставьте подписку одним сообщением. Она будет сохранена за пользователем в "
-            "<code>data/user_data.json</code>"
-            " и при необходимости отправлена ему автоматически."
-            "\n\nПодсказка: можно вставлять vless/URL/JSON без изменений.",
+            _subscription_mode_prompt(str(context.user_data["subscription_delivery_mode"])),
             parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup(
                 [
@@ -473,6 +486,7 @@ async def users_user_cfg_text(update: Update, context: ContextTypes.DEFAULT_TYPE
             await msg.reply_text(ui_error_text("пользователь не найден (возможно, удалён из списка)."))
         return ADMIN_PICK
 
+    delivery_mode = str(context.user_data.get("subscription_delivery_mode", "send"))
     author_id = get_user_id(update)
     author_name = display_name(update)
     meta[SUBSCRIPTION_TEXT_KEY] = cfg
@@ -481,22 +495,28 @@ async def users_user_cfg_text(update: Update, context: ContextTypes.DEFAULT_TYPE
     meta[SUBSCRIPTION_UPDATED_BY_NAME_KEY] = author_name
     updated = await upsert_user_meta(uid, meta)
 
-    try:
-        await send_subscription_payload(
-            context,
-            chat_id=uid,
-            meta=updated,
-            title="📦 <b>Подписка от администратора</b>",
-            filename_prefix=f"subscription_{uid}",
-        )
-        logger.info("Admin user_id=%s assigned subscription target_uid=%s", author_id, uid)
+    if delivery_mode == "assign":
         if msg:
-            await msg.reply_text(ui_ok_text("Подписка сохранена и отправлена пользователю"))
-    except Exception as e:
-        logger.warning("Подписка сохранена, но не отправлена пользователю %s: %s", uid, e)
-        if msg:
-            await msg.reply_text(ui_warn_text("Подписка сохранена в базе, но отправить пользователю её не удалось."))
+            await msg.reply_text(ui_ok_text("Подписка сохранена в базе без отправки пользователю"))
+        logger.info("Admin user_id=%s assigned subscription target_uid=%s mode=assign", author_id, uid)
+    else:
+        try:
+            await send_subscription_payload(
+                context,
+                chat_id=uid,
+                meta=updated,
+                title="📦 <b>Подписка от администратора</b>",
+                filename_prefix=f"subscription_{uid}",
+            )
+            logger.info("Admin user_id=%s assigned subscription target_uid=%s mode=send", author_id, uid)
+            if msg:
+                await msg.reply_text(ui_ok_text("Подписка сохранена и отправлена пользователю"))
+        except Exception as e:
+            logger.warning("Подписка сохранена, но не отправлена пользователю %s: %s", uid, e)
+            if msg:
+                await msg.reply_text(ui_warn_text("Подписка сохранена в базе, но отправить пользователю её не удалось."))
 
+    context.user_data.pop("subscription_delivery_mode", None)
     if msg:
         await msg.reply_text(format_user_card(updated), parse_mode=ParseMode.HTML, reply_markup=user_card_kb(uid))
     return ADMIN_USER_MENU

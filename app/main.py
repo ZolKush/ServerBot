@@ -213,7 +213,7 @@ def build_app() -> Application:
             ADMIN_USER_MENU: [
                 CallbackQueryHandler(
                     users_user_menu,
-                    pattern=r"^users:(msg:\d+|nick:\d+|cfg:\d+|toggle:\d+|toggleapply:\d+|paid:\d+|paidapply:\d+|back)$",
+                    pattern=r"^users:(msg:\d+|nick:\d+|cfg:\d+|subassign:\d+|subsend:\d+|toggle:\d+|toggleapply:\d+|paid:\d+|paidapply:\d+|back)$",
                 ),
                 CallbackQueryHandler(users_pick, pattern=r"^users:user:\d+$"),
             ],

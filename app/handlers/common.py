@@ -237,7 +237,7 @@ async def menu_home_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 @require_auth
 async def cancel_to_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for key in tuple(context.user_data.keys()):
-        if key.startswith("ticket_") or key.startswith("maint_") or key == "selected_uid":
+        if key.startswith("ticket_") or key.startswith("maint_") or key in {"selected_uid", "subscription_delivery_mode"}:
             context.user_data.pop(key, None)
     await show_main_menu(update)
     return ConversationHandler.END
@@ -360,7 +360,7 @@ def authorized_ids(role_filter: Optional[str] = None, exclude: Optional[Set[int]
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for key in tuple(context.user_data.keys()):
-        if key.startswith("ticket_") or key.startswith("maint_") or key == "selected_uid":
+        if key.startswith("ticket_") or key.startswith("maint_") or key in {"selected_uid", "subscription_delivery_mode"}:
             context.user_data.pop(key, None)
     msg = update.effective_message
     if msg:
