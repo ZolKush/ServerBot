@@ -21,19 +21,26 @@ class JsonLogFormatter(logging.Formatter):
         return json.dumps(payload, ensure_ascii=False)
 
 
-def configure_logging() -> None:
+def configure_logging(*, level: str | None = None, use_json: bool | None = None, force: bool = False) -> None:
     root = logging.getLogger()
-    if getattr(root, "_maintbot_configured", False):
+    if getattr(root, "_maintbot_configured", False) and not force:
         return
-    use_json = os.getenv("LOG_JSON", "").strip().lower() in {"1", "true", "yes", "on"}
-    level = os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO"
+    use_json = (
+        use_json
+        if use_json is not None
+        else os.getenv("LOG_JSON", "").strip().lower() in {"1", "true", "yes", "on"}
+    )
+    level = (level if level is not None else os.getenv("LOG_LEVEL", "INFO")).strip().upper() or "INFO"
     handler = logging.StreamHandler()
     if use_json:
         handler.setFormatter(JsonLogFormatter())
     else:
         handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
     root.handlers[:] = [handler]
-    root.setLevel(level)
+    try:
+        root.setLevel(level)
+    except ValueError:
+        root.setLevel("INFO")
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     root._maintbot_configured = True  # type: ignore[attr-defined]

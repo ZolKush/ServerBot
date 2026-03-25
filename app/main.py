@@ -22,7 +22,10 @@ from app.config import (
     ADMIN_PASSWORD,
     AUTH_PASSWORD,
     BOT_TOKEN,
+    DNS_DAILY_REFRESH_AT,
+    DNS_STARTUP_REFRESH_DELAY_SEC,
     FAIL2BAN_DAILY_AT,
+    MAINT_RESTART_NOTIFY_DELAY_SEC,
     TZ,
     logger,
 )
@@ -102,6 +105,16 @@ warnings.filterwarnings(
 )
 
 
+def _parse_schedule_hhmm(raw: str, *, field_name: str, fallback: str) -> tuple[int, int]:
+    try:
+        t = datetime.strptime(raw, "%H:%M").time()
+        return t.hour, t.minute
+    except Exception:
+        logger.warning("Invalid %s=%s, fallback to %s", field_name, raw, fallback)
+        t = datetime.strptime(fallback, "%H:%M").time()
+        return t.hour, t.minute
+
+
 async def on_error(update: object, context) -> None:
     try:
         cb_data = getattr(getattr(update, "callback_query", None), "data", None)
@@ -120,7 +133,7 @@ async def on_error(update: object, context) -> None:
 
 def build_app() -> Application:
     if not BOT_TOKEN:
-        raise RuntimeError("Не задан BOT_TOKEN в env.secrets")
+        raise RuntimeError("Не задан BOT_TOKEN в app/env.secrets, app/.env или переменных окружения")
     if not AUTH_PASSWORD and not ADMIN_PASSWORD:
         logger.warning("Не заданы AUTH_PASSWORD и ADMIN_PASSWORD: авторизация невозможна.")
 
@@ -249,12 +262,8 @@ def build_app() -> Application:
     app.add_handler(CallbackQueryHandler(f2b_back_cb, pattern=r"^f2b:back:[a-z0-9_-]{1,12}$"))
 
     if app.job_queue:
-        try:
-            t = datetime.strptime(FAIL2BAN_DAILY_AT, "%H:%M").time()
-            hh, mm = t.hour, t.minute
-        except Exception:
-            logger.warning("Invalid FAIL2BAN_DAILY_AT=%s, fallback to 12:00", FAIL2BAN_DAILY_AT)
-            hh, mm = 12, 0
+        hh, mm = _parse_schedule_hhmm(FAIL2BAN_DAILY_AT, field_name="FAIL2BAN_DAILY_AT", fallback="12:00")
+        dns_hh, dns_mm = _parse_schedule_hhmm(DNS_DAILY_REFRESH_AT, field_name="DNS_DAILY_REFRESH_AT", fallback="03:05")
         app.job_queue.run_daily(
             fail2ban_daily_digest,
             time=dtime(hour=hh, minute=mm, tzinfo=TZ),
@@ -262,11 +271,15 @@ def build_app() -> Application:
         )
         app.job_queue.run_daily(
             dns_daily_refresh,
-            time=dtime(hour=3, minute=5, tzinfo=TZ),
+            time=dtime(hour=dns_hh, minute=dns_mm, tzinfo=TZ),
             name="dns_daily_refresh",
         )
-        app.job_queue.run_once(dns_daily_refresh, when=5, name="dns_refresh_startup")
-        app.job_queue.run_once(maint_restart_notify, when=2, name="maint_restart_notify")
+        app.job_queue.run_once(dns_daily_refresh, when=DNS_STARTUP_REFRESH_DELAY_SEC, name="dns_refresh_startup")
+        app.job_queue.run_once(
+            maint_restart_notify,
+            when=MAINT_RESTART_NOTIFY_DELAY_SEC,
+            name="maint_restart_notify",
+        )
     else:
         logger.warning("JobQueue недоступен: для ежедневной выжимки установите python-telegram-bot[job-queue].")
 
