@@ -1,4 +1,4 @@
-from .constants import MENU_FAIL2BAN, MENU_MAINT, MENU_STATUS, MENU_TICKET, MENU_USERS
+from .constants import MENU_FAIL2BAN, MENU_MAINT, MENU_STATUS, MENU_SUBSCRIPTION, MENU_TICKET, MENU_USERS
 from .logging_setup import configure_logging, logger
 from .settings import (
     ADMIN_PASSWORD,
@@ -9,6 +9,8 @@ from .settings import (
     CHECK_A_DOMAINS,
     DNS_RESOLVERS,
     DOCKER_BIN,
+    DNS_DAILY_REFRESH_AT,
+    DNS_STARTUP_REFRESH_DELAY_SEC,
     ENV_FILE as _ENV_FILE,
     EXPECTED_A_IP,
     FAIL2BAN_DAILY_AT,
@@ -21,6 +23,9 @@ from .settings import (
     MONITOR_CONTAINERS,
     MONITOR_CONTAINER_SET,
     MONITOR_PANEL_HOST,
+    LOG_JSON,
+    LOG_LEVEL,
+    MAINT_RESTART_NOTIFY_DELAY_SEC,
     PING_BIN,
     PING_COUNT,
     PING_TIMEOUT_SEC,
@@ -51,4 +56,4 @@ from .settings import (
     split_env_list as _split_env_list,
 )
 
-configure_logging()
+configure_logging(level=LOG_LEVEL, use_json=LOG_JSON, force=True)

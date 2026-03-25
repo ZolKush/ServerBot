@@ -147,109 +147,6 @@ def _parse_df_bytes_text(raw: str) -> str:
         return "н/д"
 
 
-async def remote_check_uptime(ssh_target: str) -> str:
-    rc, out, _ = await ssh_run_shell(ssh_target, "cat /proc/uptime 2>/dev/null || true", timeout=SUBPROC_SHORT_TIMEOUT)
-    if rc == 0 and out.strip():
-        parsed = _parse_uptime_from_proc(out)
-        if parsed != "н/д":
-            return parsed
-    rc, out, _ = await ssh_run_exec(ssh_target, ["uptime", "-p"], timeout=SUBPROC_SHORT_TIMEOUT)
-    return out.strip() if rc == 0 and out.strip() else "н/д"
-
-
-async def remote_meminfo(ssh_target: str) -> str:
-    rc, out, _ = await ssh_run_shell(ssh_target, "cat /proc/meminfo 2>/dev/null || true", timeout=SUBPROC_SHORT_TIMEOUT)
-    if rc == 0 and out.strip():
-        parsed = _parse_meminfo_text(out)
-        if parsed != "н/д":
-            return parsed
-    rc, out, _ = await ssh_run_exec(ssh_target, ["free", "-m"], timeout=SUBPROC_SHORT_TIMEOUT)
-    if rc != 0:
-        return "н/д"
-    lines = out.splitlines()
-    if len(lines) < 2:
-        return "н/д"
-    mem = re.split(r"\s+", lines[1].strip())
-    swp = re.split(r"\s+", lines[2].strip()) if len(lines) > 2 else []
-    try:
-        mem_total = int(mem[1])
-        mem_used = int(mem[2])
-        mem_free = int(mem[3])
-        mem_s = f"{mem_used} / {mem_total} MiB (free {mem_free} MiB)"
-    except Exception:
-        mem_s = "н/д"
-    try:
-        if swp and swp[0].lower().startswith("swap"):
-            sw_total = int(swp[1])
-            sw_used = int(swp[2])
-            sw_s = f"{sw_used} / {sw_total} MiB"
-        else:
-            sw_s = "н/д"
-    except Exception:
-        sw_s = "н/д"
-    return f"RAM: {mem_s}; Swap: {sw_s}"
-
-
-async def remote_disk_root(ssh_target: str) -> str:
-    rc, out, _ = await ssh_run_exec(ssh_target, ["df", "-B1", "/"], timeout=SUBPROC_SHORT_TIMEOUT)
-    if rc == 0 and out.strip():
-        parsed = _parse_df_bytes_text(out)
-        if parsed != "н/д":
-            return parsed
-    rc, out, _ = await ssh_run_exec(ssh_target, ["df", "-h", "/"], timeout=SUBPROC_SHORT_TIMEOUT)
-    if rc != 0:
-        return "н/д"
-    lines = out.splitlines()
-    if len(lines) < 2:
-        return "н/д"
-    parts = re.split(r"\s+", lines[1].strip())
-    if len(parts) >= 6:
-        size, used, avail, usep, mnt = parts[1], parts[2], parts[3], parts[4], parts[5]
-        return f"{used} / {size} (avail {avail}, {usep}) mount {mnt}"
-    return "н/д"
-
-
-async def remote_ufw_status_basic(ssh_target: str) -> str:
-    ufw_candidates = [UFW_BIN, "/usr/sbin/ufw", "ufw"]
-    cmds: List[str] = []
-    for ufw_bin in ufw_candidates:
-        if ufw_bin and f"{ufw_bin} status" not in cmds:
-            cmds.append(f"{ufw_bin} status")
-        if ufw_bin and SUDO_BIN:
-            sudo_cmd = f"{SUDO_BIN} -n {ufw_bin} status"
-            if sudo_cmd not in cmds:
-                cmds.append(sudo_cmd)
-    for cmd in cmds:
-        rc, out, _ = await ssh_run_shell(ssh_target, cmd, timeout=SUBPROC_SHORT_TIMEOUT)
-        if rc == 0 and out.strip():
-            first = (out.strip().splitlines()[:1] or [""])[0].lower()
-            if "active" in first:
-                return "active"
-            if "inactive" in first:
-                return "inactive"
-    return "н/д"
-
-
-async def remote_ufw_summary_for_admin(ssh_target: str) -> Tuple[str, List[str], List[str], List[str]]:
-    ufw_candidates = [UFW_BIN, "/usr/sbin/ufw", "ufw"]
-    cmds: List[str] = []
-    for ufw_bin in ufw_candidates:
-        if ufw_bin and f"{ufw_bin} status" not in cmds:
-            cmds.append(f"{ufw_bin} status")
-        if ufw_bin and SUDO_BIN:
-            sudo_cmd = f"{SUDO_BIN} -n {ufw_bin} status"
-            if sudo_cmd not in cmds:
-                cmds.append(sudo_cmd)
-    for cmd in cmds:
-        rc, out, _ = await ssh_run_shell(ssh_target, cmd, timeout=SUBPROC_SHORT_TIMEOUT)
-        if rc == 0 and out.strip():
-            first = (out.strip().splitlines()[:1] or [""])[0].lower()
-            status = "active" if "active" in first else ("inactive" if "inactive" in first else "н/д")
-            allow, deny, reject = _parse_ufw_rules(out)
-            return status, allow, deny, reject
-    return "н/д", [], [], []
-
-
 async def remote_status_bundle(
     ssh_target: str,
     names: Sequence[str],
@@ -328,62 +225,6 @@ fi
             else:
                 cont.append((n, st.lower().startswith("up"), st, "-"))
     return up, mem, disk, cont, ufw_status, allow, deny, reject
-
-
-async def remote_docker_containers(ssh_target: str, names: Sequence[str]) -> List[Tuple[str, bool, str, str]]:
-    docker_candidates = [DOCKER_BIN, "/usr/bin/docker", "docker"]
-    docker_prefix: List[str] = []
-    rc = 127
-    for docker_bin in [x for x in docker_candidates if x]:
-        rc, _, _ = await ssh_run_exec(ssh_target, [docker_bin, "info"], timeout=SUBPROC_SHORT_TIMEOUT)
-        if rc == 0:
-            docker_prefix = [docker_bin]
-            break
-        if SUDO_BIN:
-            rc, _, _ = await ssh_run_exec(
-                ssh_target,
-                [SUDO_BIN, "-n", docker_bin, "info"],
-                timeout=SUBPROC_SHORT_TIMEOUT,
-            )
-            if rc == 0:
-                docker_prefix = [SUDO_BIN, "-n", docker_bin]
-                break
-    if rc != 0:
-        return [(n, False, "docker недоступен", "-") for n in names]
-
-    rc, out, _ = await ssh_run_exec(
-        ssh_target,
-        [*docker_prefix, "ps", "-a", "--format", "{{.Names}}|{{.Status}}"],
-        timeout=SUBPROC_MEDIUM_TIMEOUT,
-    )
-    if rc != 0:
-        return [(n, False, "ошибка docker ps", "-") for n in names]
-    info: Dict[str, str] = {}
-    for line in out.splitlines():
-        parts = line.split("|", 1)
-        if len(parts) == 2:
-            info[parts[0].strip()] = parts[1].strip()
-
-    rc2, out2, _ = await ssh_run_exec(
-        ssh_target,
-        [*docker_prefix, "ps", "-a", "--format", "{{.Names}}|{{.RestartCount}}"],
-        timeout=SUBPROC_MEDIUM_TIMEOUT,
-    )
-    restarts: Dict[str, str] = {}
-    if rc2 == 0:
-        for ln in out2.splitlines():
-            parts = ln.split("|", 1)
-            if len(parts) == 2:
-                restarts[parts[0].strip()] = parts[1].strip()
-
-    result: List[Tuple[str, bool, str, str]] = []
-    for n in names:
-        st = info.get(n)
-        if st is None:
-            result.append((n, False, "не найден", restarts.get(n, "-")))
-        else:
-            result.append((n, st.lower().startswith("up"), st, restarts.get(n, "-")))
-    return result
 
 
 async def remote_docker_inspect_summary(ssh_target: str, name: str) -> str:
@@ -468,29 +309,7 @@ async def remote_docker_logs_tail(ssh_target: str, name: str, tail: int) -> str:
                 break
     if rc != 0:
         return f"docker logs error: {err.strip() or out.strip() or 'н/д'}"
-    return out
-
-
-async def remote_resolve_a_record_system(ssh_target: str, domain: str) -> List[str]:
-    dom = (domain or "").strip()
-    if not dom:
-        return []
-    rc, out, _ = await ssh_run_shell(
-        ssh_target,
-        f"getent ahostsv4 {shlex.quote(dom)} 2>/dev/null || true",
-        timeout=SUBPROC_SHORT_TIMEOUT,
-    )
-    if rc != 0 and not out:
-        return []
-    ips: List[str] = []
-    for ln in out.splitlines():
-        parts = ln.split()
-        if not parts:
-            continue
-        ip = parts[0].strip()
-        if re.fullmatch(r"(?:\d{1,3}\.){3}\d{1,3}", ip) and ip not in ips:
-            ips.append(ip)
-    return ips
+    return out if out.strip() else err
 
 
 async def remote_tail_text_file(ssh_target: str, path: str, n_lines: int) -> str:

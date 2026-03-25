@@ -1,18 +1,22 @@
 import re
+from datetime import datetime
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes, ConversationHandler
 
-from ..config import logger
+from ..config import TZ, logger
 from ..storage import upsert_user_meta
 from .common import (
     authorized_ids,
     breadcrumbs,
     clip_text,
+    display_name,
     get_user_id,
     get_user_meta,
     html_escape,
+    main_menu_inline_kb_for_admin,
+    main_menu_text,
     require_admin,
     send_to_many,
     show_main_menu,
@@ -20,6 +24,13 @@ from .common import (
     ui_ok_text,
     ui_warn_text,
     wrap_as_codeblock_html,
+)
+from .subscription import (
+    SUBSCRIPTION_TEXT_KEY,
+    SUBSCRIPTION_UPDATED_AT_KEY,
+    SUBSCRIPTION_UPDATED_BY_ID_KEY,
+    SUBSCRIPTION_UPDATED_BY_NAME_KEY,
+    send_subscription_payload,
 )
 from .users_constants import (
     ADMIN_ALL_MENU,
@@ -55,6 +66,41 @@ def _set_users_filter(context: ContextTypes.DEFAULT_TYPE, value: str) -> str:
     v = value if value in USER_FILTERS else USER_FILTER_ALL
     context.user_data["users_filter"] = v
     return v
+
+
+def _subscription_mode_prompt(mode: str) -> str:
+    if mode == "assign":
+        return (
+            "Вставьте подписку одним сообщением. Она будет только сохранена за пользователем в "
+            "<code>data/user_data.json</code> без отправки уведомления."
+            "\n\nПодсказка: можно вставлять vless/URL/JSON без изменений."
+        )
+    return (
+        "Вставьте подписку одним сообщением. Она будет сохранена за пользователем в "
+        "<code>data/user_data.json</code> и сразу отправлена ему уведомлением."
+        "\n\nПодсказка: можно вставлять vless/URL/JSON без изменений."
+    )
+
+
+async def _refresh_user_dialog(context: ContextTypes.DEFAULT_TYPE, uid: int, meta: dict) -> tuple[int, int]:
+    markup = main_menu_inline_kb_for_admin(bool(meta.get("role") == "admin"))
+    menu_message = await context.bot.send_message(
+        chat_id=uid,
+        text=main_menu_text(bool(meta.get("role") == "admin")),
+        parse_mode=ParseMode.HTML,
+        reply_markup=markup,
+    )
+
+    deleted = 0
+    skipped = 0
+    start_id = max(1, int(menu_message.message_id) - 100)
+    for message_id in range(int(menu_message.message_id) - 1, start_id - 1, -1):
+        try:
+            await context.bot.delete_message(chat_id=uid, message_id=message_id)
+            deleted += 1
+        except Exception:
+            skipped += 1
+    return deleted, skipped
 
 
 @require_admin
@@ -149,7 +195,8 @@ async def users_all_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if q.data == "users:allmsg":
         await q.edit_message_text(
             f"<b>{html_escape(breadcrumbs('Админ-панель', 'Пользователи', 'Рассылка', 'Текст'))}</b>\n\n"
-            "Введите текст сообщения всем пользователям:"
+            "Введите текст сообщения всем пользователям:",
+            parse_mode=ParseMode.HTML,
         )
         return ADMIN_ALL_MSG_TEXT
 
@@ -213,7 +260,10 @@ async def users_all_msg_confirm(update: Update, context: ContextTypes.DEFAULT_TY
     ok, fail = await send_to_many(context, recipients, payload)
     logger.info("Admin user_id=%s broadcast message ok=%s fail=%s recipients=%s", sender, ok, fail, len(recipients))
     context.user_data.pop("users_all_broadcast_text", None)
-    await q.edit_message_text(ui_ok_text(f"Рассылка завершена (ok={ok}, fail={fail})"))
+    await q.edit_message_text(
+        ui_ok_text(f"Рассылка завершена (ok={ok}, fail={fail})"),
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Меню", callback_data="menu:home")]]),
+    )
     return ADMIN_PICK
 
 
@@ -317,6 +367,23 @@ async def users_user_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ADMIN_USER_MENU
 
+    m_refresh = re.fullmatch(r"users:refresh:(\d+)", data)
+    if m_refresh:
+        uid = int(m_refresh.group(1))
+        meta = get_user_meta(uid)
+        if not meta:
+            active_filter = _get_users_filter(context)
+            await q.edit_message_text(ui_error_text("пользователь не найден."), reply_markup=users_list_kb(active_filter))
+            return ADMIN_PICK
+        deleted, skipped = await _refresh_user_dialog(context, uid, meta)
+        logger.info("Admin user_id=%s refreshed menu target_uid=%s deleted=%s skipped=%s", get_user_id(update), uid, deleted, skipped)
+        await q.edit_message_text(
+            format_user_card(meta) + "\n\n" + ui_ok_text(f"Меню обновлено, очищено сообщений: {deleted}, пропущено: {skipped}"),
+            parse_mode=ParseMode.HTML,
+            reply_markup=user_card_kb(uid),
+        )
+        return ADMIN_USER_MENU
+
     m_msg = re.fullmatch(r"users:msg:(\d+)", data)
     if m_msg:
         context.user_data["selected_uid"] = int(m_msg.group(1))
@@ -329,13 +396,14 @@ async def users_user_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text("Введите никнейм (как должен отображаться в списке):")
         return ADMIN_USER_NICK_TEXT
 
-    m_cfg = re.fullmatch(r"users:cfg:(\d+)", data)
-    if m_cfg:
-        uid = int(m_cfg.group(1))
+    m_subscription = re.fullmatch(r"users:(cfg|subassign|subsend):(\d+)", data)
+    if m_subscription:
+        action, uid_s = m_subscription.group(1), m_subscription.group(2)
+        uid = int(uid_s)
         context.user_data["selected_uid"] = uid
+        context.user_data["subscription_delivery_mode"] = "assign" if action == "subassign" else "send"
         await q.edit_message_text(
-            "Вставьте конфигурацию одним сообщением. Она будет отправлена пользователю как <b>кодовый блок</b>."
-            "\n\nПодсказка: можно вставлять vless/URL/JSON без изменений.",
+            _subscription_mode_prompt(str(context.user_data["subscription_delivery_mode"])),
             parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup(
                 [
@@ -458,19 +526,37 @@ async def users_user_cfg_text(update: Update, context: ContextTypes.DEFAULT_TYPE
             await msg.reply_text(ui_error_text("пользователь не найден (возможно, удалён из списка)."))
         return ADMIN_PICK
 
-    header = "📦 <b>Конфигурация от администратора</b>\n\n"
-    payload = header + wrap_as_codeblock_html(clip_text(cfg, limit=3000))
+    delivery_mode = str(context.user_data.get("subscription_delivery_mode", "send"))
+    author_id = get_user_id(update)
+    author_name = display_name(update)
+    meta[SUBSCRIPTION_TEXT_KEY] = cfg
+    meta[SUBSCRIPTION_UPDATED_AT_KEY] = datetime.now(TZ).isoformat()
+    meta[SUBSCRIPTION_UPDATED_BY_ID_KEY] = author_id
+    meta[SUBSCRIPTION_UPDATED_BY_NAME_KEY] = author_name
+    updated = await upsert_user_meta(uid, meta)
 
-    try:
-        await context.bot.send_message(chat_id=uid, text=payload, parse_mode=ParseMode.HTML)
-        logger.info("Admin user_id=%s sent config target_uid=%s", get_user_id(update), uid)
+    if delivery_mode == "assign":
         if msg:
-            await msg.reply_text(ui_ok_text("Отправлено"))
-    except Exception as e:
-        logger.warning("Не удалось отправить конфигурацию пользователю %s: %s", uid, e)
-        if msg:
-            await msg.reply_text(ui_error_text("не удалось отправить (пользователь мог заблокировать бота)."))
+            await msg.reply_text(ui_ok_text("Подписка сохранена в базе без отправки пользователю"))
+        logger.info("Admin user_id=%s assigned subscription target_uid=%s mode=assign", author_id, uid)
+    else:
+        try:
+            await send_subscription_payload(
+                context,
+                chat_id=uid,
+                meta=updated,
+                title="📦 <b>Подписка от администратора</b>",
+                filename_prefix=f"subscription_{uid}",
+            )
+            logger.info("Admin user_id=%s assigned subscription target_uid=%s mode=send", author_id, uid)
+            if msg:
+                await msg.reply_text(ui_ok_text("Подписка сохранена и отправлена пользователю"))
+        except Exception as e:
+            logger.warning("Подписка сохранена, но не отправлена пользователю %s: %s", uid, e)
+            if msg:
+                await msg.reply_text(ui_warn_text("Подписка сохранена в базе, но отправить пользователю её не удалось."))
 
+    context.user_data.pop("subscription_delivery_mode", None)
     if msg:
-        await msg.reply_text(format_user_card(meta), parse_mode=ParseMode.HTML, reply_markup=user_card_kb(uid))
+        await msg.reply_text(format_user_card(updated), parse_mode=ParseMode.HTML, reply_markup=user_card_kb(uid))
     return ADMIN_USER_MENU

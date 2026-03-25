@@ -19,6 +19,7 @@ _ENV_PATH = os.getenv("ENV_PATH", "").strip()
 ENV_FILE = Path(_ENV_PATH) if _ENV_PATH else (BASE_DIR / ".env")
 _SECRETS_ENV_PATH = os.getenv("SECRETS_ENV_PATH", "").strip()
 SECRETS_ENV_FILE = Path(_SECRETS_ENV_PATH) if _SECRETS_ENV_PATH else (BASE_DIR / "env.secrets")
+_SECRET_KEYS = ("BOT_TOKEN", "AUTH_PASSWORD", "ADMIN_PASSWORD")
 
 
 def split_env_list(raw: Any) -> List[str]:
@@ -78,24 +79,61 @@ class SecretSettings(BaseModel):
         return s
 
 
-def load_required_secrets(path: Path) -> SecretSettings:
+def _load_env_file_values(path: Path) -> Dict[str, str]:
     if not path.exists():
-        raise RuntimeError(
-            f"Не найден файл секретов: {path}. "
-            "Создайте env.secrets и перенесите туда BOT_TOKEN, AUTH_PASSWORD, ADMIN_PASSWORD."
-        )
+        return {}
     if not path.is_file():
-        raise RuntimeError(f"Путь к файлу секретов не является файлом: {path}")
+        raise RuntimeError(f"Путь к env-файлу не является файлом: {path}")
+    out: Dict[str, str] = {}
     try:
-        return SecretSettings.model_validate(dotenv_values(path))
+        raw = dotenv_values(path)
+    except Exception as e:
+        raise RuntimeError(f"Не удалось прочитать env-файл {path}: {e}") from e
+    for key, value in raw.items():
+        if value is None:
+            continue
+        sval = str(value).strip()
+        if sval:
+            out[str(key)] = sval
+    return out
+
+
+def _extract_missing_fields(exc: ValidationError) -> str:
+    missing = []
+    for err in exc.errors():
+        loc = err.get("loc") or []
+        if loc:
+            missing.append(str(loc[0]))
+    return ", ".join(sorted(set(missing))) if missing else str(exc)
+
+
+def load_required_secrets(path: Path, *, fallback_path: Path | None = None) -> SecretSettings:
+    merged: Dict[str, str] = {}
+    checked_sources: List[str] = []
+
+    if fallback_path:
+        checked_sources.append(str(fallback_path))
+        merged.update({k: v for k, v in _load_env_file_values(fallback_path).items() if k in _SECRET_KEYS})
+
+    checked_sources.append(str(path))
+    merged.update({k: v for k, v in _load_env_file_values(path).items() if k in _SECRET_KEYS})
+
+    for key in _SECRET_KEYS:
+        env_value = os.getenv(key, "").strip()
+        if env_value:
+            merged[key] = env_value
+    checked_sources.append("переменные окружения процесса")
+
+    try:
+        return SecretSettings.model_validate(merged)
     except ValidationError as e:
-        missing = []
-        for err in e.errors():
-            loc = err.get("loc") or []
-            if loc:
-                missing.append(str(loc[0]))
-        missing_s = ", ".join(sorted(set(missing))) if missing else str(e)
-        raise RuntimeError(f"В файле секретов {path} отсутствуют обязательные ключи: {missing_s}") from e
+        missing_s = _extract_missing_fields(e)
+        raise RuntimeError(
+            "Не заданы обязательные секреты: "
+            f"{missing_s}. Проверены источники: {', '.join(checked_sources)}. "
+            "Рекомендуемый вариант: хранить секреты в app/env.secrets; "
+            "также поддерживаются app/.env и переменные окружения процесса."
+        ) from e
 
 
 class AppSettings(BaseSettings):
@@ -107,6 +145,8 @@ class AppSettings(BaseSettings):
     )
 
     TZ: str = "Europe/Moscow"
+    LOG_LEVEL: str = "INFO"
+    LOG_JSON: bool = False
 
     USER_DATA_PATH: str = str(ROOT_DIR / "data" / "user_data.json")
     IMPORTANT_DATA_PATH: str = str(ROOT_DIR / "data" / "important_data.json")
@@ -124,6 +164,9 @@ class AppSettings(BaseSettings):
     FAIL2BAN_LOG_PATH: str = "/var/log/fail2ban.log"
     FAIL2BAN_STATE_PATH: str = ""
     FAIL2BAN_DAILY_AT: str = "12:00"
+    DNS_DAILY_REFRESH_AT: str = "03:05"
+    DNS_STARTUP_REFRESH_DELAY_SEC: int = 5
+    MAINT_RESTART_NOTIFY_DELAY_SEC: int = 2
 
     SUBPROC_SHORT_TIMEOUT: int = 3
     SUBPROC_MEDIUM_TIMEOUT: int = 8
@@ -158,19 +201,37 @@ class AppSettings(BaseSettings):
         ZoneInfo((v or "").strip() or "UTC")
         return (v or "").strip()
 
-    @field_validator("FAIL2BAN_DAILY_AT")
+    @field_validator("LOG_LEVEL", mode="before")
+    @classmethod
+    def _normalize_log_level(cls, v: Any) -> str:
+        s = str(v or "").strip().upper() or "INFO"
+        aliases = {"WARN": "WARNING", "FATAL": "CRITICAL"}
+        s = aliases.get(s, s)
+        allowed = {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG", "NOTSET"}
+        if s not in allowed:
+            raise ValueError("LOG_LEVEL must be one of CRITICAL, ERROR, WARNING, INFO, DEBUG, NOTSET")
+        return s
+
+    @field_validator("FAIL2BAN_DAILY_AT", "DNS_DAILY_REFRESH_AT")
     @classmethod
     def _validate_hhmm(cls, v: str) -> str:
         s = (v or "").strip()
         if not s:
-            raise ValueError("FAIL2BAN_DAILY_AT empty")
+            raise ValueError("HH:MM value is empty")
         hh, mm = s.split(":", 1)
         ih, im = int(hh), int(mm)
         if ih < 0 or ih > 23 or im < 0 or im > 59:
-            raise ValueError("FAIL2BAN_DAILY_AT must be HH:MM")
+            raise ValueError("HH:MM value must be HH:MM")
         return f"{ih:02d}:{im:02d}"
 
-    @field_validator("SUBPROC_SHORT_TIMEOUT", "SUBPROC_MEDIUM_TIMEOUT", "PING_COUNT", "PING_TIMEOUT_SEC")
+    @field_validator(
+        "SUBPROC_SHORT_TIMEOUT",
+        "SUBPROC_MEDIUM_TIMEOUT",
+        "PING_COUNT",
+        "PING_TIMEOUT_SEC",
+        "DNS_STARTUP_REFRESH_DELAY_SEC",
+        "MAINT_RESTART_NOTIFY_DELAY_SEC",
+    )
     @classmethod
     def _positive_small_int(cls, v: int) -> int:
         iv = int(v)
@@ -216,7 +277,7 @@ class ServerTarget:
 
 
 SETTINGS = AppSettings()
-SECRETS = load_required_secrets(SECRETS_ENV_FILE)
+SECRETS = load_required_secrets(SECRETS_ENV_FILE, fallback_path=ENV_FILE)
 
 BOT_TOKEN = SECRETS.BOT_TOKEN
 AUTH_PASSWORD = SECRETS.AUTH_PASSWORD
@@ -256,6 +317,11 @@ SSH_BIN = resolve_bin("/usr/bin/ssh", "ssh")
 
 FAIL2BAN_LOG_PATH = SETTINGS.FAIL2BAN_LOG_PATH.strip()
 FAIL2BAN_DAILY_AT = SETTINGS.FAIL2BAN_DAILY_AT.strip()
+DNS_DAILY_REFRESH_AT = SETTINGS.DNS_DAILY_REFRESH_AT.strip()
+DNS_STARTUP_REFRESH_DELAY_SEC = SETTINGS.DNS_STARTUP_REFRESH_DELAY_SEC
+MAINT_RESTART_NOTIFY_DELAY_SEC = SETTINGS.MAINT_RESTART_NOTIFY_DELAY_SEC
+LOG_LEVEL = SETTINGS.LOG_LEVEL
+LOG_JSON = bool(SETTINGS.LOG_JSON)
 LOCAL_SERVER_CODE = SETTINGS.LOCAL_SERVER_CODE
 LOCAL_SERVER_LABEL = SETTINGS.LOCAL_SERVER_LABEL
 

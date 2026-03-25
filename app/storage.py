@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -114,45 +115,53 @@ class UserData:
         return cls()
 
     def save(self, path: str) -> None:
-        try:
-            payload = {"schema_version": USER_DATA_SCHEMA_VERSION, "authorized_users": self.authorized_users}
-            tmp_path = Path(path)
-            tmp_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = tmp_path.with_suffix(tmp_path.suffix + ".tmp")
-            tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-            tmp.replace(tmp_path)
-        except Exception as e:
-            logger.error("Не удалось сохранить %s: %s", path, e)
+        payload = {"schema_version": USER_DATA_SCHEMA_VERSION, "authorized_users": self.authorized_users}
+        tmp_path = Path(path)
+        tmp_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = tmp_path.with_suffix(tmp_path.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(tmp_path)
 
     async def save_async(self, path: str) -> None:
-        try:
-            await _write_json_atomic(path, {"schema_version": USER_DATA_SCHEMA_VERSION, "authorized_users": self.authorized_users})
-        except Exception as e:
-            logger.error("Не удалось сохранить %s: %s", path, e)
+        await _write_json_atomic(path, {"schema_version": USER_DATA_SCHEMA_VERSION, "authorized_users": self.authorized_users})
 
 
 @dataclass
 class ImportantData:
     tickets_seq: int = 0
+    tickets: Dict[str, Any] = field(default_factory=dict)
     maintenance: Dict[str, Any] = field(default_factory=dict)
+    scheduled_maintenance: Dict[str, Any] = field(default_factory=dict)
     dns_status: Dict[str, Any] = field(default_factory=dict)
 
     @staticmethod
     def _migrate(raw: Dict[str, Any]) -> "ImportantData":
         tickets_seq = int(raw.get("tickets_seq", 0) or 0)
+        tickets = raw.get("tickets", {})
+        if not isinstance(tickets, dict):
+            tickets = {}
         maintenance = raw.get("maintenance", {})
         if not isinstance(maintenance, dict):
             maintenance = {}
+        scheduled_maintenance = raw.get("scheduled_maintenance", {})
+        if not isinstance(scheduled_maintenance, dict):
+            scheduled_maintenance = {}
         dns_status = raw.get("dns_status", {})
         if not isinstance(dns_status, dict):
             dns_status = {}
-        return ImportantData(tickets_seq=tickets_seq, maintenance=maintenance, dns_status=dns_status)
+        return ImportantData(
+            tickets_seq=tickets_seq,
+            tickets=tickets,
+            maintenance=maintenance,
+            scheduled_maintenance=scheduled_maintenance,
+            dns_status=dns_status,
+        )
 
     @staticmethod
     def _needs_rewrite(raw: Dict[str, Any]) -> bool:
         if raw.get("schema_version") != IMPORTANT_DATA_SCHEMA_VERSION:
             return True
-        allowed_keys = {"schema_version", "tickets_seq", "maintenance", "dns_status"}
+        allowed_keys = {"schema_version", "tickets_seq", "tickets", "maintenance", "scheduled_maintenance", "dns_status"}
         return any(k not in allowed_keys for k in raw.keys())
 
     @classmethod
@@ -178,34 +187,32 @@ class ImportantData:
         return cls()
 
     def save(self, path: str) -> None:
-        try:
-            payload = {
-                "schema_version": IMPORTANT_DATA_SCHEMA_VERSION,
-                "tickets_seq": self.tickets_seq,
-                "maintenance": self.maintenance,
-                "dns_status": self.dns_status,
-            }
-            tmp_path = Path(path)
-            tmp_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = tmp_path.with_suffix(tmp_path.suffix + ".tmp")
-            tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-            tmp.replace(tmp_path)
-        except Exception as e:
-            logger.error("Не удалось сохранить %s: %s", path, e)
+        payload = {
+            "schema_version": IMPORTANT_DATA_SCHEMA_VERSION,
+            "tickets_seq": self.tickets_seq,
+            "tickets": self.tickets,
+            "maintenance": self.maintenance,
+            "scheduled_maintenance": self.scheduled_maintenance,
+            "dns_status": self.dns_status,
+        }
+        tmp_path = Path(path)
+        tmp_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = tmp_path.with_suffix(tmp_path.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(tmp_path)
 
     async def save_async(self, path: str) -> None:
-        try:
-            await _write_json_atomic(
-                path,
-                {
-                    "schema_version": IMPORTANT_DATA_SCHEMA_VERSION,
-                    "tickets_seq": self.tickets_seq,
-                    "maintenance": self.maintenance,
-                    "dns_status": self.dns_status,
-                },
-            )
-        except Exception as e:
-            logger.error("Не удалось сохранить %s: %s", path, e)
+        await _write_json_atomic(
+            path,
+            {
+                "schema_version": IMPORTANT_DATA_SCHEMA_VERSION,
+                "tickets_seq": self.tickets_seq,
+                "tickets": self.tickets,
+                "maintenance": self.maintenance,
+                "scheduled_maintenance": self.scheduled_maintenance,
+                "dns_status": self.dns_status,
+            },
+        )
 
 
 USER_DATA = UserData.load(USER_DATA_PATH, legacy_path=LEGACY_CONFIG_PATH)
@@ -227,7 +234,9 @@ def _refresh_important_snapshot() -> None:
     global IMPORTANT_DATA_SNAPSHOT
     IMPORTANT_DATA_SNAPSHOT = {
         "tickets_seq": int(getattr(IMPORTANT_DATA, "tickets_seq", 0) or 0),
+        "tickets": dict(getattr(IMPORTANT_DATA, "tickets", {}) or {}),
         "maintenance": dict(getattr(IMPORTANT_DATA, "maintenance", {}) or {}),
+        "scheduled_maintenance": dict(getattr(IMPORTANT_DATA, "scheduled_maintenance", {}) or {}),
         "dns_status": dict(getattr(IMPORTANT_DATA, "dns_status", {}) or {}),
     }
 
@@ -238,16 +247,36 @@ _refresh_important_snapshot()
 
 async def update_user_data(update_fn: Callable[[UserData], T]) -> T:
     async with USER_DATA_LOCK:
-        result = update_fn(USER_DATA)
-        await USER_DATA.save_async(USER_DATA_PATH)
+        prev_authorized_users = copy.deepcopy(USER_DATA.authorized_users)
+        try:
+            result = update_fn(USER_DATA)
+            await USER_DATA.save_async(USER_DATA_PATH)
+        except Exception:
+            USER_DATA.authorized_users = prev_authorized_users
+            logger.exception("Не удалось обновить user_data")
+            raise
         _refresh_user_snapshot()
     return result
 
 
 async def update_important_data(update_fn: Callable[[ImportantData], T]) -> T:
     async with IMPORTANT_DATA_LOCK:
-        result = update_fn(IMPORTANT_DATA)
-        await IMPORTANT_DATA.save_async(IMPORTANT_DATA_PATH)
+        prev_tickets_seq = IMPORTANT_DATA.tickets_seq
+        prev_tickets = copy.deepcopy(IMPORTANT_DATA.tickets)
+        prev_maintenance = copy.deepcopy(IMPORTANT_DATA.maintenance)
+        prev_scheduled_maintenance = copy.deepcopy(IMPORTANT_DATA.scheduled_maintenance)
+        prev_dns_status = copy.deepcopy(IMPORTANT_DATA.dns_status)
+        try:
+            result = update_fn(IMPORTANT_DATA)
+            await IMPORTANT_DATA.save_async(IMPORTANT_DATA_PATH)
+        except Exception:
+            IMPORTANT_DATA.tickets_seq = prev_tickets_seq
+            IMPORTANT_DATA.tickets = prev_tickets
+            IMPORTANT_DATA.maintenance = prev_maintenance
+            IMPORTANT_DATA.scheduled_maintenance = prev_scheduled_maintenance
+            IMPORTANT_DATA.dns_status = prev_dns_status
+            logger.exception("Не удалось обновить important_data")
+            raise
         _refresh_important_snapshot()
     return result
 
@@ -271,6 +300,15 @@ def _clear_maintenance(cfg: ImportantData) -> None:
     cfg.maintenance = {}
 
 
+def _set_scheduled_maintenance(cfg: ImportantData, payload: Dict[str, Any]) -> Dict[str, Any]:
+    cfg.scheduled_maintenance = payload
+    return payload
+
+
+def _clear_scheduled_maintenance(cfg: ImportantData) -> None:
+    cfg.scheduled_maintenance = {}
+
+
 def _set_dns_status(cfg: ImportantData, server_key: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     cur = dict(getattr(cfg, "dns_status", {}) or {})
     cur[str(server_key)] = dict(payload or {})
@@ -278,11 +316,11 @@ def _set_dns_status(cfg: ImportantData, server_key: str, payload: Dict[str, Any]
     return dict(cur[str(server_key)])
 
 
-def _get_active_maintenance() -> Optional[Dict[str, Any]]:
-    m = getattr(IMPORTANT_DATA, "maintenance", None)
-    if isinstance(m, dict) and m.get("active"):
-        return dict(m)
-    return None
+def _set_ticket(cfg: ImportantData, ticket_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
+    cur = dict(getattr(cfg, "tickets", {}) or {})
+    cur[str(ticket_id)] = dict(payload or {})
+    cfg.tickets = cur
+    return dict(cur[str(ticket_id)])
 
 
 def get_user_meta_copy(uid: int) -> Optional[Dict[str, Any]]:
@@ -317,6 +355,28 @@ def get_active_maintenance() -> Optional[Dict[str, Any]]:
     return None
 
 
+def get_scheduled_maintenance() -> Optional[Dict[str, Any]]:
+    m = IMPORTANT_DATA_SNAPSHOT.get("scheduled_maintenance")
+    if isinstance(m, dict) and m.get("id"):
+        return dict(m)
+    return None
+
+
+def get_ticket_copy(ticket_id: int) -> Optional[Dict[str, Any]]:
+    tickets = IMPORTANT_DATA_SNAPSHOT.get("tickets")
+    if not isinstance(tickets, dict):
+        return None
+    item = tickets.get(str(ticket_id))
+    return dict(item) if isinstance(item, dict) else None
+
+
+def tickets_snapshot() -> Dict[str, Dict[str, Any]]:
+    tickets = IMPORTANT_DATA_SNAPSHOT.get("tickets")
+    if not isinstance(tickets, dict):
+        return {}
+    return {str(k): dict(v) for k, v in tickets.items() if isinstance(v, dict)}
+
+
 def get_dns_status_cache(server_key: str) -> Optional[Dict[str, Any]]:
     dns = IMPORTANT_DATA_SNAPSHOT.get("dns_status")
     if not isinstance(dns, dict):
@@ -329,9 +389,21 @@ async def set_dns_status_cache(server_key: str, payload: Dict[str, Any]) -> Dict
     return await update_important_data(lambda cfg: _set_dns_status(cfg, server_key, payload))
 
 
+async def set_scheduled_maintenance_record(payload: Dict[str, Any]) -> Dict[str, Any]:
+    return await update_important_data(lambda cfg: _set_scheduled_maintenance(cfg, payload))
+
+
+async def clear_scheduled_maintenance_record() -> None:
+    await update_important_data(lambda cfg: _clear_scheduled_maintenance(cfg))
+
+
 async def next_ticket_seq() -> int:
     def _next_ticket(cfg: ImportantData) -> int:
         cfg.tickets_seq += 1
         return cfg.tickets_seq
 
     return await update_important_data(_next_ticket)
+
+
+async def set_ticket_record(ticket_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
+    return await update_important_data(lambda cfg: _set_ticket(cfg, ticket_id, payload))

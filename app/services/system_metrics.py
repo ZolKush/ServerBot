@@ -46,15 +46,6 @@ async def check_uptime() -> str:
     return " ".join(parts)
 
 
-async def loadavg() -> str:
-    try:
-        raw = await asyncio.to_thread(Path("/proc/loadavg").read_text, encoding="utf-8")
-        parts = raw.strip().split()
-        return f"{parts[0]} / {parts[1]} / {parts[2]}" if len(parts) >= 3 else "н/д"
-    except Exception:
-        return "н/д"
-
-
 async def meminfo() -> str:
     try:
         raw = await asyncio.to_thread(Path("/proc/meminfo").read_text, encoding="utf-8")

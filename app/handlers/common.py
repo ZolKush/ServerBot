@@ -3,17 +3,18 @@ from __future__ import annotations
 import asyncio
 import html
 import random
+import re
 from dataclasses import dataclass, field
 from functools import wraps
 from datetime import datetime
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, Update
 from telegram.constants import ChatType, ParseMode
 from telegram.error import BadRequest, NetworkError, RetryAfter, TimedOut
 from telegram.ext import ContextTypes, ConversationHandler
 
-from ..config import MENU_MAINT, MENU_STATUS, MENU_TICKET, MENU_USERS, TZ, logger
+from ..config import MENU_MAINT, MENU_STATUS, MENU_SUBSCRIPTION, MENU_TICKET, MENU_USERS, TZ, logger
 from ..storage import authorized_users_snapshot, get_user_meta_copy
 
 
@@ -25,6 +26,8 @@ UI_OK = "✅"
 UI_WARN = "⚠️"
 UI_ERR = "❌"
 UI_INFO = "ℹ️"
+CONTEXT_MENU_BUTTON = "📋 Меню"
+MENU_HOME_TEXT_PATTERN = rf"^(?:{re.escape(CONTEXT_MENU_BUTTON)}|Меню)$"
 
 
 def ui_ok_text(text: str) -> str:
@@ -188,21 +191,38 @@ def display_name(update: Update) -> str:
     return nm if nm else str(u.id)
 
 
-def main_menu_kb(update: Update) -> ReplyKeyboardMarkup:
-    rows = [[KeyboardButton(MENU_STATUS), KeyboardButton(MENU_TICKET)]]
-    if is_admin(update):
-        rows.append([KeyboardButton(MENU_USERS), KeyboardButton(MENU_MAINT)])
-    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
+def context_menu_reply_kb() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        [[KeyboardButton(CONTEXT_MENU_BUTTON)]],
+        resize_keyboard=True,
+        is_persistent=True,
+        input_field_placeholder="Нажмите «Меню» для вызова главного меню",
+    )
 
 
-def main_menu_inline_kb(update: Update) -> InlineKeyboardMarkup:
+async def ensure_context_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    return None
+
+
+async def try_delete_message(update: Update) -> None:
+    msg = update.effective_message
+    if not msg:
+        return
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+
+
+def main_menu_inline_kb_for_admin(is_admin_user: bool) -> InlineKeyboardMarkup:
     rows: List[List[InlineKeyboardButton]] = [
         [
             InlineKeyboardButton(MENU_STATUS, callback_data="menu:status"),
-            InlineKeyboardButton(MENU_TICKET, callback_data="menu:ticket"),
+            InlineKeyboardButton(MENU_SUBSCRIPTION, callback_data="menu:subscription"),
         ]
     ]
-    if is_admin(update):
+    rows.append([InlineKeyboardButton(MENU_TICKET, callback_data="menu:ticket")])
+    if is_admin_user:
         rows.append(
             [
                 InlineKeyboardButton(MENU_USERS, callback_data="menu:users"),
@@ -213,14 +233,20 @@ def main_menu_inline_kb(update: Update) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+def main_menu_inline_kb(update: Update) -> InlineKeyboardMarkup:
+    return main_menu_inline_kb_for_admin(is_admin(update))
+
+
+def main_menu_text(is_admin_user: bool, text: str = "Меню:") -> str:
+    if text == "Меню:":
+        return "👑 <b>Админ-панель</b>\n\nВыберите раздел:" if is_admin_user else "👤 <b>Главное меню</b>\n\nВыберите раздел:"
+    return text
+
+
 async def show_main_menu(update: Update, text: str = "Меню:") -> None:
     q = update.callback_query
     markup = main_menu_inline_kb(update)
-    if text == "Меню:":
-        if is_admin(update):
-            text = "👑 <b>Админ-панель</b>\n\nВыберите раздел:"
-        else:
-            text = "👤 <b>Главное меню</b>\n\nВыберите раздел:"
+    text = main_menu_text(is_admin(update), text=text)
     if q:
         await q.answer()
         try:
@@ -232,11 +258,6 @@ async def show_main_menu(update: Update, text: str = "Меню:") -> None:
         return
     msg = update.effective_message
     if msg:
-        # Remove legacy reply keyboard (from older versions) before showing inline menu.
-        try:
-            await msg.reply_text("ℹ️ Обновлён интерфейс: используйте кнопки в сообщении ниже.", reply_markup=ReplyKeyboardRemove())
-        except Exception:
-            pass
         await msg.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
 
 
@@ -245,11 +266,35 @@ async def menu_home_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await show_main_menu(update)
 
 
+def _clear_transient_user_context(context: ContextTypes.DEFAULT_TYPE) -> None:
+    for key in tuple(context.user_data.keys()):
+        if key.startswith("ticket_") or key.startswith("maint_") or key in {"selected_uid", "subscription_delivery_mode"}:
+            context.user_data.pop(key, None)
+
+
+@require_private
+async def menu_home_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    text = ((msg.text if msg else "") or "").strip()
+    if not re.fullmatch(MENU_HOME_TEXT_PATTERN, text):
+        return ConversationHandler.END
+    await try_delete_message(update)
+    _clear_transient_user_context(context)
+    if is_authorized(update) and not is_enabled(update):
+        await reply_disabled(update)
+        return ConversationHandler.END
+    if not is_authorized(update):
+        await reply_need_auth(update)
+        await ensure_context_menu_button(update, context)
+        return ConversationHandler.END
+    await show_main_menu(update)
+    await ensure_context_menu_button(update, context)
+    return ConversationHandler.END
+
+
 @require_auth
 async def cancel_to_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    for key in tuple(context.user_data.keys()):
-        if key.startswith("ticket_") or key.startswith("maint_") or key == "selected_uid":
-            context.user_data.pop(key, None)
+    _clear_transient_user_context(context)
     await show_main_menu(update)
     return ConversationHandler.END
 
@@ -285,18 +330,29 @@ async def send_to_many(
     user_ids: Iterable[int],
     text: str,
     *,
+    reply_markup: Optional[InlineKeyboardMarkup] = None,
     max_concurrency: int = 8,
     max_attempts: int = 3,
 ) -> SendManyReport:
     ids = sorted(set(int(uid) for uid in user_ids))
-    sem = asyncio.Semaphore(max(1, max_concurrency))
+    if not ids:
+        return SendManyReport()
+    report = SendManyReport()
+    report_lock = asyncio.Lock()
+    queue: asyncio.Queue[int] = asyncio.Queue()
+    for uid in ids:
+        queue.put_nowait(uid)
 
     async def _send_one(uid: int) -> tuple[bool, Optional[SendErrorInfo]]:
         last_exc: Optional[Exception] = None
         for attempt in range(1, max(1, max_attempts) + 1):
             try:
-                async with sem:
-                    await context.bot.send_message(chat_id=uid, text=text, parse_mode=ParseMode.HTML)
+                await context.bot.send_message(
+                    chat_id=uid,
+                    text=text,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=reply_markup,
+                )
                 return True, None
             except RetryAfter as e:
                 last_exc = e
@@ -318,16 +374,25 @@ async def send_to_many(
         )
         return False, err
 
-    results = await asyncio.gather(*[_send_one(uid) for uid in ids])
-    report = SendManyReport()
-    for ok, err in results:
-        if ok:
-            report.ok += 1
-        else:
-            report.fail += 1
-            if err:
-                report.errors.append(err)
-                logger.warning("Не удалось отправить пользователю %s: %s: %s", err.user_id, err.error_type, err.message)
+    async def _worker() -> None:
+        while True:
+            try:
+                uid = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+            ok, err = await _send_one(uid)
+            async with report_lock:
+                if ok:
+                    report.ok += 1
+                else:
+                    report.fail += 1
+                    if err:
+                        report.errors.append(err)
+                        logger.warning("Не удалось отправить пользователю %s: %s: %s", err.user_id, err.error_type, err.message)
+            queue.task_done()
+
+    workers = [asyncio.create_task(_worker()) for _ in range(min(len(ids), max(1, max_concurrency)))]
+    await asyncio.gather(*workers)
     return report
 
 
@@ -350,9 +415,7 @@ def authorized_ids(role_filter: Optional[str] = None, exclude: Optional[Set[int]
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    for key in tuple(context.user_data.keys()):
-        if key.startswith("ticket_") or key.startswith("maint_") or key == "selected_uid":
-            context.user_data.pop(key, None)
+    _clear_transient_user_context(context)
     msg = update.effective_message
     if msg:
         await msg.reply_text("Действие отменено.")

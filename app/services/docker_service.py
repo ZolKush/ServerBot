@@ -2,7 +2,7 @@ import json
 import re
 from typing import Dict, List, Sequence, Tuple
 
-from ..config import ALL_MONITOR_CONTAINER_SET, DOCKER_BIN, SUBPROC_MEDIUM_TIMEOUT, SUBPROC_SHORT_TIMEOUT
+from ..config import DOCKER_BIN, SUBPROC_MEDIUM_TIMEOUT, SUBPROC_SHORT_TIMEOUT
 from .system_service import run_exec
 
 _CONTAINER_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.\-]{0,62}$")
@@ -11,11 +11,6 @@ _CONTAINER_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.\-]{0,62}$")
 def is_valid_container_name(name: str) -> bool:
     nm = (name or "").strip()
     return bool(nm and _CONTAINER_NAME_RE.fullmatch(nm))
-
-
-def is_allowed_container(name: str) -> bool:
-    nm = (name or "").strip()
-    return bool(is_valid_container_name(nm) and nm in ALL_MONITOR_CONTAINER_SET)
 
 
 async def docker_containers(names: Sequence[str]) -> List[Tuple[str, bool, str, str]]:
@@ -112,4 +107,4 @@ async def docker_logs_tail(name: str, tail: int) -> str:
     rc, out, err = await run_exec([DOCKER_BIN, "logs", "--tail", str(tail), name], timeout=SUBPROC_MEDIUM_TIMEOUT)
     if rc != 0:
         return f"docker logs error: {err.strip() or out.strip() or 'н/д'}"
-    return out
+    return out if out.strip() else err

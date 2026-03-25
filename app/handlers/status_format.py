@@ -52,7 +52,7 @@ def _dns_summary_line(snapshot: StatusSnapshot) -> str:
     return "🌐 DNS: ❌ " + ", ".join(parts)
 
 
-def _docker_summary_lines(snapshot: StatusSnapshot, detailed: bool) -> List[str]:
+def _docker_summary_lines(snapshot: StatusSnapshot) -> List[str]:
     lines: List[str] = []
     if not snapshot.containers:
         return ["🐳 Docker: ⚠️ контейнеры не настроены"]
@@ -61,14 +61,11 @@ def _docker_summary_lines(snapshot: StatusSnapshot, detailed: bool) -> List[str]
     lines.append(f"🐳 Docker: {'✅' if up_count == total else '❌'} {up_count}/{total} OK")
     for c in snapshot.containers:
         emoji = "🟢" if c.is_up else "🔴"
-        if detailed:
-            lines.append(f"{emoji} {html_escape(c.name)} — {html_escape(c.status_text)}")
-        else:
-            lines.append(f"{emoji} {html_escape(c.name)}")
+        lines.append(f"{emoji} {html_escape(c.name)}")
     return lines
 
 
-def format_status_message(snapshot: StatusSnapshot, *, detailed: bool = False) -> str:
+def format_status_message(snapshot: StatusSnapshot) -> str:
     lines: List[str] = []
     lines.append(f"<b>{html_escape(breadcrumbs('Статус', snapshot.server_label))}</b>")
     lines.append(f"{snapshot.server_flag} <b>{html_escape(snapshot.server_label)}</b>")
@@ -86,7 +83,7 @@ def format_status_message(snapshot: StatusSnapshot, *, detailed: bool = False) -
         lines.extend(snapshot.dns_error_details)
     lines.append("")
     lines.append("<b>Контейнеры</b>")
-    lines.extend(_docker_summary_lines(snapshot, detailed=detailed))
+    lines.extend(_docker_summary_lines(snapshot))
 
     lines.append("")
     lines.append("Действия: кнопки ниже ↓")
