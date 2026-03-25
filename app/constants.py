@@ -1,4 +1,5 @@
 MENU_STATUS = "📊 Статус сервера"
+MENU_SUBSCRIPTION = "📦 Моя подписка"
 MENU_TICKET = "🎫 Создать тикет"
 MENU_USERS = "👥 Пользователи"
 MENU_MAINT = "🛠 Техработы"

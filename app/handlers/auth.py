@@ -167,7 +167,8 @@ async def cmd_auth(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     role_to_set = preserved_role if (preserved_role and not preserved_enabled) else role
 
-    meta = {
+    meta = dict(existing)
+    meta.update({
         "user_id": u.id,
         "role": role_to_set,
         "enabled": preserved_enabled,
@@ -177,7 +178,7 @@ async def cmd_auth(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "last_name": u.last_name,
         "auth_at": datetime.now(TZ).isoformat(),
         "is_paid": preserved_paid,
-    }
+    })
     await upsert_user_meta(u.id, meta)
     _auth_reset_limits(update)
 

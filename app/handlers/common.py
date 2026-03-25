@@ -13,7 +13,7 @@ from telegram.constants import ChatType, ParseMode
 from telegram.error import BadRequest, NetworkError, RetryAfter, TimedOut
 from telegram.ext import ContextTypes, ConversationHandler
 
-from ..config import MENU_MAINT, MENU_STATUS, MENU_TICKET, MENU_USERS, TZ, logger
+from ..config import MENU_MAINT, MENU_STATUS, MENU_SUBSCRIPTION, MENU_TICKET, MENU_USERS, TZ, logger
 from ..storage import authorized_users_snapshot, get_user_meta_copy
 
 
@@ -192,9 +192,10 @@ def main_menu_inline_kb(update: Update) -> InlineKeyboardMarkup:
     rows: List[List[InlineKeyboardButton]] = [
         [
             InlineKeyboardButton(MENU_STATUS, callback_data="menu:status"),
-            InlineKeyboardButton(MENU_TICKET, callback_data="menu:ticket"),
+            InlineKeyboardButton(MENU_SUBSCRIPTION, callback_data="menu:subscription"),
         ]
     ]
+    rows.append([InlineKeyboardButton(MENU_TICKET, callback_data="menu:ticket")])
     if is_admin(update):
         rows.append(
             [

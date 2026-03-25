@@ -56,6 +56,7 @@ from app.handlers.maint import (
     maint_start,
     maint_urgency,
 )
+from app.handlers.subscription import subscription_show
 from app.handlers.status import (
     cmd_health,
     dns_daily_refresh,
@@ -145,6 +146,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("auth", cmd_auth))
     app.add_handler(CommandHandler("logout", cmd_logout))
     app.add_handler(CommandHandler("health", cmd_health))
+    app.add_handler(CommandHandler("subscription", subscription_show))
 
     maint_conv = ConversationHandler(
         entry_points=[
@@ -237,6 +239,7 @@ def build_app() -> Application:
     app.add_handler(CallbackQueryHandler(menu_home_cb, pattern=r"^menu:home$"))
     app.add_handler(CallbackQueryHandler(cmd_help, pattern=r"^menu:help$"))
     app.add_handler(CallbackQueryHandler(cmd_health, pattern=r"^menu:status$"))
+    app.add_handler(CallbackQueryHandler(subscription_show, pattern=r"^menu:subscription$"))
 
     app.add_handler(CallbackQueryHandler(status_pick_cb, pattern=r"^status:pick$"))
     app.add_handler(CallbackQueryHandler(status_show_cb, pattern=r"^status:show:[a-z0-9_-]{1,12}$"))

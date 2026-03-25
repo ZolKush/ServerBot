@@ -1,4 +1,4 @@
-from .constants import MENU_FAIL2BAN, MENU_MAINT, MENU_STATUS, MENU_TICKET, MENU_USERS
+from .constants import MENU_FAIL2BAN, MENU_MAINT, MENU_STATUS, MENU_SUBSCRIPTION, MENU_TICKET, MENU_USERS
 from .logging_setup import configure_logging, logger
 from .settings import (
     ADMIN_PASSWORD,

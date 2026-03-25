@@ -1,15 +1,17 @@
 import re
+from datetime import datetime
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes, ConversationHandler
 
-from ..config import logger
+from ..config import TZ, logger
 from ..storage import upsert_user_meta
 from .common import (
     authorized_ids,
     breadcrumbs,
     clip_text,
+    display_name,
     get_user_id,
     get_user_meta,
     html_escape,
@@ -20,6 +22,13 @@ from .common import (
     ui_ok_text,
     ui_warn_text,
     wrap_as_codeblock_html,
+)
+from .subscription import (
+    SUBSCRIPTION_TEXT_KEY,
+    SUBSCRIPTION_UPDATED_AT_KEY,
+    SUBSCRIPTION_UPDATED_BY_ID_KEY,
+    SUBSCRIPTION_UPDATED_BY_NAME_KEY,
+    send_subscription_payload,
 )
 from .users_constants import (
     ADMIN_ALL_MENU,
@@ -338,7 +347,9 @@ async def users_user_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         uid = int(m_cfg.group(1))
         context.user_data["selected_uid"] = uid
         await q.edit_message_text(
-            "Вставьте конфигурацию одним сообщением. Она будет отправлена пользователю как <b>кодовый блок</b>."
+            "Вставьте подписку одним сообщением. Она будет сохранена за пользователем в "
+            "<code>data/user_data.json</code>"
+            " и при необходимости отправлена ему автоматически."
             "\n\nПодсказка: можно вставлять vless/URL/JSON без изменений.",
             parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup(
@@ -462,19 +473,30 @@ async def users_user_cfg_text(update: Update, context: ContextTypes.DEFAULT_TYPE
             await msg.reply_text(ui_error_text("пользователь не найден (возможно, удалён из списка)."))
         return ADMIN_PICK
 
-    header = "📦 <b>Конфигурация от администратора</b>\n\n"
-    payload = header + wrap_as_codeblock_html(clip_text(cfg, limit=3000))
+    author_id = get_user_id(update)
+    author_name = display_name(update)
+    meta[SUBSCRIPTION_TEXT_KEY] = cfg
+    meta[SUBSCRIPTION_UPDATED_AT_KEY] = datetime.now(TZ).isoformat()
+    meta[SUBSCRIPTION_UPDATED_BY_ID_KEY] = author_id
+    meta[SUBSCRIPTION_UPDATED_BY_NAME_KEY] = author_name
+    updated = await upsert_user_meta(uid, meta)
 
     try:
-        await context.bot.send_message(chat_id=uid, text=payload, parse_mode=ParseMode.HTML)
-        logger.info("Admin user_id=%s sent config target_uid=%s", get_user_id(update), uid)
+        await send_subscription_payload(
+            context,
+            chat_id=uid,
+            meta=updated,
+            title="📦 <b>Подписка от администратора</b>",
+            filename_prefix=f"subscription_{uid}",
+        )
+        logger.info("Admin user_id=%s assigned subscription target_uid=%s", author_id, uid)
         if msg:
-            await msg.reply_text(ui_ok_text("Отправлено"))
+            await msg.reply_text(ui_ok_text("Подписка сохранена и отправлена пользователю"))
     except Exception as e:
-        logger.warning("Не удалось отправить конфигурацию пользователю %s: %s", uid, e)
+        logger.warning("Подписка сохранена, но не отправлена пользователю %s: %s", uid, e)
         if msg:
-            await msg.reply_text(ui_error_text("не удалось отправить (пользователь мог заблокировать бота)."))
+            await msg.reply_text(ui_warn_text("Подписка сохранена в базе, но отправить пользователю её не удалось."))
 
     if msg:
-        await msg.reply_text(format_user_card(meta), parse_mode=ParseMode.HTML, reply_markup=user_card_kb(uid))
+        await msg.reply_text(format_user_card(updated), parse_mode=ParseMode.HTML, reply_markup=user_card_kb(uid))
     return ADMIN_USER_MENU

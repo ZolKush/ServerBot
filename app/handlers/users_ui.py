@@ -134,7 +134,7 @@ def user_card_kb(uid: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("✉️ Написать сообщение", callback_data=f"users:msg:{uid}")],
         [InlineKeyboardButton("🏷 Изменить ник", callback_data=f"users:nick:{uid}")],
         [InlineKeyboardButton("⭐ Переключить оплату", callback_data=f"users:paid:{uid}")],
-        [InlineKeyboardButton("📦 Отправить конфиг", callback_data=f"users:cfg:{uid}")],
+        [InlineKeyboardButton("📦 Назначить подписку", callback_data=f"users:cfg:{uid}")],
     ]
 
     if role != "admin":
@@ -175,16 +175,19 @@ def format_user_card(meta: Dict[str, Any]) -> str:
     nm = " ".join([x for x in [meta.get("first_name"), meta.get("last_name")] if x]) or "-"
     auth_at = meta.get("auth_at") or "-"
     status = "активен" if meta.get("enabled", True) else "отключен"
+    has_subscription = bool(str(meta.get("subscription_text", "") or "").strip())
+    subscription_updated_at = meta.get("subscription_updated_at") or "-"
     return (
         f"<b>{html_escape(breadcrumbs('Админ-панель', 'Пользователи', str(uid)))}</b>\n\n"
         "Карточка пользователя\n"
         f"• ID: <code>{html_escape(str(uid))}</code>\n"
         f"• Роль: <b>{html_escape(str(role))}</b>\n"
         f"• Статус: <b>{html_escape(status)}</b>\n"
-        f"• Подписка: <b>{'оплачена' if bool(meta.get('is_paid', False)) else 'не оплачена'}</b>\n"
+        f"• Оплата: <b>{'оплачена' if bool(meta.get('is_paid', False)) else 'не оплачена'}</b>\n"
+        f"• Конфиг: <b>{'назначен' if has_subscription else 'не назначен'}</b>\n"
+        f"• Обновлён: <code>{html_escape(str(subscription_updated_at))}</code>\n"
         f"• Ник: <b>{html_escape(str(nick))}</b>\n"
         f"• Username: <b>{html_escape(('@' + uname) if uname else '-')}</b>\n"
         f"• Имя: <b>{html_escape(str(nm))}</b>\n"
         f"• Авторизация: <code>{html_escape(str(auth_at))}</code>"
     )
-
