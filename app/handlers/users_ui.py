@@ -138,6 +138,7 @@ def user_card_kb(uid: int) -> InlineKeyboardMarkup:
             InlineKeyboardButton("💾 Назначить подписку", callback_data=f"users:subassign:{uid}"),
             InlineKeyboardButton("📤 Отправить подписку", callback_data=f"users:subsend:{uid}"),
         ],
+        [InlineKeyboardButton("🪄 Обновить меню", callback_data=f"users:refresh:{uid}")],
     ]
 
     if role != "admin":

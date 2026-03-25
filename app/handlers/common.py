@@ -188,7 +188,7 @@ def display_name(update: Update) -> str:
     return nm if nm else str(u.id)
 
 
-def main_menu_inline_kb(update: Update) -> InlineKeyboardMarkup:
+def main_menu_inline_kb_for_admin(is_admin_user: bool) -> InlineKeyboardMarkup:
     rows: List[List[InlineKeyboardButton]] = [
         [
             InlineKeyboardButton(MENU_STATUS, callback_data="menu:status"),
@@ -196,7 +196,7 @@ def main_menu_inline_kb(update: Update) -> InlineKeyboardMarkup:
         ]
     ]
     rows.append([InlineKeyboardButton(MENU_TICKET, callback_data="menu:ticket")])
-    if is_admin(update):
+    if is_admin_user:
         rows.append(
             [
                 InlineKeyboardButton(MENU_USERS, callback_data="menu:users"),
@@ -207,14 +207,20 @@ def main_menu_inline_kb(update: Update) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+def main_menu_inline_kb(update: Update) -> InlineKeyboardMarkup:
+    return main_menu_inline_kb_for_admin(is_admin(update))
+
+
+def main_menu_text(is_admin_user: bool, text: str = "Меню:") -> str:
+    if text == "Меню:":
+        return "👑 <b>Админ-панель</b>\n\nВыберите раздел:" if is_admin_user else "👤 <b>Главное меню</b>\n\nВыберите раздел:"
+    return text
+
+
 async def show_main_menu(update: Update, text: str = "Меню:") -> None:
     q = update.callback_query
     markup = main_menu_inline_kb(update)
-    if text == "Меню:":
-        if is_admin(update):
-            text = "👑 <b>Админ-панель</b>\n\nВыберите раздел:"
-        else:
-            text = "👤 <b>Главное меню</b>\n\nВыберите раздел:"
+    text = main_menu_text(is_admin(update), text=text)
     if q:
         await q.answer()
         try:

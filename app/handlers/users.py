@@ -15,6 +15,8 @@ from .common import (
     get_user_id,
     get_user_meta,
     html_escape,
+    main_menu_inline_kb_for_admin,
+    main_menu_text,
     require_admin,
     send_to_many,
     show_main_menu,
@@ -78,6 +80,27 @@ def _subscription_mode_prompt(mode: str) -> str:
         "<code>data/user_data.json</code> и сразу отправлена ему уведомлением."
         "\n\nПодсказка: можно вставлять vless/URL/JSON без изменений."
     )
+
+
+async def _refresh_user_dialog(context: ContextTypes.DEFAULT_TYPE, uid: int, meta: dict) -> tuple[int, int]:
+    markup = main_menu_inline_kb_for_admin(bool(meta.get("role") == "admin"))
+    menu_message = await context.bot.send_message(
+        chat_id=uid,
+        text=main_menu_text(bool(meta.get("role") == "admin")),
+        parse_mode=ParseMode.HTML,
+        reply_markup=markup,
+    )
+
+    deleted = 0
+    skipped = 0
+    start_id = max(1, int(menu_message.message_id) - 80)
+    for message_id in range(int(menu_message.message_id) - 1, start_id - 1, -1):
+        try:
+            await context.bot.delete_message(chat_id=uid, message_id=message_id)
+            deleted += 1
+        except Exception:
+            skipped += 1
+    return deleted, skipped
 
 
 @require_admin
@@ -339,6 +362,23 @@ async def users_user_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info("Admin user_id=%s toggled is_paid=%s target_uid=%s", get_user_id(update), updated.get("is_paid"), uid)
         await q.edit_message_text(
             format_user_card(updated) + "\n\n" + ui_ok_text("Статус оплаты обновлён."),
+            parse_mode=ParseMode.HTML,
+            reply_markup=user_card_kb(uid),
+        )
+        return ADMIN_USER_MENU
+
+    m_refresh = re.fullmatch(r"users:refresh:(\d+)", data)
+    if m_refresh:
+        uid = int(m_refresh.group(1))
+        meta = get_user_meta(uid)
+        if not meta:
+            active_filter = _get_users_filter(context)
+            await q.edit_message_text(ui_error_text("пользователь не найден."), reply_markup=users_list_kb(active_filter))
+            return ADMIN_PICK
+        deleted, skipped = await _refresh_user_dialog(context, uid, meta)
+        logger.info("Admin user_id=%s refreshed menu target_uid=%s deleted=%s skipped=%s", get_user_id(update), uid, deleted, skipped)
+        await q.edit_message_text(
+            format_user_card(meta) + "\n\n" + ui_ok_text(f"Меню обновлено, очищено сообщений: {deleted}, пропущено: {skipped}"),
             parse_mode=ParseMode.HTML,
             reply_markup=user_card_kb(uid),
         )
