@@ -221,6 +221,16 @@ async def ensure_context_menu_button(update: Update, context: ContextTypes.DEFAU
         logger.warning("Не удалось включить контекстную кнопку меню для user_id=%s: %s", uid, e)
 
 
+async def try_delete_message(update: Update) -> None:
+    msg = update.effective_message
+    if not msg:
+        return
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+
+
 def main_menu_inline_kb_for_admin(is_admin_user: bool) -> InlineKeyboardMarkup:
     rows: List[List[InlineKeyboardButton]] = [
         [
@@ -285,6 +295,7 @@ async def menu_home_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = ((msg.text if msg else "") or "").strip()
     if not re.fullmatch(MENU_HOME_TEXT_PATTERN, text):
         return ConversationHandler.END
+    await try_delete_message(update)
     _clear_transient_user_context(context)
     if is_authorized(update) and not is_enabled(update):
         await reply_disabled(update)

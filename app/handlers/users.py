@@ -93,7 +93,7 @@ async def _refresh_user_dialog(context: ContextTypes.DEFAULT_TYPE, uid: int, met
 
     deleted = 0
     skipped = 0
-    start_id = max(1, int(menu_message.message_id) - 80)
+    start_id = max(1, int(menu_message.message_id) - 100)
     for message_id in range(int(menu_message.message_id) - 1, start_id - 1, -1):
         try:
             await context.bot.delete_message(chat_id=uid, message_id=message_id)
