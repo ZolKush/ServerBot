@@ -9,7 +9,6 @@ from telegram.ext import ContextTypes
 from ..config import ADMIN_PASSWORD, AUTH_PASSWORD, TZ, logger
 from ..storage import get_user_meta_copy, remove_user_meta, upsert_user_meta
 from .common import (
-    ensure_context_menu_button,
     get_user_id,
     get_user_meta,
     is_admin,
@@ -89,7 +88,6 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await reply_disabled(update)
         return
     await show_main_menu(update)
-    await ensure_context_menu_button(update, context)
 
 
 @require_private
@@ -189,7 +187,6 @@ async def cmd_auth(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     await show_main_menu(update, text="Авторизация успешна ✅\n\nМеню:")
-    await ensure_context_menu_button(update, context)
 
 
 @require_private

@@ -3,13 +3,12 @@ from __future__ import annotations
 import asyncio
 import html
 import random
-import re
 from dataclasses import dataclass, field
 from functools import wraps
 from datetime import datetime
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
-from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, MenuButtonCommands, ReplyKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatType, ParseMode
 from telegram.error import BadRequest, NetworkError, RetryAfter, TimedOut
 from telegram.ext import ContextTypes, ConversationHandler
@@ -26,8 +25,6 @@ UI_OK = "✅"
 UI_WARN = "⚠️"
 UI_ERR = "❌"
 UI_INFO = "ℹ️"
-CONTEXT_MENU_BUTTON = "📋 Меню"
-MENU_HOME_TEXT_PATTERN = rf"^(?:{re.escape(CONTEXT_MENU_BUTTON)}|Меню)$"
 
 
 def ui_ok_text(text: str) -> str:
@@ -191,47 +188,6 @@ def display_name(update: Update) -> str:
     return nm if nm else str(u.id)
 
 
-def context_menu_reply_kb() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        [[KeyboardButton(CONTEXT_MENU_BUTTON)]],
-        resize_keyboard=True,
-        is_persistent=True,
-        input_field_placeholder="Нажмите «Меню» для вызова главного меню",
-    )
-
-
-async def ensure_context_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    uid = get_user_id(update)
-    if uid is None:
-        return
-    try:
-        await context.bot.set_my_commands(
-            [
-                BotCommand("menu", "Открыть главное меню"),
-                BotCommand("start", "Открыть главное меню"),
-                BotCommand("help", "Показать помощь"),
-                BotCommand("subscription", "Показать мою подписку"),
-                BotCommand("ticket", "Создать тикет"),
-                BotCommand("health", "Показать статус сервера"),
-                BotCommand("auth", "Авторизация"),
-                BotCommand("logout", "Выйти из бота"),
-            ]
-        )
-        await context.bot.set_chat_menu_button(chat_id=uid, menu_button=MenuButtonCommands())
-    except Exception as e:
-        logger.warning("Не удалось включить контекстную кнопку меню для user_id=%s: %s", uid, e)
-
-
-async def try_delete_message(update: Update) -> None:
-    msg = update.effective_message
-    if not msg:
-        return
-    try:
-        await msg.delete()
-    except Exception:
-        pass
-
-
 def main_menu_inline_kb_for_admin(is_admin_user: bool) -> InlineKeyboardMarkup:
     rows: List[List[InlineKeyboardButton]] = [
         [
@@ -288,26 +244,6 @@ def _clear_transient_user_context(context: ContextTypes.DEFAULT_TYPE) -> None:
     for key in tuple(context.user_data.keys()):
         if key.startswith("ticket_") or key.startswith("maint_") or key in {"selected_uid", "subscription_delivery_mode"}:
             context.user_data.pop(key, None)
-
-
-@require_private
-async def menu_home_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.effective_message
-    text = ((msg.text if msg else "") or "").strip()
-    if not re.fullmatch(MENU_HOME_TEXT_PATTERN, text):
-        return ConversationHandler.END
-    await try_delete_message(update)
-    _clear_transient_user_context(context)
-    if is_authorized(update) and not is_enabled(update):
-        await reply_disabled(update)
-        return ConversationHandler.END
-    if not is_authorized(update):
-        await reply_need_auth(update)
-        await ensure_context_menu_button(update, context)
-        return ConversationHandler.END
-    await show_main_menu(update)
-    await ensure_context_menu_button(update, context)
-    return ConversationHandler.END
 
 
 @require_auth
