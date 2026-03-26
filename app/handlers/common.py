@@ -9,7 +9,7 @@ from functools import wraps
 from datetime import datetime
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, MenuButtonCommands, ReplyKeyboardMarkup, Update
 from telegram.constants import ChatType, ParseMode
 from telegram.error import BadRequest, NetworkError, RetryAfter, TimedOut
 from telegram.ext import ContextTypes, ConversationHandler
@@ -201,7 +201,25 @@ def context_menu_reply_kb() -> ReplyKeyboardMarkup:
 
 
 async def ensure_context_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    return None
+    uid = get_user_id(update)
+    if uid is None:
+        return
+    try:
+        await context.bot.set_my_commands(
+            [
+                BotCommand("menu", "Открыть главное меню"),
+                BotCommand("start", "Открыть главное меню"),
+                BotCommand("help", "Показать помощь"),
+                BotCommand("subscription", "Показать мою подписку"),
+                BotCommand("ticket", "Создать тикет"),
+                BotCommand("health", "Показать статус сервера"),
+                BotCommand("auth", "Авторизация"),
+                BotCommand("logout", "Выйти из бота"),
+            ]
+        )
+        await context.bot.set_chat_menu_button(chat_id=uid, menu_button=MenuButtonCommands())
+    except Exception as e:
+        logger.warning("Не удалось включить контекстную кнопку меню для user_id=%s: %s", uid, e)
 
 
 async def try_delete_message(update: Update) -> None:
