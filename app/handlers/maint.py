@@ -8,7 +8,6 @@ from telegram.ext import ContextTypes, ConversationHandler
 
 from ..config import TZ, logger
 from ..storage import (
-    clear_maintenance_record,
     clear_scheduled_maintenance_record,
     get_active_maintenance,
     get_scheduled_maintenance,
@@ -35,7 +34,6 @@ from .maint_helpers import (
     _scope_label,
     format_scheduled_maint,
     format_maint,
-    humanize_hhmm,
     maint_mode_kb,
     parse_clock_range,
     parse_hhmm,
@@ -61,6 +59,23 @@ def _clear_maint_ctx(context: ContextTypes.DEFAULT_TYPE) -> None:
         "maint_extend_id",
     ):
         context.user_data.pop(key, None)
+
+
+async def _take_active_maintenance(maint_id: str) -> Optional[dict[str, Any]]:
+    def _take(cfg):
+        current = getattr(cfg, "maintenance", {})
+        if not isinstance(current, dict) or not current.get("active"):
+            return None
+        if str(current.get("id") or "") != str(maint_id):
+            return None
+        prev = dict(current)
+        cfg.maintenance = {}
+        return prev
+
+    taken = await update_important_data(_take)
+    if isinstance(taken, dict):
+        return taken
+    return None
 
 
 async def _send_maint_notice_with_admin_copy(
@@ -391,8 +406,8 @@ async def maint_end_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not m:
         return
     maint_id = m.group(1)
-    maint = get_active_maintenance()
-    if not maint or str(maint.get("id")) != maint_id:
+    maint = await _take_active_maintenance(maint_id)
+    if not maint:
         await q.edit_message_text("Техработы не активны или уже завершены.")
         return
 
@@ -405,7 +420,6 @@ async def maint_end_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text=notice,
     )
 
-    await clear_maintenance_record()
     logger.info("Maintenance ended by user_id=%s maint_id=%s", get_user_id(update), maint_id)
     await q.edit_message_text(
         "✅ Техработы завершены.\n\n"
@@ -456,14 +470,13 @@ async def maint_restart_notify(context: ContextTypes.DEFAULT_TYPE) -> None:
     maint = get_active_maintenance()
     if not maint:
         return
-    maint_id = str(maint.get("id", "") or "")
-    if not maint_id:
+    if not str(maint.get("id", "") or ""):
         return
     admin_ids = authorized_ids(role_filter="admin", exclude=set())
     if not admin_ids:
         return
-    text = _maint_restart_text(maint)
-    kb = _maint_control_kb(maint_id)
+    text = _maint_restart_text(maint) + "\n\nОткройте «/maint» для управления."
+    kb = _maint_notice_menu_kb()
     for uid in admin_ids:
         try:
             await context.bot.send_message(chat_id=uid, text=text, parse_mode=ParseMode.HTML, reply_markup=kb)
