@@ -1,4 +1,5 @@
 from datetime import datetime
+import hmac
 from time import monotonic
 from typing import Optional
 
@@ -82,6 +83,16 @@ def _auth_reset_limits(update: Update) -> None:
     _AUTH_LOCKED_UNTIL.pop(key, None)
 
 
+async def _auth_delete_sensitive_message(update: Update) -> None:
+    msg = update.effective_message
+    if not msg:
+        return
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+
+
 @require_private
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if is_authorized(update) and not is_enabled(update):
@@ -140,53 +151,56 @@ async def cmd_auth(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await msg.reply_text("Пустой пароль.")
         return
 
-    role: Optional[str] = None
-    if ADMIN_PASSWORD and passwd == ADMIN_PASSWORD:
-        role = "admin"
-    elif AUTH_PASSWORD and passwd == AUTH_PASSWORD:
-        role = "user"
+    try:
+        role: Optional[str] = None
+        if ADMIN_PASSWORD and hmac.compare_digest(passwd, ADMIN_PASSWORD):
+            role = "admin"
+        elif AUTH_PASSWORD and hmac.compare_digest(passwd, AUTH_PASSWORD):
+            role = "user"
 
-    if role is None:
-        _auth_register_failure(update)
-        logger.warning("Auth failed for %s", _auth_actor_key(update))
-        if msg:
-            await msg.reply_text("Пароль неверный.")
-        return
+        if role is None:
+            _auth_register_failure(update)
+            logger.warning("Auth failed for %s", _auth_actor_key(update))
+            if msg:
+                await msg.reply_text("Пароль неверный.")
+            return
 
-    u = update.effective_user
-    if not u:
-        if msg:
-            await msg.reply_text("Ошибка: не удалось определить пользователя.")
-        return
+        u = update.effective_user
+        if not u:
+            if msg:
+                await msg.reply_text("Ошибка: не удалось определить пользователя.")
+            return
 
-    existing = get_user_meta(u.id) or {}
-    preserved_enabled = bool(existing.get("enabled", True))
-    preserved_nick = existing.get("nickname")
-    preserved_role = existing.get("role")
-    preserved_paid = bool(existing.get("is_paid", False))
+        existing = get_user_meta(u.id) or {}
+        preserved_enabled = bool(existing.get("enabled", True))
+        preserved_nick = existing.get("nickname")
+        preserved_role = existing.get("role")
+        preserved_paid = bool(existing.get("is_paid", False))
 
-    role_to_set = preserved_role if (preserved_role and not preserved_enabled) else role
+        role_to_set = preserved_role if (preserved_role and not preserved_enabled) else role
 
-    meta = dict(existing)
-    meta.update({
-        "user_id": u.id,
-        "role": role_to_set,
-        "enabled": preserved_enabled,
-        "nickname": preserved_nick,
-        "username": u.username,
-        "first_name": u.first_name,
-        "last_name": u.last_name,
-        "auth_at": datetime.now(TZ).isoformat(),
-        "is_paid": preserved_paid,
-    })
-    await upsert_user_meta(u.id, meta)
-    _auth_reset_limits(update)
+        meta = dict(existing)
+        meta.update({
+            "user_id": u.id,
+            "role": role_to_set,
+            "enabled": preserved_enabled,
+            "nickname": preserved_nick,
+            "username": u.username,
+            "first_name": u.first_name,
+            "last_name": u.last_name,
+            "auth_at": datetime.now(TZ).isoformat(),
+            "is_paid": preserved_paid,
+        })
+        await upsert_user_meta(u.id, meta)
+        _auth_reset_limits(update)
 
-    if not preserved_enabled:
-        await reply_disabled(update)
-        return
+        if not preserved_enabled:
+            await reply_disabled(update)
+            return
 
-    await show_main_menu(update, text="Авторизация успешна ✅\n\nМеню:")
+        await show_main_menu(update, text="Авторизация успешна ✅\n\nМеню:")
+    finally:
+        await _auth_delete_sensitive_message(update)
 
 
 @require_private

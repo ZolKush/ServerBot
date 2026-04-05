@@ -1,8 +1,7 @@
-from .constants import MENU_FAIL2BAN, MENU_MAINT, MENU_STATUS, MENU_SUBSCRIPTION, MENU_TICKET, MENU_USERS
+from .constants import MENU_MAINT, MENU_STATUS, MENU_SUBSCRIPTION, MENU_TICKET, MENU_USERS
 from .logging_setup import configure_logging, logger
 from .settings import (
     ADMIN_PASSWORD,
-    ALL_MONITOR_CONTAINER_SET,
     AUTH_PASSWORD,
     BASE_DIR,
     BOT_TOKEN,
@@ -11,7 +10,6 @@ from .settings import (
     DOCKER_BIN,
     DNS_DAILY_REFRESH_AT,
     DNS_STARTUP_REFRESH_DELAY_SEC,
-    ENV_FILE as _ENV_FILE,
     EXPECTED_A_IP,
     FAIL2BAN_DAILY_AT,
     FAIL2BAN_LOG_PATH,
@@ -21,14 +19,9 @@ from .settings import (
     LOCAL_SERVER_CODE,
     LOCAL_SERVER_LABEL,
     MONITOR_CONTAINERS,
-    MONITOR_CONTAINER_SET,
-    MONITOR_PANEL_HOST,
     LOG_JSON,
     LOG_LEVEL,
     MAINT_RESTART_NOTIFY_DELAY_SEC,
-    PING_BIN,
-    PING_COUNT,
-    PING_TIMEOUT_SEC,
     REMOTE_SERVER_CHECK_A_DOMAINS,
     REMOTE_SERVER_CODE,
     REMOTE_SERVER_ENABLED,
@@ -50,10 +43,6 @@ from .settings import (
     TZ_NAME,
     UFW_BIN,
     USER_DATA_PATH,
-    load_required_secrets as _load_required_secrets,
-    resolve_bin as _resolve_bin,
-    resolve_path as _resolve_path,
-    split_env_list as _split_env_list,
 )
 
 configure_logging(level=LOG_LEVEL, use_json=LOG_JSON, force=True)

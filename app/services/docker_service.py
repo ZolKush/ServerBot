@@ -2,7 +2,7 @@ import json
 import re
 from typing import Dict, List, Sequence, Tuple
 
-from ..config import DOCKER_BIN, SUBPROC_MEDIUM_TIMEOUT, SUBPROC_SHORT_TIMEOUT
+from ..config import DOCKER_BIN, SUBPROC_MEDIUM_TIMEOUT
 from .system_service import run_exec
 
 _CONTAINER_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.\-]{0,62}$")
@@ -19,23 +19,13 @@ async def docker_containers(names: Sequence[str]) -> List[Tuple[str, bool, str, 
         [DOCKER_BIN, "ps", "-a", "--format", "{{.Names}}|{{.Status}}"],
         timeout=SUBPROC_MEDIUM_TIMEOUT,
     )
-    single_pass = rc == 0 and ("|" in out)
     info: Dict[str, str] = {}
-    if single_pass:
-        for line in out.splitlines():
-            parts = line.split("|", 1)
-            if len(parts) >= 2:
-                nm = parts[0].strip()
-                info[nm] = parts[1].strip()
-    else:
-        rc, out, _ = await run_exec([DOCKER_BIN, "ps", "-a", "--format", "{{.Names}}|{{.Status}}"], timeout=SUBPROC_MEDIUM_TIMEOUT)
-        if rc != 0:
-            return [(n, False, "docker недоступен", "-") for n in names]
-
-        for line in out.splitlines():
-            parts = line.split("|", 1)
-            if len(parts) == 2:
-                info[parts[0].strip()] = parts[1].strip()
+    if rc != 0:
+        return [(n, False, "docker недоступен", "-") for n in names]
+    for line in out.splitlines():
+        parts = line.split("|", 1)
+        if len(parts) == 2:
+            info[parts[0].strip()] = parts[1].strip()
 
     result: List[Tuple[str, bool, str, str]] = []
     for n in names:

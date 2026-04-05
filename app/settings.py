@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,6 +21,7 @@ ENV_FILE = Path(_ENV_PATH) if _ENV_PATH else (BASE_DIR / ".env")
 _SECRETS_ENV_PATH = os.getenv("SECRETS_ENV_PATH", "").strip()
 SECRETS_ENV_FILE = Path(_SECRETS_ENV_PATH) if _SECRETS_ENV_PATH else (BASE_DIR / "env.secrets")
 _SECRET_KEYS = ("BOT_TOKEN", "AUTH_PASSWORD", "ADMIN_PASSWORD")
+_SSH_TARGET_RE = re.compile(r"^[A-Za-z0-9_.:@\-\[\]]{1,255}$")
 
 
 def split_env_list(raw: Any) -> List[str]:
@@ -153,10 +155,6 @@ class AppSettings(BaseSettings):
     CONFIG_PATH: str = str(ROOT_DIR / "data" / "config.json")
 
     MONITOR_CONTAINERS: List[str] = Field(default_factory=lambda: ["remnawave", "remnawave-db", "remnawave-redis", "remnanode", "remnawave-nginx"])
-    MONITOR_PANEL_HOST: str = "xvui.ittelecom.pl"
-    PING_COUNT: int = 1
-    PING_TIMEOUT_SEC: int = 1
-
     EXPECTED_A_IP: str = "95.164.47.185"
     CHECK_A_DOMAINS: List[str] = Field(default_factory=lambda: ["nxc.ittelecom.pl", "xvui.ittelecom.pl", "supsub.ittelecom.pl"])
     DNS_RESOLVERS: List[str] = Field(default_factory=lambda: ["1.1.1.1", "8.8.8.8", "77.88.8.8"])
@@ -227,8 +225,6 @@ class AppSettings(BaseSettings):
     @field_validator(
         "SUBPROC_SHORT_TIMEOUT",
         "SUBPROC_MEDIUM_TIMEOUT",
-        "PING_COUNT",
-        "PING_TIMEOUT_SEC",
         "DNS_STARTUP_REFRESH_DELAY_SEC",
         "MAINT_RESTART_NOTIFY_DELAY_SEC",
     )
@@ -253,6 +249,16 @@ class AppSettings(BaseSettings):
         s = str(v or "").strip()
         if not s:
             raise ValueError("empty server label")
+        return s
+
+    @field_validator("REMOTE_SERVER_SSH_TARGET", mode="before")
+    @classmethod
+    def _normalize_ssh_target(cls, v: Any) -> str:
+        s = str(v or "").strip()
+        if not s:
+            return ""
+        if s.startswith("-") or not _SSH_TARGET_RE.fullmatch(s):
+            raise ValueError("REMOTE_SERVER_SSH_TARGET has invalid format")
         return s
 
     @model_validator(mode="after")
@@ -301,17 +307,12 @@ FAIL2BAN_STATE_PATH = resolve_path(
 )
 
 MONITOR_CONTAINERS = list(SETTINGS.MONITOR_CONTAINERS)
-MONITOR_CONTAINER_SET = set(MONITOR_CONTAINERS)
-MONITOR_PANEL_HOST = SETTINGS.MONITOR_PANEL_HOST
-PING_COUNT = SETTINGS.PING_COUNT
-PING_TIMEOUT_SEC = SETTINGS.PING_TIMEOUT_SEC
 EXPECTED_A_IP = SETTINGS.EXPECTED_A_IP.strip()
 CHECK_A_DOMAINS = list(SETTINGS.CHECK_A_DOMAINS)
 DNS_RESOLVERS = list(SETTINGS.DNS_RESOLVERS)
 
 DOCKER_BIN = resolve_bin("/usr/bin/docker", "docker")
 UFW_BIN = resolve_bin("/usr/sbin/ufw", "ufw")
-PING_BIN = resolve_bin("/bin/ping", "/usr/bin/ping", "ping")
 SUDO_BIN = resolve_bin("/usr/bin/sudo", "sudo")
 SSH_BIN = resolve_bin("/usr/bin/ssh", "ssh")
 
@@ -333,7 +334,6 @@ REMOTE_SERVER_EXPECTED_A_IP = SETTINGS.REMOTE_SERVER_EXPECTED_A_IP.strip()
 REMOTE_SERVER_CHECK_A_DOMAINS = list(SETTINGS.REMOTE_SERVER_CHECK_A_DOMAINS)
 REMOTE_SERVER_FAIL2BAN_LOG_PATH = SETTINGS.REMOTE_SERVER_FAIL2BAN_LOG_PATH.strip() or "/var/log/fail2ban.log"
 REMOTE_SERVER_MONITOR_CONTAINERS = list(SETTINGS.REMOTE_SERVER_MONITOR_CONTAINERS) or list(MONITOR_CONTAINERS)
-ALL_MONITOR_CONTAINER_SET = set(MONITOR_CONTAINERS) | set(REMOTE_SERVER_MONITOR_CONTAINERS)
 
 SUBPROC_SHORT_TIMEOUT = SETTINGS.SUBPROC_SHORT_TIMEOUT
 SUBPROC_MEDIUM_TIMEOUT = SETTINGS.SUBPROC_MEDIUM_TIMEOUT

@@ -315,10 +315,11 @@ async def remote_docker_logs_tail(ssh_target: str, name: str, tail: int) -> str:
 async def remote_tail_text_file(ssh_target: str, path: str, n_lines: int) -> str:
     n = max(1, min(int(n_lines), 10000))
     quoted = shlex.quote(path)
+    sudo_bin = shlex.quote(SUDO_BIN or "sudo")
     cmd = (
         f"if [ ! -e {quoted} ]; then printf '__FNF__'; "
         f"elif [ -r {quoted} ]; then tail -n {n} {quoted}; "
-        f"else {SUDO_BIN} -n tail -n {n} {quoted} 2>/dev/null || printf '__PERM__'; fi"
+        f"else {sudo_bin} -n tail -n {n} {quoted} 2>/dev/null || printf '__PERM__'; fi"
     )
     rc, out, err = await ssh_run_shell(ssh_target, cmd, timeout=SUBPROC_MEDIUM_TIMEOUT)
     if out.startswith("__FNF__"):
@@ -332,9 +333,10 @@ async def remote_tail_text_file(ssh_target: str, path: str, n_lines: int) -> str
 
 async def remote_fail2ban_stat(ssh_target: str, path: str) -> Optional[Tuple[int, datetime]]:
     quoted = shlex.quote(path)
+    sudo_bin = shlex.quote(SUDO_BIN or "sudo")
     for cmd in (
         f"stat -c '%s|%Y' {quoted} 2>/dev/null || true",
-        f"{SUDO_BIN} -n stat -c '%s|%Y' {quoted} 2>/dev/null || true",
+        f"{sudo_bin} -n stat -c '%s|%Y' {quoted} 2>/dev/null || true",
     ):
         rc, out, _ = await ssh_run_shell(ssh_target, cmd, timeout=SUBPROC_SHORT_TIMEOUT)
         if rc != 0 or not out.strip():

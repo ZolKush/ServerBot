@@ -1,6 +1,7 @@
 import asyncio
 import copy
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, TypeVar
@@ -28,6 +29,16 @@ async def _write_json_atomic(path: str, data: Dict[str, Any]) -> None:
     async with aiofiles.open(tmp, "w", encoding="utf-8") as f:
         await f.write(payload)
     await asyncio.to_thread(tmp.replace, p)
+    await asyncio.to_thread(_tighten_file_permissions, p)
+
+
+def _tighten_file_permissions(path: Path) -> None:
+    if os.name == "nt":
+        return
+    try:
+        path.chmod(0o600)
+    except Exception:
+        pass
 
 
 @dataclass
@@ -121,6 +132,7 @@ class UserData:
         tmp = tmp_path.with_suffix(tmp_path.suffix + ".tmp")
         tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.replace(tmp_path)
+        _tighten_file_permissions(tmp_path)
 
     async def save_async(self, path: str) -> None:
         await _write_json_atomic(path, {"schema_version": USER_DATA_SCHEMA_VERSION, "authorized_users": self.authorized_users})
@@ -200,6 +212,7 @@ class ImportantData:
         tmp = tmp_path.with_suffix(tmp_path.suffix + ".tmp")
         tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.replace(tmp_path)
+        _tighten_file_permissions(tmp_path)
 
     async def save_async(self, path: str) -> None:
         await _write_json_atomic(
@@ -368,13 +381,6 @@ def get_ticket_copy(ticket_id: int) -> Optional[Dict[str, Any]]:
         return None
     item = tickets.get(str(ticket_id))
     return dict(item) if isinstance(item, dict) else None
-
-
-def tickets_snapshot() -> Dict[str, Dict[str, Any]]:
-    tickets = IMPORTANT_DATA_SNAPSHOT.get("tickets")
-    if not isinstance(tickets, dict):
-        return {}
-    return {str(k): dict(v) for k, v in tickets.items() if isinstance(v, dict)}
 
 
 def get_dns_status_cache(server_key: str) -> Optional[Dict[str, Any]]:
