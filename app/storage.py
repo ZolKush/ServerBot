@@ -258,8 +258,23 @@ _refresh_user_snapshot()
 _refresh_important_snapshot()
 
 
+def _reload_user_data_from_disk() -> None:
+    latest = UserData.load(USER_DATA_PATH, legacy_path=None)
+    USER_DATA.authorized_users = copy.deepcopy(latest.authorized_users)
+
+
+def _reload_important_data_from_disk() -> None:
+    latest = ImportantData.load(IMPORTANT_DATA_PATH, legacy_path=None)
+    IMPORTANT_DATA.tickets_seq = int(latest.tickets_seq or 0)
+    IMPORTANT_DATA.tickets = copy.deepcopy(latest.tickets)
+    IMPORTANT_DATA.maintenance = copy.deepcopy(latest.maintenance)
+    IMPORTANT_DATA.scheduled_maintenance = copy.deepcopy(latest.scheduled_maintenance)
+    IMPORTANT_DATA.dns_status = copy.deepcopy(latest.dns_status)
+
+
 async def update_user_data(update_fn: Callable[[UserData], T]) -> T:
     async with USER_DATA_LOCK:
+        _reload_user_data_from_disk()
         prev_authorized_users = copy.deepcopy(USER_DATA.authorized_users)
         try:
             result = update_fn(USER_DATA)
@@ -274,6 +289,7 @@ async def update_user_data(update_fn: Callable[[UserData], T]) -> T:
 
 async def update_important_data(update_fn: Callable[[ImportantData], T]) -> T:
     async with IMPORTANT_DATA_LOCK:
+        _reload_important_data_from_disk()
         prev_tickets_seq = IMPORTANT_DATA.tickets_seq
         prev_tickets = copy.deepcopy(IMPORTANT_DATA.tickets)
         prev_maintenance = copy.deepcopy(IMPORTANT_DATA.maintenance)
@@ -296,6 +312,7 @@ async def update_important_data(update_fn: Callable[[ImportantData], T]) -> T:
 
 def _set_user_meta(cfg: UserData, uid: int, meta: Dict[str, Any]) -> Dict[str, Any]:
     normalized = UserData._normalize_user(meta)
+    normalized["user_id"] = int(uid)
     cfg.authorized_users[str(uid)] = normalized
     return normalized
 
