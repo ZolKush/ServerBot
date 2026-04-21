@@ -14,6 +14,7 @@ from .common import (
     breadcrumbs,
     clip_text,
     display_name,
+    format_dt_human,
     get_user_id,
     html_escape,
     require_admin,
@@ -105,7 +106,7 @@ def _format_ticket_history(ticket: Dict[str, Any]) -> str:
     for item in messages:
         sender_role = "Админ" if item.get("sender_role") == "admin" else "Пользователь"
         sender_name = str(item.get("sender_name") or sender_role)
-        ts = str(item.get("ts") or "-")
+        ts = format_dt_human(item.get("ts"))
         text = clip_text(str(item.get("text") or ""), limit=900)
         parts.append(f"<b>{html_escape(sender_role)}:</b> {html_escape(sender_name)}")
         parts.append(f"• Время: <code>{html_escape(ts)}</code>")
@@ -146,7 +147,7 @@ def _format_ticket_for_admin(ticket: Dict[str, Any], admin_uid: int, *, event_li
     subject = str(ticket.get("subject") or "-")
     urgency = str(ticket.get("urgency") or "p3").upper()
     status_label = _ticket_status_label(ticket)
-    created_at = str(ticket.get("created_at") or "-")
+    created_at = format_dt_human(ticket.get("created_at"))
     lines = [
         f"<b>{html_escape(breadcrumbs('Тикеты', ticket_no))}</b>",
         "",
@@ -160,7 +161,7 @@ def _format_ticket_for_admin(ticket: Dict[str, Any], admin_uid: int, *, event_li
     if user_username:
         lines.append(f"• Username: <code>@{html_escape(user_username.lstrip('@'))}</code>")
     if status_label == "закрыт":
-        lines.append(f"• Закрыт: <code>{html_escape(str(ticket.get('closed_at') or '-'))}</code>")
+        lines.append(f"• Закрыт: <code>{html_escape(format_dt_human(ticket.get('closed_at')))}</code>")
     if event_line:
         lines.extend(["", event_line])
     if _ticket_is_assignee(ticket, admin_uid):
@@ -184,7 +185,7 @@ def _format_ticket_for_user(ticket: Dict[str, Any], *, event_line: Optional[str]
         f"• Тема: <code>{html_escape(subject)}</code>",
     ]
     if status_label == "закрыт":
-        lines.append(f"• Закрыт: <code>{html_escape(str(ticket.get('closed_at') or '-'))}</code>")
+        lines.append(f"• Закрыт: <code>{html_escape(format_dt_human(ticket.get('closed_at')))}</code>")
     if event_line:
         lines.extend(["", event_line])
     lines.extend(["", "<b>История</b>", _format_ticket_history(ticket)])

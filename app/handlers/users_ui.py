@@ -3,7 +3,7 @@ from typing import Any, Dict, List, Tuple
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from ..storage import authorized_users_snapshot
-from .common import breadcrumbs, display_name_from_meta, get_user_meta, html_escape
+from .common import breadcrumbs, display_name_from_meta, format_dt_human, get_user_meta, html_escape
 
 USER_FILTER_ALL = "all"
 USER_FILTER_ACTIVE = "active"
@@ -181,6 +181,8 @@ def format_user_card(meta: Dict[str, Any]) -> str:
     status = "активен" if meta.get("enabled", True) else "отключен"
     has_subscription = bool(str(meta.get("subscription_text", "") or "").strip())
     subscription_updated_at = meta.get("subscription_updated_at") or "-"
+    auth_at_human = format_dt_human(auth_at)
+    subscription_updated_at_human = format_dt_human(subscription_updated_at)
     return (
         f"<b>{html_escape(breadcrumbs('Админ-панель', 'Пользователи', str(uid)))}</b>\n\n"
         "Карточка пользователя\n"
@@ -189,9 +191,9 @@ def format_user_card(meta: Dict[str, Any]) -> str:
         f"• Статус: <b>{html_escape(status)}</b>\n"
         f"• Оплата: <b>{'оплачена' if bool(meta.get('is_paid', False)) else 'не оплачена'}</b>\n"
         f"• Конфиг: <b>{'назначен' if has_subscription else 'не назначен'}</b>\n"
-        f"• Обновлён: <code>{html_escape(str(subscription_updated_at))}</code>\n"
+        f"• Обновлён: <code>{html_escape(subscription_updated_at_human)}</code>\n"
         f"• Ник: <b>{html_escape(str(nick))}</b>\n"
         f"• Username: <b>{html_escape(('@' + uname) if uname else '-')}</b>\n"
         f"• Имя: <b>{html_escape(str(nm))}</b>\n"
-        f"• Авторизация: <code>{html_escape(str(auth_at))}</code>"
+        f"• Авторизация: <code>{html_escape(auth_at_human)}</code>"
     )

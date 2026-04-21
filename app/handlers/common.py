@@ -63,6 +63,32 @@ def now_str() -> str:
     return datetime.now(TZ).strftime("%d.%m.%Y %H:%M:%S")
 
 
+def format_dt_human(value: Any, *, empty: str = "-", tz_label: str = "по МСК") -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return empty
+
+    dt: Optional[datetime] = None
+    try:
+        dt = datetime.fromisoformat(raw)
+    except Exception:
+        for fmt in ("%Y-%m-%d %H:%M:%S,%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+            try:
+                dt = datetime.strptime(raw, fmt)
+                break
+            except Exception:
+                continue
+
+    if dt is None:
+        return raw
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=TZ)
+    else:
+        dt = dt.astimezone(TZ)
+    return f"{dt.strftime('%d.%m.%Y %H:%M')} {tz_label}"
+
+
 def is_private(update: Update) -> bool:
     return bool(update.effective_chat and update.effective_chat.type == ChatType.PRIVATE)
 
