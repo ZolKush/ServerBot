@@ -63,13 +63,7 @@ def _status_pick_text() -> str:
 
 
 def _server_flag(server: ServerTarget) -> str:
-    key = (server.key or "").lower()
-    label = (server.label or "").lower()
-    if key == "de" or "germany" in label:
-        return "🇩🇪"
-    if key == "nl" or "netherlands" in label:
-        return "🇳🇱"
-    return "🖥"
+    return server.flag or "🖥"
 
 
 def _status_actions_kb(admin_mode: bool, server_key: str) -> InlineKeyboardMarkup:

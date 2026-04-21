@@ -14,6 +14,7 @@ _SEC_MEMINFO = "__MBOT_SEC_MEMINFO__"
 _SEC_DF = "__MBOT_SEC_DF__"
 _SEC_UFW = "__MBOT_SEC_UFW__"
 _SEC_DOCKER_STATUS = "__MBOT_SEC_DOCKER_STATUS__"
+_SSH_TARGET_WITH_PORT_RE = re.compile(r"^(?P<host>[A-Za-z0-9_.@\-\[\]:]+):(?P<port>\d{1,5})$")
 
 
 def _extract_wrapped_stdout(text: str) -> str:
@@ -53,10 +54,26 @@ def _split_sections(text: str) -> Dict[str, str]:
     return {k: "\n".join(v).strip("\n") for k, v in buf.items()}
 
 
+def _split_ssh_target(target: str) -> Tuple[str, Optional[int]]:
+    tgt = (target or "").strip()
+    m = _SSH_TARGET_WITH_PORT_RE.fullmatch(tgt)
+    if not m:
+        return tgt, None
+    host = m.group("host")
+    port = int(m.group("port"))
+    if not 1 <= port <= 65535:
+        raise ValueError("ssh port out of range")
+    return host, port
+
+
 async def ssh_run_shell(target: str, command: str, timeout: int) -> Tuple[int, str, str]:
     tgt = (target or "").strip()
     if not tgt:
         return 127, "", "ssh target is not configured"
+    try:
+        ssh_host, ssh_port = _split_ssh_target(tgt)
+    except ValueError as e:
+        return 127, "", str(e)
     wrapped = (
         "PATH=/usr/sbin:/usr/bin:/sbin:/bin:$PATH; export PATH; "
         f"printf '%s\\n' {shlex.quote(_OUT_BEGIN)}; "
@@ -73,11 +90,10 @@ async def ssh_run_shell(target: str, command: str, timeout: int) -> Tuple[int, s
         f"ConnectTimeout={max(2, min(timeout, 10))}",
         "-o",
         "LogLevel=ERROR",
-        tgt,
-        "sh",
-        "-c",
-        wrapped,
     ]
+    if ssh_port is not None:
+        args.extend(["-p", str(ssh_port)])
+    args.extend([ssh_host, "sh", "-c", wrapped])
     rc, out, err = await run_exec(args, timeout=max(timeout + 2, 5))
     return rc, _extract_wrapped_stdout(out), err
 
