@@ -11,10 +11,11 @@ from ..config import FAIL2BAN_STATE_PATH, SERVERS, TZ, logger
 from ..services.remote_service import remote_fail2ban_events_last_day, remote_fail2ban_stat, remote_tail_text_file
 from ..services.system_service import (
     Fail2banEvent,
+    fail2ban_stat_with_sudo_async,
     load_json_file,
     parse_fail2ban_events,
     save_json_file,
-    tail_text_file_async,
+    tail_text_file_with_sudo_async,
 )
 from .common import breadcrumbs, authorized_ids, clip_text, html_escape, require_admin, send_to_many, ui_error_text, wrap_as_codeblock_html
 from .status import build_status_message, get_server_target
@@ -91,7 +92,7 @@ async def _daily_digest_events_for_server(server_key: str, since: datetime, unti
         if srv.mode == "ssh":
             events = await remote_fail2ban_events_last_day(srv.ssh_target, srv.fail2ban_log_path)
         else:
-            raw_tail = await tail_text_file_async(srv.fail2ban_log_path, n_lines=20000, max_bytes=3_000_000)
+            raw_tail = await tail_text_file_with_sudo_async(srv.fail2ban_log_path, n_lines=20000, max_bytes=3_000_000)
             events = parse_fail2ban_events(raw_tail.splitlines())
         return [e for e in events if since <= e.ts <= until], None
     except FileNotFoundError:
@@ -127,9 +128,11 @@ async def build_fail2ban_menu_text(server_key: str) -> str:
         )
 
     try:
-        st_local = Path(p).stat()
-        mtime = datetime.fromtimestamp(st_local.st_mtime, tz=TZ)
-        size_kb = st_local.st_size / 1024.0
+        st_local = await fail2ban_stat_with_sudo_async(p)
+        if st_local is None:
+            raise RuntimeError("stat unavailable")
+        size_bytes, mtime = st_local
+        size_kb = size_bytes / 1024.0
         return (
             f"<b>{html_escape(breadcrumbs('Админ-панель', 'Fail2ban', srv.label))}</b>\n\n"
             f"Файл: <code>{html_escape(str(p))}</code>\n"
@@ -258,7 +261,7 @@ async def f2b_tail_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if srv.mode == "ssh":
             tail_txt = await remote_tail_text_file(srv.ssh_target, srv.fail2ban_log_path, n_lines=n)
         else:
-            tail_txt = await tail_text_file_async(srv.fail2ban_log_path, n_lines=n)
+            tail_txt = await tail_text_file_with_sudo_async(srv.fail2ban_log_path, n_lines=n)
         if not tail_txt.strip():
             payload = f"🛡 <b>Fail2ban: tail ({html_escape(srv.label)})</b>\n\nЛог пуст или отсутствуют строки."
         else:
@@ -294,7 +297,7 @@ async def f2b_digest_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if srv.mode == "ssh":
             events = await remote_fail2ban_events_last_day(srv.ssh_target, srv.fail2ban_log_path)
         else:
-            raw_tail = await tail_text_file_async(srv.fail2ban_log_path, n_lines=20000, max_bytes=3_000_000)
+            raw_tail = await tail_text_file_with_sudo_async(srv.fail2ban_log_path, n_lines=20000, max_bytes=3_000_000)
             events = parse_fail2ban_events(raw_tail.splitlines())
             events = [e for e in events if since <= e.ts <= until]
         payload = f"🌍 <b>Сервер:</b> {html_escape(srv.label)}\n" + build_fail2ban_digest_text(events, since=since, until=until)

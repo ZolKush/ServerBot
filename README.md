@@ -398,20 +398,41 @@ IMPORTANT_DATA_PATH=/opt/maintbot/data/important_data.json
 
 Рекомендуемый способ запуска: только через `systemd`.
 
+Готовый шаблон лежит в [deploy/maintbot.service](/C:/Users/kiril/Documents/server_bot/deploy/maintbot.service).
+
+Ключевой момент по правам:
+
+- группа `root` сама по себе не делает пользователя root
+- если бот запускается не от `root`, а код использует `sudo -n`, нужен `NOPASSWD` в `sudoers`
+- после правок в коде локальные `docker` и `fail2ban` тоже умеют fallback через `sudo -n`, так что отдельный пользователь `maintbot` теперь подходит
+
+Минимально рабочий вариант на сервере:
+
+```bash
+sudo useradd -r -m -d /opt/maintbot -s /bin/bash maintbot
+sudo usermod -aG sudo maintbot
+echo 'maintbot ALL=(ALL) NOPASSWD: ALL' | sudo tee /etc/sudoers.d/maintbot
+sudo chmod 440 /etc/sudoers.d/maintbot
+```
+
 Пример unit-файла:
 
 ```ini
 [Unit]
 Description=MaintBot Telegram Bot
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
 User=maintbot
 WorkingDirectory=/opt/maintbot
+Environment=PYTHONUNBUFFERED=1
 ExecStart=/opt/maintbot/.venv/bin/python -m app.main
 Restart=always
 RestartSec=5
+StandardOutput=append:/var/log/bot.log
+StandardError=append:/var/log/bot.log
 
 [Install]
 WantedBy=multi-user.target
@@ -425,6 +446,14 @@ sudo systemctl enable maintbot.service
 sudo systemctl start maintbot.service
 ```
 
+Если используете шаблон из репозитория:
+
+```bash
+sudo cp /opt/maintbot/deploy/maintbot.service /etc/systemd/system/maintbot.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now maintbot.service
+```
+
 ## Проверка работы
 
 ### Проверка статуса сервиса
@@ -436,8 +465,8 @@ sudo systemctl status maintbot.service --no-pager -l
 ### Просмотр логов
 
 ```bash
-sudo journalctl -u maintbot.service -n 200 --no-pager
-sudo journalctl -u maintbot.service -f
+sudo tail -n 200 /var/log/bot.log
+sudo tail -f /var/log/bot.log
 ```
 
 ### Признаки успешного запуска
@@ -470,6 +499,23 @@ sudo journalctl -u maintbot.service -f
 `httpx` и `httpcore` опущены до `WARNING`, чтобы не светить лишние детали Telegram API.
 
 ## Типичные проблемы
+
+### `sudo: a password is required`
+
+Причина: сервис запущен от отдельного пользователя, а код вызывает `sudo -n`, но для пользователя не настроен `NOPASSWD`.
+
+Что делать:
+
+- добавить пользователя в `sudo`
+- создать `/etc/sudoers.d/maintbot`
+- прописать `maintbot ALL=(ALL) NOPASSWD: ALL`
+
+### Docker или fail2ban недоступны при запуске не от `root`
+
+Теперь код умеет делать локальный fallback через `sudo -n`, но только если:
+
+- установлен `sudo`
+- для пользователя сервиса настроен `NOPASSWD`
 
 ### `Conflict: terminated by other getUpdates request`
 
@@ -589,5 +635,5 @@ python -m app.main
 
 ```bash
 sudo systemctl restart maintbot.service
-sudo journalctl -u maintbot.service -f
+sudo tail -f /var/log/bot.log
 ```

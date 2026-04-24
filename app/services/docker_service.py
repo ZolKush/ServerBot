@@ -2,7 +2,7 @@ import json
 import re
 from typing import Dict, List, Sequence, Tuple
 
-from ..config import DOCKER_BIN, SUBPROC_MEDIUM_TIMEOUT
+from ..config import DOCKER_BIN, SUBPROC_MEDIUM_TIMEOUT, SUDO_BIN
 from .system_service import run_exec
 
 _CONTAINER_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.\-]{0,62}$")
@@ -13,12 +13,27 @@ def is_valid_container_name(name: str) -> bool:
     return bool(nm and _CONTAINER_NAME_RE.fullmatch(nm))
 
 
+def _docker_cmds(*args: str) -> List[List[str]]:
+    bases: List[str] = []
+    for candidate in [DOCKER_BIN, "/usr/bin/docker", "docker"]:
+        if candidate and candidate not in bases:
+            bases.append(candidate)
+
+    commands: List[List[str]] = []
+    for base in bases:
+        commands.append([base, *args])
+        if SUDO_BIN:
+            commands.append([SUDO_BIN, "-n", base, *args])
+    return commands
+
+
 async def docker_containers(names: Sequence[str]) -> List[Tuple[str, bool, str, str]]:
     # Status page only needs "docker ps" status; restart count is left for inspect.
-    rc, out, _ = await run_exec(
-        [DOCKER_BIN, "ps", "-a", "--format", "{{.Names}}|{{.Status}}"],
-        timeout=SUBPROC_MEDIUM_TIMEOUT,
-    )
+    rc, out, _ = 127, "", ""
+    for cmd in _docker_cmds("ps", "-a", "--format", "{{.Names}}|{{.Status}}"):
+        rc, out, _ = await run_exec(cmd, timeout=SUBPROC_MEDIUM_TIMEOUT)
+        if rc == 0:
+            break
     info: Dict[str, str] = {}
     if rc != 0:
         return [(n, False, "docker недоступен", "-") for n in names]
@@ -39,7 +54,11 @@ async def docker_containers(names: Sequence[str]) -> List[Tuple[str, bool, str, 
 
 
 async def docker_inspect_summary(name: str) -> str:
-    rc, out, err = await run_exec([DOCKER_BIN, "inspect", name], timeout=SUBPROC_MEDIUM_TIMEOUT)
+    rc, out, err = 127, "", "docker inspect unavailable"
+    for cmd in _docker_cmds("inspect", name):
+        rc, out, err = await run_exec(cmd, timeout=SUBPROC_MEDIUM_TIMEOUT)
+        if rc == 0:
+            break
     if rc != 0:
         return f"docker inspect error: {err.strip() or out.strip() or 'н/д'}"
     try:
@@ -94,7 +113,11 @@ async def docker_inspect_summary(name: str) -> str:
 
 
 async def docker_logs_tail(name: str, tail: int) -> str:
-    rc, out, err = await run_exec([DOCKER_BIN, "logs", "--tail", str(tail), name], timeout=SUBPROC_MEDIUM_TIMEOUT)
+    rc, out, err = 127, "", "docker logs unavailable"
+    for cmd in _docker_cmds("logs", "--tail", str(tail), name):
+        rc, out, err = await run_exec(cmd, timeout=SUBPROC_MEDIUM_TIMEOUT)
+        if rc == 0:
+            break
     if rc != 0:
         return f"docker logs error: {err.strip() or out.strip() or 'н/д'}"
     return out if out.strip() else err
