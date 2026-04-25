@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 from dotenv import dotenv_values
 from pydantic import BaseModel, Field, ValidationError, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings.sources import DotEnvSettingsSource
 
 from .logging_setup import logger
 
@@ -239,12 +240,31 @@ def load_required_secrets(path: Path, *, fallback_path: Path | None = None) -> S
         ) from e
 
 
+class _PermissiveDotEnvSource(DotEnvSettingsSource):
+    """Allows comma-separated list values in .env without requiring JSON format."""
+
+    def decode_complex_value(self, field_name: str, field: Any, value: Any) -> Any:
+        try:
+            return super().decode_complex_value(field_name, field, value)
+        except Exception:
+            return value
+
+
 class AppSettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=str(ENV_FILE),
         env_file_encoding="utf-8",
         extra="ignore",
+        env_ignore_empty=True,
     )
+
+    @classmethod
+    def settings_customise_sources(cls, settings_cls, init_settings, env_settings, dotenv_settings, **kwargs):
+        secrets = kwargs.get("secrets_settings") or kwargs.get("file_secret_settings")
+        sources = [init_settings, env_settings, _PermissiveDotEnvSource(settings_cls)]
+        if secrets is not None:
+            sources.append(secrets)
+        return tuple(sources)
 
     TZ: str = "Europe/Moscow"
     LOG_LEVEL: str = "INFO"
