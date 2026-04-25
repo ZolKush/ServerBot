@@ -15,7 +15,6 @@ TimeoutStopSec=30
 LogsDirectory=maintbot
 StandardOutput=append:/var/log/maintbot/bot.log
 StandardError=append:/var/log/maintbot/bot.log
-NoNewPrivileges=yes
 
 [Install]
 WantedBy=multi-user.target
