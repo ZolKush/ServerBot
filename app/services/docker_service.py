@@ -27,8 +27,56 @@ def _docker_cmds(*args: str) -> List[List[str]]:
     return commands
 
 
+def _parse_docker_inspect_json(name: str, out: str) -> str:
+    try:
+        data = json.loads(out)
+        if not isinstance(data, list) or not data:
+            return "inspect: пустой ответ"
+        c = data[0]
+        image = ((c.get("Config") or {}).get("Image")) or "-"
+        state = c.get("State") or {}
+        status = state.get("Status") or "-"
+        running = state.get("Running")
+        started = state.get("StartedAt") or "-"
+        finished = state.get("FinishedAt") or "-"
+        exit_code = state.get("ExitCode")
+        error = (state.get("Error") or "").strip() or "-"
+        health = ((state.get("Health") or {}).get("Status")) or "-"
+        restart_count = c.get("RestartCount")
+        ports = ((c.get("NetworkSettings") or {}).get("Ports")) or {}
+        port_items: List[str] = []
+        if isinstance(ports, dict):
+            for k, v in ports.items():
+                if v is None:
+                    port_items.append(f"{k}→-")
+                elif isinstance(v, list) and v:
+                    b = v[0]
+                    port_items.append(f"{k}→{b.get('HostIp', '')}:{b.get('HostPort', '')}")
+                else:
+                    port_items.append(f"{k}")
+        lines: List[str] = [
+            f"Container: {name}",
+            f"Image: {image}",
+            f"State: {status} (running={running})",
+            f"Health: {health}",
+        ]
+        if restart_count is not None:
+            lines.append(f"RestartCount: {restart_count}")
+        if exit_code is not None:
+            lines.append(f"ExitCode: {exit_code}")
+        lines.append(f"StartedAt: {started}")
+        if status not in ("running", "up"):
+            lines.append(f"FinishedAt: {finished}")
+        if error and error != "-":
+            lines.append(f"Error: {error}")
+        if port_items:
+            lines.append("Ports: " + ", ".join(port_items))
+        return "\n".join(lines)
+    except Exception as e:
+        return f"inspect parse error: {e}"
+
+
 async def docker_containers(names: Sequence[str]) -> List[Tuple[str, bool, str, str]]:
-    # Status page only needs "docker ps" status; restart count is left for inspect.
     rc, out, _ = 127, "", ""
     for cmd in _docker_cmds("ps", "-a", "--format", "{{.Names}}|{{.Status}}"):
         rc, out, _ = await run_exec(cmd, timeout=SUBPROC_MEDIUM_TIMEOUT)
@@ -61,55 +109,7 @@ async def docker_inspect_summary(name: str) -> str:
             break
     if rc != 0:
         return f"docker inspect error: {err.strip() or out.strip() or 'н/д'}"
-    try:
-        data = json.loads(out)
-        if not isinstance(data, list) or not data:
-            return "inspect: пустой ответ"
-        c = data[0]
-        image = ((c.get("Config") or {}).get("Image")) or "-"
-        state = c.get("State") or {}
-        status = state.get("Status") or "-"
-        running = state.get("Running")
-        started = state.get("StartedAt") or "-"
-        finished = state.get("FinishedAt") or "-"
-        exit_code = state.get("ExitCode")
-        error = (state.get("Error") or "").strip() or "-"
-        health = ((state.get("Health") or {}).get("Status")) or "-"
-        restart_count = c.get("RestartCount")
-
-        ports = ((c.get("NetworkSettings") or {}).get("Ports")) or {}
-        port_items: List[str] = []
-        if isinstance(ports, dict):
-            for k, v in ports.items():
-                if v is None:
-                    port_items.append(f"{k}→-")
-                elif isinstance(v, list) and v:
-                    b = v[0]
-                    host_ip = b.get("HostIp", "")
-                    host_port = b.get("HostPort", "")
-                    port_items.append(f"{k}→{host_ip}:{host_port}")
-                else:
-                    port_items.append(f"{k}")
-
-        lines: List[str] = []
-        lines.append(f"Container: {name}")
-        lines.append(f"Image: {image}")
-        lines.append(f"State: {status} (running={running})")
-        lines.append(f"Health: {health}")
-        if restart_count is not None:
-            lines.append(f"RestartCount: {restart_count}")
-        if exit_code is not None:
-            lines.append(f"ExitCode: {exit_code}")
-        lines.append(f"StartedAt: {started}")
-        if status not in ("running", "up"):
-            lines.append(f"FinishedAt: {finished}")
-        if error and error != "-":
-            lines.append(f"Error: {error}")
-        if port_items:
-            lines.append("Ports: " + ", ".join(port_items))
-        return "\n".join(lines)
-    except Exception as e:
-        return f"inspect parse error: {e}"
+    return _parse_docker_inspect_json(name, out)
 
 
 async def docker_logs_tail(name: str, tail: int) -> str:

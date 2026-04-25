@@ -187,10 +187,7 @@ async def status_dns_refresh_cb(update: Update, context: ContextTypes.DEFAULT_TY
         return
     await q.answer("Обновляю DNS...")
     server_key = _parse_status_dnsrefresh_callback(q.data or "")
-    if not server_key or not get_server_target(server_key):
-        await q.edit_message_text(ui_error_text("сервер не найден."), reply_markup=_status_pick_kb())
-        return
-    server = get_server_target(server_key)
+    server = get_server_target(server_key) if server_key else None
     if not server:
         await q.edit_message_text(ui_error_text("сервер не найден."), reply_markup=_status_pick_kb())
         return

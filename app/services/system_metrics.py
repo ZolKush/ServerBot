@@ -23,13 +23,41 @@ def _fmt_bytes_binary(n: int) -> str:
     return f"{v:.1f} {units[idx]}"
 
 
+def _parse_uptime_p(text: str) -> str:
+    t = (text or "").strip().lower()
+    if t.startswith("up "):
+        t = t[3:]
+    days = hours = minutes = 0
+    for part in re.split(r",\s*", t):
+        m = re.match(r"(\d+)\s+(day|days|hour|hours|minute|minutes)", part.strip())
+        if not m:
+            continue
+        n, unit = int(m.group(1)), m.group(2)
+        if unit.startswith("day"):
+            days = n
+        elif unit.startswith("hour"):
+            hours = n
+        elif unit.startswith("minute"):
+            minutes = n
+    parts: List[str] = []
+    if days:
+        parts.append(f"{days} д")
+    if hours:
+        parts.append(f"{hours} ч")
+    if minutes or not parts:
+        parts.append(f"{minutes} м")
+    return " ".join(parts)
+
+
 async def check_uptime() -> str:
     try:
         raw = await asyncio.to_thread(Path("/proc/uptime").read_text, encoding="utf-8")
         seconds = int(float(raw.split()[0]))
     except Exception:
         rc, out, _ = await run_exec(["uptime", "-p"], timeout=SUBPROC_SHORT_TIMEOUT)
-        return out.strip() if rc == 0 else "н/д"
+        if rc != 0:
+            return "н/д"
+        return _parse_uptime_p(out.strip()) or "н/д"
 
     td = timedelta(seconds=seconds)
     days = td.days

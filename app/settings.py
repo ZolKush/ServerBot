@@ -159,16 +159,27 @@ def _validate_ssh_target(value: str) -> str:
 
 class SecretSettings(BaseModel):
     BOT_TOKEN: str
-    AUTH_PASSWORD: str
-    ADMIN_PASSWORD: str
+    AUTH_PASSWORD: str = ""
+    ADMIN_PASSWORD: str = ""
 
-    @field_validator("BOT_TOKEN", "AUTH_PASSWORD", "ADMIN_PASSWORD", mode="before")
+    @field_validator("BOT_TOKEN", mode="before")
     @classmethod
-    def _strip_non_empty(cls, v: Any) -> str:
+    def _strip_bot_token(cls, v: Any) -> str:
         s = str(v or "").strip()
         if not s:
             raise ValueError("empty secret")
         return s
+
+    @field_validator("AUTH_PASSWORD", "ADMIN_PASSWORD", mode="before")
+    @classmethod
+    def _strip_password(cls, v: Any) -> str:
+        return str(v or "").strip()
+
+    @model_validator(mode="after")
+    def _require_at_least_one_password(self) -> "SecretSettings":
+        if not self.AUTH_PASSWORD and not self.ADMIN_PASSWORD:
+            raise ValueError("хотя бы один из AUTH_PASSWORD или ADMIN_PASSWORD должен быть задан")
+        return self
 
 
 def _load_env_file_values(path: Path) -> Dict[str, str]:
@@ -233,7 +244,6 @@ class AppSettings(BaseSettings):
         env_file=str(ENV_FILE),
         env_file_encoding="utf-8",
         extra="ignore",
-        enable_decoding=False,
     )
 
     TZ: str = "Europe/Moscow"

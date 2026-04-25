@@ -8,7 +8,7 @@ from telegram.constants import ParseMode
 from telegram.ext import ContextTypes, ConversationHandler
 
 from ..config import TZ, logger
-from ..storage import get_ticket_copy, next_ticket_seq, set_ticket_record, update_important_data
+from ..storage import get_ticket_copy, get_user_open_tickets, next_ticket_seq, set_ticket_record, update_important_data
 from .common import (
     authorized_ids,
     breadcrumbs,
@@ -30,6 +30,7 @@ TICKET_SUBJECT, TICKET_URGENCY, TICKET_TEXT, TICKET_CONFIRM, TICKET_USER_REPLY_T
 MAX_TICKET_SUBJECT_LEN = 160
 MAX_TICKET_TEXT_LEN = 3200
 MAX_TICKET_HISTORY_ITEMS = 6
+MAX_TICKET_MESSAGES_STORED = 100
 
 
 class TicketFlowError(RuntimeError):
@@ -93,6 +94,8 @@ def _append_ticket_message(ticket: Dict[str, Any], *, sender_role: str, sender_i
             "kind": kind,
         }
     )
+    if len(messages) > MAX_TICKET_MESSAGES_STORED:
+        messages = messages[-MAX_TICKET_MESSAGES_STORED:]
     updated["messages"] = messages
     updated["updated_at"] = _now_iso()
     return updated
@@ -160,7 +163,7 @@ def _format_ticket_for_admin(ticket: Dict[str, Any], admin_uid: int, *, event_li
     ]
     if user_username:
         lines.append(f"• Username: <code>@{html_escape(user_username.lstrip('@'))}</code>")
-    if status_label == "закрыт":
+    if str(ticket.get("status", "open")) == "closed":
         lines.append(f"• Закрыт: <code>{html_escape(format_dt_human(ticket.get('closed_at')))}</code>")
     if event_line:
         lines.extend(["", event_line])
@@ -184,7 +187,7 @@ def _format_ticket_for_user(ticket: Dict[str, Any], *, event_line: Optional[str]
         f"• Срочность: <code>{html_escape(urgency)}</code>",
         f"• Тема: <code>{html_escape(subject)}</code>",
     ]
-    if status_label == "закрыт":
+    if str(ticket.get("status", "open")) == "closed":
         lines.append(f"• Закрыт: <code>{html_escape(format_dt_human(ticket.get('closed_at')))}</code>")
     if event_line:
         lines.extend(["", event_line])
@@ -354,6 +357,19 @@ def _ticket_preview_text(context: ContextTypes.DEFAULT_TYPE) -> str:
 @require_auth
 async def ticket_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
+    uid = get_user_id(update)
+    if uid is not None:
+        open_tickets = get_user_open_tickets(uid)
+        if open_tickets:
+            msg = update.effective_message
+            warn = ui_warn_text(f"У вас уже есть открытый тикет #{open_tickets[0].get('id')}. Дождитесь его завершения.")
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Меню", callback_data="menu:home")]])
+            if q and msg:
+                await q.answer()
+                await q.edit_message_text(warn, reply_markup=kb)
+            elif msg:
+                await msg.reply_text(warn, reply_markup=kb)
+            return ConversationHandler.END
     _clear_ticket_ctx(context)
     msg = update.effective_message
     if q and msg:

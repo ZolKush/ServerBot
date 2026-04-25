@@ -18,7 +18,13 @@ F2B_LINE_RE = re.compile(
     r"(?P<level>[A-Z]+)\s+\[(?P<jail>[^\]]+)\]\s+"
     r"(?P<msg>.+?)\s*$"
 )
-F2B_IP_RE = re.compile(r"(?P<ip>\b(?:\d{1,3}\.){3}\d{1,3}\b|\b[0-9a-fA-F:]{2,}\b)")
+F2B_IP_RE = re.compile(
+    r"(?P<ip>"
+    r"\b(?:\d{1,3}\.){3}\d{1,3}\b"              # IPv4
+    r"|"
+    r"(?:[0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}"  # IPv6 (requires ≥2 colon-separated groups)
+    r")"
+)
 
 
 def _f2b_parse_time(ts: str) -> Optional[datetime]:
@@ -126,9 +132,6 @@ async def fail2ban_stat_with_sudo_async(path: str) -> Optional[Tuple[int, dateti
     except Exception:
         logger.debug("fail2ban_stat_with_sudo_async parse failed for %s", path)
         return None
-
-
-FAIL2BAN_STATE_LOCK = asyncio.Lock()
 
 
 @dataclass(frozen=True)

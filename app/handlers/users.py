@@ -396,7 +396,7 @@ async def users_user_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text("Введите никнейм (как должен отображаться в списке):")
         return ADMIN_USER_NICK_TEXT
 
-    m_subscription = re.fullmatch(r"users:(cfg|subassign|subsend):(\d+)", data)
+    m_subscription = re.fullmatch(r"users:(subassign|subsend):(\d+)", data)
     if m_subscription:
         action, uid_s = m_subscription.group(1), m_subscription.group(2)
         uid = int(uid_s)

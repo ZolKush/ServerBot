@@ -157,6 +157,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("menu", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("auth", cmd_auth))
+    app.add_handler(CommandHandler("login", cmd_auth))
     app.add_handler(CommandHandler("logout", cmd_logout))
     app.add_handler(CommandHandler("health", cmd_health))
     app.add_handler(CommandHandler("subscription", subscription_show))

@@ -124,6 +124,7 @@ async def docker_inspect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await q.answer()
     parsed = _parse_server_and_name(q.data or "", "inspect")
     if not parsed:
+        await q.edit_message_text(ui_error_text("некорректный запрос."))
         return
     server_key, name = parsed
     srv = get_server_target(server_key)

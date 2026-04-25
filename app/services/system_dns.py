@@ -31,7 +31,8 @@ async def resolve_a_record(domain: str, resolver: Optional[str] = None, timeout:
             ips = [a.host for a in ans if getattr(a, "host", None)]
             return list(dict.fromkeys(ips))
         except Exception:
-            pass
+            if resolver:
+                return []
 
     try:
         infos = await asyncio.get_running_loop().getaddrinfo(dom, None, family=socket.AF_INET)

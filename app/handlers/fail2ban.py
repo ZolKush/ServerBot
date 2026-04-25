@@ -341,12 +341,13 @@ async def fail2ban_daily_digest(context: ContextTypes.DEFAULT_TYPE) -> None:
             since = _window_from_state(st_before, until)
 
             events, err = await _daily_digest_events_for_server(server_key, since=since, until=until)
-            new_state = {"updated_at": until.isoformat(), "server_key": server_key}
 
             if err:
                 logger.warning("fail2ban_daily_digest %s (%s) skipped: %s", server_key, srv.label, err)
-                await save_json_file(state_path, new_state)
                 continue
+
+            new_state = {"updated_at": until.isoformat(), "server_key": server_key}
+
             if not isinstance(events, list):
                 await save_json_file(state_path, new_state)
                 continue

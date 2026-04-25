@@ -400,6 +400,16 @@ def get_ticket_copy(ticket_id: int) -> Optional[Dict[str, Any]]:
     return dict(item) if isinstance(item, dict) else None
 
 
+def get_user_open_tickets(uid: int) -> list:
+    tickets = IMPORTANT_DATA_SNAPSHOT.get("tickets")
+    if not isinstance(tickets, dict):
+        return []
+    return [
+        dict(t) for t in tickets.values()
+        if isinstance(t, dict) and int(t.get("user_id", 0) or 0) == uid and str(t.get("status", "open")) != "closed"
+    ]
+
+
 def get_dns_status_cache(server_key: str) -> Optional[Dict[str, Any]]:
     dns = IMPORTANT_DATA_SNAPSHOT.get("dns_status")
     if not isinstance(dns, dict):

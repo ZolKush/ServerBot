@@ -476,12 +476,7 @@ async def maint_restart_notify(context: ContextTypes.DEFAULT_TYPE) -> None:
     if not admin_ids:
         return
     text = _maint_restart_text(maint) + "\n\nОткройте «/maint» для управления."
-    kb = _maint_notice_menu_kb()
-    for uid in admin_ids:
-        try:
-            await context.bot.send_message(chat_id=uid, text=text, parse_mode=ParseMode.HTML, reply_markup=kb)
-        except Exception as e:
-            logger.warning("Не удалось отправить админу %s: %s", uid, e)
+    await send_to_many(context, admin_ids, text, reply_markup=_maint_notice_menu_kb())
 
 
 async def maint_schedule_tick(context: ContextTypes.DEFAULT_TYPE) -> None:

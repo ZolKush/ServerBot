@@ -4,6 +4,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from ..storage import authorized_users_snapshot
 from .common import breadcrumbs, display_name_from_meta, format_dt_human, get_user_meta, html_escape
+from .subscription import SUBSCRIPTION_TEXT_KEY
 
 USER_FILTER_ALL = "all"
 USER_FILTER_ACTIVE = "active"
@@ -81,7 +82,7 @@ def users_list_kb(active_filter: str = USER_FILTER_ALL) -> InlineKeyboardMarkup:
         is_paid = bool(meta.get("is_paid", False))
         items.append((role, enabled, is_paid, name.lower(), uid, name))
 
-    items.sort(key=lambda x: (0 if x[0] == "user" else 1, x[3], x[4]))
+    items.sort(key=lambda x: (0 if x[0] == "admin" else 1, x[3], x[4]))
 
     row: List[InlineKeyboardButton] = []
     for role, enabled, is_paid, _, uid, name in items:
@@ -179,7 +180,7 @@ def format_user_card(meta: Dict[str, Any]) -> str:
     nm = " ".join([x for x in [meta.get("first_name"), meta.get("last_name")] if x]) or "-"
     auth_at = meta.get("auth_at") or "-"
     status = "активен" if meta.get("enabled", True) else "отключен"
-    has_subscription = bool(str(meta.get("subscription_text", "") or "").strip())
+    has_subscription = bool(str(meta.get(SUBSCRIPTION_TEXT_KEY, "") or "").strip())
     subscription_updated_at = meta.get("subscription_updated_at") or "-"
     auth_at_human = format_dt_human(auth_at)
     subscription_updated_at_human = format_dt_human(subscription_updated_at)

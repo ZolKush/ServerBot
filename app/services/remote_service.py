@@ -1,10 +1,10 @@
-import json
 import re
 import shlex
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from ..config import DOCKER_BIN, SSH_BIN, SUBPROC_MEDIUM_TIMEOUT, SUBPROC_SHORT_TIMEOUT, SUDO_BIN, TZ, UFW_BIN, logger
+from .docker_service import _parse_docker_inspect_json
 from .system_service import Fail2banEvent, _fmt_bytes_binary, _parse_ufw_rules, parse_fail2ban_events, run_exec
 
 _OUT_BEGIN = "__MBOT_OUT_BEGIN_43e1f3c4__"
@@ -209,6 +209,8 @@ fi
     rc, out, _ = await ssh_run_shell(ssh_target, shell, timeout=max(SUBPROC_MEDIUM_TIMEOUT, SUBPROC_SHORT_TIMEOUT) + 4)
     if rc != 0 and not out.strip():
         return "н/д", "н/д", "н/д", [(n, False, "ssh ошибка", "-") for n in name_list], "н/д", [], [], []
+    if rc != 0:
+        logger.debug("remote_status_bundle: rc=%s for %s, partial output present", rc, ssh_target)
 
     sec = _split_sections(out)
     up = _parse_uptime_from_proc(sec.get(_SEC_UPTIME, "") or "") or "н/д"
@@ -256,53 +258,7 @@ async def remote_docker_inspect_summary(ssh_target: str, name: str) -> str:
             break
     if rc != 0:
         return f"docker inspect error: {err.strip() or out.strip() or 'н/д'}"
-    try:
-        data = json.loads(out)
-        if not isinstance(data, list) or not data:
-            return "inspect: пустой ответ"
-        c = data[0]
-        image = ((c.get("Config") or {}).get("Image")) or "-"
-        state = c.get("State") or {}
-        status = state.get("Status") or "-"
-        running = state.get("Running")
-        started = state.get("StartedAt") or "-"
-        finished = state.get("FinishedAt") or "-"
-        exit_code = state.get("ExitCode")
-        error = (state.get("Error") or "").strip() or "-"
-        health = ((state.get("Health") or {}).get("Status")) or "-"
-        restart_count = c.get("RestartCount")
-        ports = ((c.get("NetworkSettings") or {}).get("Ports")) or {}
-
-        port_items: List[str] = []
-        if isinstance(ports, dict):
-            for k, v in ports.items():
-                if v is None:
-                    port_items.append(f"{k}->-")
-                elif isinstance(v, list) and v:
-                    b = v[0]
-                    port_items.append(f"{k}->{b.get('HostIp', '')}:{b.get('HostPort', '')}")
-                else:
-                    port_items.append(f"{k}")
-        lines: List[str] = [
-            f"Container: {name}",
-            f"Image: {image}",
-            f"State: {status} (running={running})",
-            f"Health: {health}",
-        ]
-        if restart_count is not None:
-            lines.append(f"RestartCount: {restart_count}")
-        if exit_code is not None:
-            lines.append(f"ExitCode: {exit_code}")
-        lines.append(f"StartedAt: {started}")
-        if status not in ("running", "up"):
-            lines.append(f"FinishedAt: {finished}")
-        if error and error != "-":
-            lines.append(f"Error: {error}")
-        if port_items:
-            lines.append("Ports: " + ", ".join(port_items))
-        return "\n".join(lines)
-    except Exception as e:
-        return f"inspect parse error: {e}"
+    return _parse_docker_inspect_json(name, out)
 
 
 async def remote_docker_logs_tail(ssh_target: str, name: str, tail: int) -> str:

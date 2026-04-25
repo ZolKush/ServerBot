@@ -257,7 +257,8 @@ def _maint_panel_text(maint: Dict[str, Any]) -> str:
         lines.append(f"• Старт: <code>{html_escape(_fmt_dt_short(started_dt))}</code> ({html_escape(TZ_NAME)})")
     if end_dt:
         lines.append(f"• Окончание: <code>{html_escape(_fmt_dt_short(end_dt))}</code> ({html_escape(TZ_NAME)})")
-    lines.append("\nВыберите действие:")
+    lines.append("")
+    lines.append("Выберите действие:")
     return "\n".join(lines)
 
 
