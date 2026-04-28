@@ -16,3 +16,11 @@ data/
 .idea/
 __pycache__/
 *.py[cod]
+
+# local-only / dev-only artifacts (not deployed to server)
+app/__main__.py
+app/requirements-dev.txt
+pyproject.toml
+
+# Claude Code local settings
+**/settings.local.json
