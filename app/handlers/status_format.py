@@ -5,14 +5,7 @@ from .status_models import StatusSnapshot
 
 
 def _normalize_memory_display(raw: str) -> str:
-    s = (raw or "").strip()
-    if s.lower().startswith("ram:"):
-        s = s.split(":", 1)[1].strip()
-    if ";" in s:
-        s = s.split(";", 1)[0].strip()
-    if " (" in s:
-        s = s.split(" (", 1)[0].strip()
-    return s or "н/д"
+    return (raw or "").strip() or "н/д"
 
 
 def _normalize_disk_display(raw: str) -> str:

@@ -46,5 +46,4 @@ def configure_logging(*, level: str | None = None, use_json: bool | None = None,
     root._maintbot_configured = True  # type: ignore[attr-defined]
 
 
-configure_logging()
 logger = logging.getLogger("maint-bot")

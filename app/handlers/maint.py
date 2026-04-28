@@ -7,6 +7,7 @@ from telegram.constants import ParseMode
 from telegram.ext import ContextTypes, ConversationHandler
 
 from ..config import TZ, logger
+from ..models import Maintenance, ScheduledMaintenance
 from ..storage import (
     clear_scheduled_maintenance_record,
     get_active_maintenance,
@@ -20,12 +21,12 @@ from .maint_helpers import (
     MAINT_SCOPE_ALL,
     _build_maint_record,
     _build_scheduled_maint_record,
+    _maint_active_reminder_text,
     _maint_control_kb,
     _maint_end_confirm_kb,
     _maint_end_notice,
     _maint_extend_notice,
     _maint_panel_text,
-    _maint_restart_text,
     _maint_scheduled_soon_notice,
     _maint_scheduled_start_notice,
     _normalize_scope,
@@ -412,7 +413,8 @@ async def maint_end_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     author = display_name(update)
-    notice = _maint_end_notice(maint, author)
+    ended_at = datetime.now(TZ)
+    notice = _maint_end_notice(maint, author, ended_at=ended_at)
     author_id = get_user_id(update)
     (users_ok, users_fail), (admins_ok, admins_fail) = await _send_maint_notice_with_admin_copy(
         context,
@@ -475,7 +477,7 @@ async def maint_restart_notify(context: ContextTypes.DEFAULT_TYPE) -> None:
     admin_ids = authorized_ids(role_filter="admin", exclude=set())
     if not admin_ids:
         return
-    text = _maint_restart_text(maint) + "\n\nОткройте «/maint» для управления."
+    text = _maint_active_reminder_text(maint) + "\n\nОткройте «/maint» для управления."
     await send_to_many(context, admin_ids, text, reply_markup=_maint_notice_menu_kb())
 
 
@@ -491,6 +493,11 @@ async def maint_schedule_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.warning("Scheduled maintenance has invalid timestamps, clearing record")
         await clear_scheduled_maintenance_record()
         return
+
+    if start_at.tzinfo is None:
+        start_at = start_at.replace(tzinfo=TZ)
+    if end_at.tzinfo is None:
+        end_at = end_at.replace(tzinfo=TZ)
 
     now = datetime.now(TZ)
 
@@ -512,6 +519,15 @@ async def maint_schedule_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
         scheduled = get_scheduled_maintenance() or scheduled
 
     if now >= start_at and not bool(scheduled.get("notified_start", False)):
+        active = get_active_maintenance()
+        if active:
+            logger.info(
+                "Scheduled maintenance %s deferred: another maintenance %s is active",
+                scheduled.get("id"),
+                active.get("id"),
+            )
+            return
+
         notice = _maint_scheduled_start_notice(scheduled)
         author_id = scheduled.get("author_id")
         await _send_maint_notice_with_admin_copy(context, author_id=author_id if isinstance(author_id, int) else None, text=notice)
@@ -520,10 +536,8 @@ async def maint_schedule_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
             cur = dict(getattr(cfg, "scheduled_maintenance", {}) or {})
             if str(cur.get("id") or "") != str(scheduled.get("id") or ""):
                 return cur
-            if getattr(cfg, "maintenance", {}) and getattr(cfg, "maintenance", {}).get("active"):
-                cur["notified_start"] = True
-                cur["updated_at"] = now.isoformat()
-                cfg.scheduled_maintenance = {}
+            existing = getattr(cfg, "maintenance", {}) or {}
+            if isinstance(existing, dict) and existing.get("active"):
                 return cur
             cfg.maintenance = _scheduled_to_active_record(cur)
             cfg.scheduled_maintenance = {}

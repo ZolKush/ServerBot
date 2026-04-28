@@ -100,8 +100,6 @@ def users_list_kb(active_filter: str = USER_FILTER_ALL) -> InlineKeyboardMarkup:
             row = []
     if row:
         buttons.append(row)
-    if not items:
-        buttons.append([InlineKeyboardButton("∅ Нет пользователей", callback_data="users:noop")])
     buttons.append([InlineKeyboardButton("🏠 Меню", callback_data="menu:home")])
     return InlineKeyboardMarkup(buttons)
 
@@ -139,7 +137,6 @@ def user_card_kb(uid: int) -> InlineKeyboardMarkup:
             InlineKeyboardButton("💾 Назначить подписку", callback_data=f"users:subassign:{uid}"),
             InlineKeyboardButton("📤 Отправить подписку", callback_data=f"users:subsend:{uid}"),
         ],
-        [InlineKeyboardButton("🪄 Обновить меню", callback_data=f"users:refresh:{uid}")],
     ]
 
     if role != "admin":

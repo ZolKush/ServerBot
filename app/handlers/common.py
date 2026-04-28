@@ -13,7 +13,17 @@ from telegram.constants import ChatType, ParseMode
 from telegram.error import BadRequest, NetworkError, RetryAfter, TimedOut
 from telegram.ext import ContextTypes, ConversationHandler
 
-from ..config import MENU_MAINT, MENU_STATUS, MENU_SUBSCRIPTION, MENU_TICKET, MENU_USERS, TZ, logger
+from ..config import (
+    BROADCAST_MAX_ATTEMPTS,
+    BROADCAST_MAX_CONCURRENCY,
+    MENU_MAINT,
+    MENU_STATUS,
+    MENU_SUBSCRIPTION,
+    MENU_TICKET,
+    MENU_USERS,
+    TZ,
+    logger,
+)
 from ..storage import authorized_users_snapshot, get_user_meta_copy
 
 
@@ -267,8 +277,9 @@ async def menu_home_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 def _clear_transient_user_context(context: ContextTypes.DEFAULT_TYPE) -> None:
+    transient_keys = {"selected_uid", "subscription_delivery_mode", "users_all_broadcast_text"}
     for key in tuple(context.user_data.keys()):
-        if key.startswith("ticket_") or key.startswith("maint_") or key in {"selected_uid", "subscription_delivery_mode"}:
+        if key.startswith("ticket_") or key.startswith("maint_") or key in transient_keys:
             context.user_data.pop(key, None)
 
 
@@ -311,9 +322,13 @@ async def send_to_many(
     text: str,
     *,
     reply_markup: Optional[InlineKeyboardMarkup] = None,
-    max_concurrency: int = 8,
-    max_attempts: int = 3,
+    max_concurrency: Optional[int] = None,
+    max_attempts: Optional[int] = None,
 ) -> SendManyReport:
+    if max_concurrency is None:
+        max_concurrency = BROADCAST_MAX_CONCURRENCY
+    if max_attempts is None:
+        max_attempts = BROADCAST_MAX_ATTEMPTS
     ids = sorted(set(int(uid) for uid in user_ids))
     if not ids:
         return SendManyReport()

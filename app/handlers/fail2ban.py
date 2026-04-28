@@ -7,9 +7,17 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
-from ..config import FAIL2BAN_STATE_PATH, SERVERS, TZ, logger
-from ..services.remote_service import remote_fail2ban_events_last_day, remote_fail2ban_stat, remote_tail_text_file
-from ..services.system_service import (
+from ..config import (
+    FAIL2BAN_DIGEST_MAX_BYTES,
+    FAIL2BAN_DIGEST_TAIL_LINES,
+    FAIL2BAN_STATE_PATH,
+    SERVER_KEY_PATTERN,
+    SERVERS,
+    TZ,
+    logger,
+)
+from ..services.remote_service import remote_fail2ban_events, remote_fail2ban_stat, remote_tail_text_file
+from ..services.system_fail2ban import (
     Fail2banEvent,
     fail2ban_stat_with_sudo_async,
     load_json_file,
@@ -32,14 +40,22 @@ def _f2b_menu_kb(server_key: str) -> InlineKeyboardMarkup:
 
 
 def _f2b_tail_kb(server_key: str, current: int) -> InlineKeyboardMarkup:
-    choices = [200, 600, 2000]
-    row: List[InlineKeyboardButton] = []
+    choices = [200, 600, 2000, 5000]
+    row1: List[InlineKeyboardButton] = []
+    row2: List[InlineKeyboardButton] = []
     for n in choices:
         label = f"{n} строк" + (" ✅" if n == current else "")
-        row.append(InlineKeyboardButton(label, callback_data=f"f2b:tail:{server_key}:{n}"))
-    return InlineKeyboardMarkup(
-        [row, [InlineKeyboardButton("🔙 Назад", callback_data=f"f2b:menu:{server_key}")], [InlineKeyboardButton("🏠 Меню", callback_data="menu:home")]]
-    )
+        button = InlineKeyboardButton(label, callback_data=f"f2b:tail:{server_key}:{n}")
+        if len(row1) < 2:
+            row1.append(button)
+        else:
+            row2.append(button)
+    rows = [row1]
+    if row2:
+        rows.append(row2)
+    rows.append([InlineKeyboardButton("🔙 Назад", callback_data=f"f2b:menu:{server_key}")])
+    rows.append([InlineKeyboardButton("🏠 Меню", callback_data="menu:home")])
+    return InlineKeyboardMarkup(rows)
 
 
 def _f2b_digest_kb(server_key: str) -> InlineKeyboardMarkup:
@@ -56,12 +72,12 @@ def _fmt_dt(dt: datetime) -> str:
 
 
 def _parse_server_key(data: str, action: str) -> Optional[str]:
-    m = re.fullmatch(rf"f2b:{action}:([a-z0-9_-]{{1,12}})", data or "")
+    m = re.fullmatch(rf"f2b:{action}:({SERVER_KEY_PATTERN})", data or "")
     return m.group(1) if m else None
 
 
 def _parse_server_tail(data: str) -> Optional[tuple[str, int]]:
-    m = re.fullmatch(r"f2b:tail:([a-z0-9_-]{1,12}):(\d{1,5})", data or "")
+    m = re.fullmatch(rf"f2b:tail:({SERVER_KEY_PATTERN}):(\d{{1,5}})", data or "")
     if not m:
         return None
     return m.group(1), int(m.group(2))
@@ -90,9 +106,15 @@ async def _daily_digest_events_for_server(server_key: str, since: datetime, unti
         return None, "server_not_found"
     try:
         if srv.mode == "ssh":
-            events = await remote_fail2ban_events_last_day(srv.ssh_target, srv.fail2ban_log_path)
+            events = await remote_fail2ban_events(
+                srv.ssh_target, srv.fail2ban_log_path, n_lines=FAIL2BAN_DIGEST_TAIL_LINES
+            )
         else:
-            raw_tail = await tail_text_file_with_sudo_async(srv.fail2ban_log_path, n_lines=20000, max_bytes=3_000_000)
+            raw_tail = await tail_text_file_with_sudo_async(
+                srv.fail2ban_log_path,
+                n_lines=FAIL2BAN_DIGEST_TAIL_LINES,
+                max_bytes=FAIL2BAN_DIGEST_MAX_BYTES,
+            )
             events = parse_fail2ban_events(raw_tail.splitlines())
         return [e for e in events if since <= e.ts <= until], None
     except FileNotFoundError:
@@ -295,11 +317,17 @@ async def f2b_digest_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     since = until - timedelta(days=1)
     try:
         if srv.mode == "ssh":
-            events = await remote_fail2ban_events_last_day(srv.ssh_target, srv.fail2ban_log_path)
+            events = await remote_fail2ban_events(
+                srv.ssh_target, srv.fail2ban_log_path, n_lines=FAIL2BAN_DIGEST_TAIL_LINES
+            )
         else:
-            raw_tail = await tail_text_file_with_sudo_async(srv.fail2ban_log_path, n_lines=20000, max_bytes=3_000_000)
+            raw_tail = await tail_text_file_with_sudo_async(
+                srv.fail2ban_log_path,
+                n_lines=FAIL2BAN_DIGEST_TAIL_LINES,
+                max_bytes=FAIL2BAN_DIGEST_MAX_BYTES,
+            )
             events = parse_fail2ban_events(raw_tail.splitlines())
-            events = [e for e in events if since <= e.ts <= until]
+        events = [e for e in events if since <= e.ts <= until]
         payload = f"🌍 <b>Сервер:</b> {html_escape(srv.label)}\n" + build_fail2ban_digest_text(events, since=since, until=until)
     except FileNotFoundError:
         payload = (
@@ -349,7 +377,12 @@ async def fail2ban_daily_digest(context: ContextTypes.DEFAULT_TYPE) -> None:
             new_state = {"updated_at": until.isoformat(), "server_key": server_key}
 
             if not isinstance(events, list):
-                await save_json_file(state_path, new_state)
+                logger.warning(
+                    "fail2ban_daily_digest %s (%s) skipped: parser returned non-list (%s); state preserved",
+                    server_key,
+                    srv.label,
+                    type(events).__name__,
+                )
                 continue
 
             ban_events = [e for e in events if e.action in ("Ban", "Restore Ban")]

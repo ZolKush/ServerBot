@@ -25,6 +25,8 @@ _SECRET_KEYS = ("BOT_TOKEN", "AUTH_PASSWORD", "ADMIN_PASSWORD")
 _SSH_TARGET_RE = re.compile(r"^[A-Za-z0-9_.:@\-\[\]]{1,255}$")
 _SSH_TARGET_WITH_PORT_RE = re.compile(r"^[A-Za-z0-9_.@\-\[\]:]+:(\d{1,5})$")
 _SERVER_CODE_RE = re.compile(r"[^a-z0-9_-]+")
+_CONTAINER_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.\-]{0,62}$")
+SERVER_KEY_PATTERN = r"[a-z0-9_-]{1,12}"
 _COUNTRY_NAMES = {
     "DE": "Germany",
     "NL": "Netherlands",
@@ -274,32 +276,47 @@ class AppSettings(BaseSettings):
     IMPORTANT_DATA_PATH: str = str(ROOT_DIR / "data" / "important_data.json")
     CONFIG_PATH: str = str(ROOT_DIR / "data" / "config.json")
 
-    MONITOR_CONTAINERS: List[str] = Field(default_factory=lambda: ["remnawave", "remnawave-db", "remnawave-redis", "remnanode", "remnawave-nginx"])
-    EXPECTED_A_IP: str = "95.164.47.185"
-    CHECK_A_DOMAINS: List[str] = Field(default_factory=lambda: ["nxc.ittelecom.pl", "xvui.ittelecom.pl", "supsub.ittelecom.pl"])
+    MONITOR_CONTAINERS: List[str] = Field(default_factory=list)
+    EXPECTED_A_IP: str = ""
+    CHECK_A_DOMAINS: List[str] = Field(default_factory=list)
     DNS_RESOLVERS: List[str] = Field(default_factory=lambda: ["1.1.1.1", "8.8.8.8", "77.88.8.8"])
 
     FAIL2BAN_LOG_PATH: str = "/var/log/fail2ban.log"
     FAIL2BAN_STATE_PATH: str = ""
     FAIL2BAN_DAILY_AT: str = "12:00"
+    FAIL2BAN_DIGEST_TAIL_LINES: int = 20000
+    FAIL2BAN_DIGEST_MAX_BYTES: int = 3_000_000
     DNS_DAILY_REFRESH_AT: str = "03:05"
     DNS_STARTUP_REFRESH_DELAY_SEC: int = 5
     MAINT_RESTART_NOTIFY_DELAY_SEC: int = 2
+    MAINT_RESTART_REMINDER_INTERVAL_SEC: int = 600
 
     SUBPROC_SHORT_TIMEOUT: int = 3
     SUBPROC_MEDIUM_TIMEOUT: int = 8
 
-    LOCAL_SERVER_CODE: str = "nl"
-    LOCAL_SERVER_LABEL: str = "Netherlands"
+    SSH_STRICT_HOST_KEY_CHECKING: str = "accept-new"
+    SSH_KNOWN_HOSTS_FILE: str = ""
+
+    BROADCAST_MAX_CONCURRENCY: int = 8
+    BROADCAST_MAX_ATTEMPTS: int = 3
+
+    AUTH_FAIL_WINDOW_SEC: int = 300
+    AUTH_MAX_FAILS_IN_WINDOW: int = 5
+    AUTH_LOCKOUT_SEC: int = 600
+    AUTH_PRUNE_INTERVAL_SEC: int = 300
+    ERROR_NOTIFY_INTERVAL_SEC: int = 300
+
+    LOCAL_SERVER_CODE: str = "local"
+    LOCAL_SERVER_LABEL: str = "Local server"
     LOCAL_SERVER_FLAG: str = ""
 
     REMOTE_SERVER_ENABLED: bool = True
-    REMOTE_SERVER_CODE: str = "de"
-    REMOTE_SERVER_LABEL: str = "Germany"
+    REMOTE_SERVER_CODE: str = "remote"
+    REMOTE_SERVER_LABEL: str = "Remote server"
     REMOTE_SERVER_FLAG: str = ""
     REMOTE_SERVER_SSH_TARGET: str = ""
-    REMOTE_SERVER_EXPECTED_A_IP: str = "144.31.111.77"
-    REMOTE_SERVER_CHECK_A_DOMAINS: List[str] = Field(default_factory=lambda: ["nextfiles.ittelecom.pl"])
+    REMOTE_SERVER_EXPECTED_A_IP: str = ""
+    REMOTE_SERVER_CHECK_A_DOMAINS: List[str] = Field(default_factory=list)
     REMOTE_SERVER_FAIL2BAN_LOG_PATH: str = "/var/log/fail2ban.log"
     REMOTE_SERVER_MONITOR_CONTAINERS: List[str] = Field(default_factory=list)
 
@@ -339,6 +356,37 @@ class AppSettings(BaseSettings):
     @classmethod
     def _parse_domain_groups(cls, v: Any) -> List[List[str]]:
         return split_env_groups(v)
+
+    @field_validator("MONITOR_CONTAINERS", "REMOTE_SERVER_MONITOR_CONTAINERS", mode="after")
+    @classmethod
+    def _filter_container_names(cls, v: List[str]) -> List[str]:
+        valid: List[str] = []
+        for name in v:
+            nm = (name or "").strip()
+            if not nm:
+                continue
+            if _CONTAINER_NAME_RE.fullmatch(nm):
+                valid.append(nm)
+            else:
+                logger.warning("Invalid container name in config skipped: %s", nm)
+        return valid
+
+    @field_validator("REMOTE_SERVER_MONITOR_CONTAINERS_BY_SERVER", mode="after")
+    @classmethod
+    def _filter_container_groups(cls, v: List[List[str]]) -> List[List[str]]:
+        out: List[List[str]] = []
+        for group in v:
+            valid: List[str] = []
+            for name in group:
+                nm = (name or "").strip()
+                if not nm:
+                    continue
+                if _CONTAINER_NAME_RE.fullmatch(nm):
+                    valid.append(nm)
+                else:
+                    logger.warning("Invalid container name in config skipped: %s", nm)
+            out.append(valid)
+        return out
 
     @field_validator("TZ")
     @classmethod
@@ -390,10 +438,7 @@ class AppSettings(BaseSettings):
     @field_validator("LOCAL_SERVER_LABEL", "REMOTE_SERVER_LABEL", mode="before")
     @classmethod
     def _normalize_label(cls, v: Any) -> str:
-        s = str(v or "").strip()
-        if not s:
-            raise ValueError("empty server label")
-        return s
+        return str(v or "").strip()
 
     @field_validator("REMOTE_SERVER_SSH_TARGET", mode="before")
     @classmethod
@@ -407,12 +452,12 @@ class AppSettings(BaseSettings):
 
     @model_validator(mode="after")
     def _validate_server_codes(self) -> "AppSettings":
-        if self.REMOTE_SERVER_ENABLED and self.REMOTE_SERVER_SSH_TARGET.strip() and self.REMOTE_SERVER_CODE == self.LOCAL_SERVER_CODE:
-            raise ValueError("LOCAL_SERVER_CODE and REMOTE_SERVER_CODE must differ")
         targets = list(self.REMOTE_SERVER_SSH_TARGETS)
         if not targets and self.REMOTE_SERVER_SSH_TARGET.strip():
             targets = [self.REMOTE_SERVER_SSH_TARGET.strip()]
         if self.REMOTE_SERVER_ENABLED and targets:
+            if not self.REMOTE_SERVER_CODES and self.REMOTE_SERVER_CODE == self.LOCAL_SERVER_CODE:
+                raise ValueError("LOCAL_SERVER_CODE and REMOTE_SERVER_CODE must differ")
             total = len(targets)
             exact_order_fields = {
                 "REMOTE_SERVER_FLAGS": self.REMOTE_SERVER_FLAGS,
@@ -496,14 +541,24 @@ DNS_RESOLVERS = list(SETTINGS.DNS_RESOLVERS)
 
 DOCKER_BIN = resolve_bin("/usr/bin/docker", "docker")
 UFW_BIN = resolve_bin("/usr/sbin/ufw", "ufw")
-SUDO_BIN = resolve_bin("/usr/bin/sudo", "sudo")
+SUDO_BIN = shutil.which("sudo") or ""
 SSH_BIN = resolve_bin("/usr/bin/ssh", "ssh")
 
 FAIL2BAN_LOG_PATH = SETTINGS.FAIL2BAN_LOG_PATH.strip()
 FAIL2BAN_DAILY_AT = SETTINGS.FAIL2BAN_DAILY_AT.strip()
+FAIL2BAN_DIGEST_TAIL_LINES = int(SETTINGS.FAIL2BAN_DIGEST_TAIL_LINES)
+FAIL2BAN_DIGEST_MAX_BYTES = int(SETTINGS.FAIL2BAN_DIGEST_MAX_BYTES)
 DNS_DAILY_REFRESH_AT = SETTINGS.DNS_DAILY_REFRESH_AT.strip()
 DNS_STARTUP_REFRESH_DELAY_SEC = SETTINGS.DNS_STARTUP_REFRESH_DELAY_SEC
 MAINT_RESTART_NOTIFY_DELAY_SEC = SETTINGS.MAINT_RESTART_NOTIFY_DELAY_SEC
+MAINT_RESTART_REMINDER_INTERVAL_SEC = int(SETTINGS.MAINT_RESTART_REMINDER_INTERVAL_SEC)
+BROADCAST_MAX_CONCURRENCY = int(SETTINGS.BROADCAST_MAX_CONCURRENCY)
+BROADCAST_MAX_ATTEMPTS = int(SETTINGS.BROADCAST_MAX_ATTEMPTS)
+AUTH_FAIL_WINDOW_SEC = int(SETTINGS.AUTH_FAIL_WINDOW_SEC)
+AUTH_MAX_FAILS_IN_WINDOW = int(SETTINGS.AUTH_MAX_FAILS_IN_WINDOW)
+AUTH_LOCKOUT_SEC = int(SETTINGS.AUTH_LOCKOUT_SEC)
+AUTH_PRUNE_INTERVAL_SEC = int(SETTINGS.AUTH_PRUNE_INTERVAL_SEC)
+ERROR_NOTIFY_INTERVAL_SEC = int(SETTINGS.ERROR_NOTIFY_INTERVAL_SEC)
 LOG_LEVEL = SETTINGS.LOG_LEVEL
 LOG_JSON = bool(SETTINGS.LOG_JSON)
 LOCAL_SERVER_CODE = SETTINGS.LOCAL_SERVER_CODE
@@ -529,6 +584,9 @@ REMOTE_SERVER_LABELS = list(SETTINGS.REMOTE_SERVER_LABELS)
 
 SUBPROC_SHORT_TIMEOUT = SETTINGS.SUBPROC_SHORT_TIMEOUT
 SUBPROC_MEDIUM_TIMEOUT = SETTINGS.SUBPROC_MEDIUM_TIMEOUT
+
+SSH_STRICT_HOST_KEY_CHECKING = (SETTINGS.SSH_STRICT_HOST_KEY_CHECKING or "").strip() or "accept-new"
+SSH_KNOWN_HOSTS_FILE = (SETTINGS.SSH_KNOWN_HOSTS_FILE or "").strip()
 
 def _build_servers() -> Dict[str, ServerTarget]:
     local_flag = LOCAL_SERVER_FLAG or LOCAL_SERVER_CODE.upper()

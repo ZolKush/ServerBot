@@ -15,8 +15,6 @@ from .common import (
     get_user_id,
     get_user_meta,
     html_escape,
-    main_menu_inline_kb_for_admin,
-    main_menu_text,
     require_admin,
     send_to_many,
     show_main_menu,
@@ -82,27 +80,6 @@ def _subscription_mode_prompt(mode: str) -> str:
     )
 
 
-async def _refresh_user_dialog(context: ContextTypes.DEFAULT_TYPE, uid: int, meta: dict) -> tuple[int, int]:
-    markup = main_menu_inline_kb_for_admin(bool(meta.get("role") == "admin"))
-    menu_message = await context.bot.send_message(
-        chat_id=uid,
-        text=main_menu_text(bool(meta.get("role") == "admin")),
-        parse_mode=ParseMode.HTML,
-        reply_markup=markup,
-    )
-
-    deleted = 0
-    skipped = 0
-    start_id = max(1, int(menu_message.message_id) - 100)
-    for message_id in range(int(menu_message.message_id) - 1, start_id - 1, -1):
-        try:
-            await context.bot.delete_message(chat_id=uid, message_id=message_id)
-            deleted += 1
-        except Exception:
-            skipped += 1
-    return deleted, skipped
-
-
 @require_admin
 async def users_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -140,15 +117,6 @@ async def users_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
     m_filter = re.fullmatch(r"users:filter:(all|active|disabled|unpaid|admins)", data)
     if m_filter:
         active_filter = _set_users_filter(context, m_filter.group(1))
-        await q.edit_message_text(
-            users_list_title(active_filter),
-            parse_mode=ParseMode.HTML,
-            reply_markup=users_list_kb(active_filter),
-        )
-        return ADMIN_PICK
-
-    if data == "users:noop":
-        active_filter = _get_users_filter(context)
         await q.edit_message_text(
             users_list_title(active_filter),
             parse_mode=ParseMode.HTML,
@@ -267,6 +235,131 @@ async def users_all_msg_confirm(update: Update, context: ContextTypes.DEFAULT_TY
     return ADMIN_PICK
 
 
+_USER_ACTION_RE = re.compile(
+    r"^users:(?P<action>toggle|toggleapply|paid|paidapply|msg|nick|subassign|subsend):(?P<uid>\d+)$"
+)
+
+
+async def _back_to_user_list(q, context):
+    active_filter = _get_users_filter(context)
+    await q.edit_message_text(
+        users_list_title(active_filter),
+        parse_mode=ParseMode.HTML,
+        reply_markup=users_list_kb(active_filter),
+    )
+    return ADMIN_PICK
+
+
+async def _resolve_user_or_redirect(q, context, uid: int):
+    meta = get_user_meta(uid)
+    if meta:
+        return meta
+    active_filter = _get_users_filter(context)
+    await q.edit_message_text(
+        ui_error_text("пользователь не найден."),
+        reply_markup=users_list_kb(active_filter),
+    )
+    return None
+
+
+async def _action_toggle(q, context, uid: int, meta):
+    if meta.get("role") == "admin":
+        await q.edit_message_text(
+            format_user_card(meta) + "\n\n" + ui_warn_text("администраторов банить нельзя."),
+            parse_mode=ParseMode.HTML,
+            reply_markup=user_card_kb(uid),
+        )
+        return ADMIN_USER_MENU
+    action = "забанить" if bool(meta.get("enabled", True)) else "разбанить"
+    await q.edit_message_text(
+        format_user_card(meta) + f"\n\n{ui_warn_text(f'Подтвердите действие: {action}.')}",
+        parse_mode=ParseMode.HTML,
+        reply_markup=confirm_toggle_kb(uid, enabled_now=bool(meta.get("enabled", True))),
+    )
+    return ADMIN_USER_MENU
+
+
+async def _action_toggle_apply(update: Update, q, context, uid: int, meta):
+    if meta.get("role") == "admin":
+        await q.edit_message_text(
+            format_user_card(meta) + "\n\n" + ui_warn_text("администраторов банить нельзя."),
+            parse_mode=ParseMode.HTML,
+            reply_markup=user_card_kb(uid),
+        )
+        return ADMIN_USER_MENU
+    meta["enabled"] = not bool(meta.get("enabled", True))
+    updated = await upsert_user_meta(uid, meta)
+    logger.info(
+        "Admin user_id=%s toggled enabled=%s target_uid=%s",
+        get_user_id(update),
+        updated.get("enabled"),
+        uid,
+    )
+    await q.edit_message_text(
+        format_user_card(updated) + "\n\n" + ui_ok_text("Статус пользователя обновлён."),
+        parse_mode=ParseMode.HTML,
+        reply_markup=user_card_kb(uid),
+    )
+    return ADMIN_USER_MENU
+
+
+async def _action_paid(q, context, uid: int, meta):
+    suffix = "(снять оплату)." if bool(meta.get("is_paid", False)) else "(отметить оплачено)."
+    await q.edit_message_text(
+        format_user_card(meta)
+        + "\n\n"
+        + ui_warn_text("Подтвердите переключение оплаты " + suffix),
+        parse_mode=ParseMode.HTML,
+        reply_markup=confirm_paid_kb(uid, is_paid_now=bool(meta.get("is_paid", False))),
+    )
+    return ADMIN_USER_MENU
+
+
+async def _action_paid_apply(update: Update, q, context, uid: int, meta):
+    meta["is_paid"] = not bool(meta.get("is_paid", False))
+    updated = await upsert_user_meta(uid, meta)
+    logger.info(
+        "Admin user_id=%s toggled is_paid=%s target_uid=%s",
+        get_user_id(update),
+        updated.get("is_paid"),
+        uid,
+    )
+    await q.edit_message_text(
+        format_user_card(updated) + "\n\n" + ui_ok_text("Статус оплаты обновлён."),
+        parse_mode=ParseMode.HTML,
+        reply_markup=user_card_kb(uid),
+    )
+    return ADMIN_USER_MENU
+
+
+async def _action_msg(q, context, uid: int):
+    context.user_data["selected_uid"] = uid
+    await q.edit_message_text("Введите текст личного сообщения пользователю:")
+    return ADMIN_USER_MSG_TEXT
+
+
+async def _action_nick(q, context, uid: int):
+    context.user_data["selected_uid"] = uid
+    await q.edit_message_text("Введите никнейм (как должен отображаться в списке):")
+    return ADMIN_USER_NICK_TEXT
+
+
+async def _action_subscription(q, context, uid: int, mode: str):
+    context.user_data["selected_uid"] = uid
+    context.user_data["subscription_delivery_mode"] = mode
+    await q.edit_message_text(
+        _subscription_mode_prompt(mode),
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("⬅️ Назад", callback_data=f"users:user:{uid}")],
+                [InlineKeyboardButton("🏠 Меню", callback_data="menu:home")],
+            ]
+        ),
+    )
+    return ADMIN_USER_CFG_TEXT
+
+
 @require_admin
 async def users_user_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -276,153 +369,42 @@ async def users_user_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = q.data or ""
 
     if data == "users:back":
-        active_filter = _get_users_filter(context)
-        await q.edit_message_text(users_list_title(active_filter), parse_mode=ParseMode.HTML, reply_markup=users_list_kb(active_filter))
-        return ADMIN_PICK
+        return await _back_to_user_list(q, context)
 
-    m_toggle = re.fullmatch(r"users:toggle:(\d+)", data)
-    if m_toggle:
-        uid = int(m_toggle.group(1))
-        meta = get_user_meta(uid)
-        if not meta:
-            active_filter = _get_users_filter(context)
-            await q.edit_message_text(ui_error_text("пользователь не найден."), reply_markup=users_list_kb(active_filter))
+    m = _USER_ACTION_RE.fullmatch(data)
+    if m:
+        action = m.group("action")
+        uid = int(m.group("uid"))
+
+        if action == "msg":
+            return await _action_msg(q, context, uid)
+        if action == "nick":
+            return await _action_nick(q, context, uid)
+        if action == "subassign":
+            return await _action_subscription(q, context, uid, "assign")
+        if action == "subsend":
+            return await _action_subscription(q, context, uid, "send")
+
+        meta = await _resolve_user_or_redirect(q, context, uid)
+        if meta is None:
             return ADMIN_PICK
 
-        if meta.get("role") == "admin":
-            await q.edit_message_text(
-                format_user_card(meta) + "\n\n" + ui_warn_text("администраторов банить нельзя."),
-                parse_mode=ParseMode.HTML,
-                reply_markup=user_card_kb(uid),
-            )
-            return ADMIN_USER_MENU
-        action = "забанить" if bool(meta.get("enabled", True)) else "разбанить"
-        await q.edit_message_text(
-            format_user_card(meta) + f"\n\n{ui_warn_text(f'Подтвердите действие: {action}.')}",
-            parse_mode=ParseMode.HTML,
-            reply_markup=confirm_toggle_kb(uid, enabled_now=bool(meta.get("enabled", True))),
-        )
-        return ADMIN_USER_MENU
+        if action == "toggle":
+            return await _action_toggle(q, context, uid, meta)
+        if action == "toggleapply":
+            return await _action_toggle_apply(update, q, context, uid, meta)
+        if action == "paid":
+            return await _action_paid(q, context, uid, meta)
+        if action == "paidapply":
+            return await _action_paid_apply(update, q, context, uid, meta)
 
-    m_toggle_apply = re.fullmatch(r"users:toggleapply:(\d+)", data)
-    if m_toggle_apply:
-        uid = int(m_toggle_apply.group(1))
-        meta = get_user_meta(uid)
-        if not meta:
-            active_filter = _get_users_filter(context)
-            await q.edit_message_text(ui_error_text("пользователь не найден."), reply_markup=users_list_kb(active_filter))
-            return ADMIN_PICK
-        if meta.get("role") == "admin":
-            await q.edit_message_text(
-                format_user_card(meta) + "\n\n" + ui_warn_text("администраторов банить нельзя."),
-                parse_mode=ParseMode.HTML,
-                reply_markup=user_card_kb(uid),
-            )
-            return ADMIN_USER_MENU
-        meta["enabled"] = not bool(meta.get("enabled", True))
-        updated = await upsert_user_meta(uid, meta)
-        logger.info("Admin user_id=%s toggled enabled=%s target_uid=%s", get_user_id(update), updated.get("enabled"), uid)
-        await q.edit_message_text(
-            format_user_card(updated) + "\n\n" + ui_ok_text("Статус пользователя обновлён."),
-            parse_mode=ParseMode.HTML,
-            reply_markup=user_card_kb(uid),
-        )
-        return ADMIN_USER_MENU
-
-    m_paid = re.fullmatch(r"users:paid:(\d+)", data)
-    if m_paid:
-        uid = int(m_paid.group(1))
-        meta = get_user_meta(uid)
-        if not meta:
-            active_filter = _get_users_filter(context)
-            await q.edit_message_text(ui_error_text("пользователь не найден."), reply_markup=users_list_kb(active_filter))
-            return ADMIN_PICK
-        await q.edit_message_text(
-            format_user_card(meta)
-            + "\n\n"
-            + ui_warn_text(
-                "Подтвердите переключение оплаты "
-                + ("(снять оплату)." if bool(meta.get("is_paid", False)) else "(отметить оплачено).")
-            ),
-            parse_mode=ParseMode.HTML,
-            reply_markup=confirm_paid_kb(uid, is_paid_now=bool(meta.get("is_paid", False))),
-        )
-        return ADMIN_USER_MENU
-
-    m_paid_apply = re.fullmatch(r"users:paidapply:(\d+)", data)
-    if m_paid_apply:
-        uid = int(m_paid_apply.group(1))
-        meta = get_user_meta(uid)
-        if not meta:
-            active_filter = _get_users_filter(context)
-            await q.edit_message_text(ui_error_text("пользователь не найден."), reply_markup=users_list_kb(active_filter))
-            return ADMIN_PICK
-        meta["is_paid"] = not bool(meta.get("is_paid", False))
-        updated = await upsert_user_meta(uid, meta)
-        logger.info("Admin user_id=%s toggled is_paid=%s target_uid=%s", get_user_id(update), updated.get("is_paid"), uid)
-        await q.edit_message_text(
-            format_user_card(updated) + "\n\n" + ui_ok_text("Статус оплаты обновлён."),
-            parse_mode=ParseMode.HTML,
-            reply_markup=user_card_kb(uid),
-        )
-        return ADMIN_USER_MENU
-
-    m_refresh = re.fullmatch(r"users:refresh:(\d+)", data)
-    if m_refresh:
-        uid = int(m_refresh.group(1))
-        meta = get_user_meta(uid)
-        if not meta:
-            active_filter = _get_users_filter(context)
-            await q.edit_message_text(ui_error_text("пользователь не найден."), reply_markup=users_list_kb(active_filter))
-            return ADMIN_PICK
-        deleted, skipped = await _refresh_user_dialog(context, uid, meta)
-        logger.info("Admin user_id=%s refreshed menu target_uid=%s deleted=%s skipped=%s", get_user_id(update), uid, deleted, skipped)
-        await q.edit_message_text(
-            format_user_card(meta) + "\n\n" + ui_ok_text(f"Меню обновлено, очищено сообщений: {deleted}, пропущено: {skipped}"),
-            parse_mode=ParseMode.HTML,
-            reply_markup=user_card_kb(uid),
-        )
-        return ADMIN_USER_MENU
-
-    m_msg = re.fullmatch(r"users:msg:(\d+)", data)
-    if m_msg:
-        context.user_data["selected_uid"] = int(m_msg.group(1))
-        await q.edit_message_text("Введите текст личного сообщения пользователю:")
-        return ADMIN_USER_MSG_TEXT
-
-    m_nick = re.fullmatch(r"users:nick:(\d+)", data)
-    if m_nick:
-        context.user_data["selected_uid"] = int(m_nick.group(1))
-        await q.edit_message_text("Введите никнейм (как должен отображаться в списке):")
-        return ADMIN_USER_NICK_TEXT
-
-    m_subscription = re.fullmatch(r"users:(subassign|subsend):(\d+)", data)
-    if m_subscription:
-        action, uid_s = m_subscription.group(1), m_subscription.group(2)
-        uid = int(uid_s)
-        context.user_data["selected_uid"] = uid
-        context.user_data["subscription_delivery_mode"] = "assign" if action == "subassign" else "send"
-        await q.edit_message_text(
-            _subscription_mode_prompt(str(context.user_data["subscription_delivery_mode"])),
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup(
-                [
-                    [InlineKeyboardButton("⬅️ Назад", callback_data=f"users:user:{uid}")],
-                    [InlineKeyboardButton("🏠 Меню", callback_data="menu:home")],
-                ]
-            ),
-        )
-        return ADMIN_USER_CFG_TEXT
-
-    uid = context.user_data.get("selected_uid")
-    meta = get_user_meta(uid) if isinstance(uid, int) else None
+    selected = context.user_data.get("selected_uid")
+    meta = get_user_meta(selected) if isinstance(selected, int) else None
     if meta:
-        await q.edit_message_text(format_user_card(meta), parse_mode=ParseMode.HTML, reply_markup=user_card_kb(uid))
+        await q.edit_message_text(format_user_card(meta), parse_mode=ParseMode.HTML, reply_markup=user_card_kb(selected))
         return ADMIN_USER_MENU
 
-    active_filter = _get_users_filter(context)
-    await q.edit_message_text(users_list_title(active_filter), parse_mode=ParseMode.HTML, reply_markup=users_list_kb(active_filter))
-    return ADMIN_PICK
+    return await _back_to_user_list(q, context)
 
 
 @require_admin

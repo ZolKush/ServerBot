@@ -6,6 +6,7 @@ from uuid import uuid4
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from ..config import SERVERS, TZ, TZ_NAME
+from ..models import Maintenance, ScheduledMaintenance
 from .common import html_escape
 
 MAINT_SCOPE_ALL = "all"
@@ -77,6 +78,8 @@ def parse_hhmm(text: str) -> Optional[Tuple[int, int]]:
         return None
     hh, mm = int(m.group(1)), int(m.group(2))
     if hh > MAX_MAINT_HOURS:
+        return None
+    if (hh * 60 + mm) > MAX_MAINT_HOURS * 60:
         return None
     return hh, mm
 
@@ -153,11 +156,11 @@ def _build_maint_record(scope: str, urgency: str, hh: int, mm: int, author_id: O
     duration_min = _hhmm_to_minutes(hh, mm)
     expected_end = now + timedelta(minutes=duration_min)
     maint_id = uuid4().hex
-    return {
+    record: Maintenance = {
         "id": maint_id,
         "active": True,
         "scope": _normalize_scope(scope),
-        "urgency": urgency,
+        "urgency": urgency,  # type: ignore[typeddict-item]
         "duration_min": duration_min,
         "started_at": now.isoformat(),
         "expected_end": expected_end.isoformat(),
@@ -165,6 +168,7 @@ def _build_maint_record(scope: str, urgency: str, hh: int, mm: int, author_id: O
         "author_name": author_name,
         "updated_at": now.isoformat(),
     }
+    return record
 
 
 def _build_scheduled_maint_record(
@@ -173,10 +177,10 @@ def _build_scheduled_maint_record(
     end_at: datetime,
     author_id: Optional[int],
     author_name: str,
-) -> Dict[str, Any]:
+) -> ScheduledMaintenance:
     duration_min = max(1, int((end_at - start_at).total_seconds() // 60))
     now = datetime.now(TZ)
-    return {
+    record: ScheduledMaintenance = {
         "id": uuid4().hex,
         "scope": _normalize_scope(scope),
         "urgency": "planned",
@@ -190,13 +194,14 @@ def _build_scheduled_maint_record(
         "notified_before": False,
         "notified_start": False,
     }
+    return record
 
 
-def _scheduled_to_active_record(scheduled: Dict[str, Any]) -> Dict[str, Any]:
+def _scheduled_to_active_record(scheduled: ScheduledMaintenance) -> Maintenance:
     start_at = datetime.now(TZ)
     duration_min = int(scheduled.get("duration_min", 0) or 0)
     expected_end = start_at + timedelta(minutes=max(duration_min, 1))
-    return {
+    record: Maintenance = {
         "id": str(scheduled.get("id") or uuid4().hex),
         "active": True,
         "scope": _normalize_scope(str(scheduled.get("scope") or MAINT_SCOPE_ALL)),
@@ -208,6 +213,7 @@ def _scheduled_to_active_record(scheduled: Dict[str, Any]) -> Dict[str, Any]:
         "author_name": scheduled.get("author_name") or "администратор",
         "updated_at": start_at.isoformat(),
     }
+    return record
 
 
 def _maint_control_kb(maint_id: str) -> InlineKeyboardMarkup:
@@ -303,8 +309,9 @@ def _maint_extend_notice(maint: Dict[str, Any], hh: int, mm: int, author: str) -
     )
 
 
-def _maint_end_notice(maint: Dict[str, Any], author: str) -> str:
-    ended_at = datetime.now(TZ)
+def _maint_end_notice(maint: Dict[str, Any], author: str, ended_at: Optional[datetime] = None) -> str:
+    if ended_at is None:
+        ended_at = datetime.now(TZ)
     scope = maint.get("scope", MAINT_SCOPE_ALL)
     return (
         "✅ <b>Техработы завершены</b>\n"
@@ -315,8 +322,8 @@ def _maint_end_notice(maint: Dict[str, Any], author: str) -> str:
     )
 
 
-def _maint_restart_text(maint: Dict[str, Any]) -> str:
-    return "♻️ <b>Бот перезапущен</b>\n\n" + _maint_panel_text(maint)
+def _maint_active_reminder_text(maint: Dict[str, Any]) -> str:
+    return "🛠️ <b>Напоминание: техработы активны</b>\n\n" + _maint_panel_text(maint)
 
 
 def _maint_scheduled_soon_notice(scheduled: Dict[str, Any]) -> str:

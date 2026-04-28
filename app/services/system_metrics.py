@@ -85,17 +85,9 @@ async def meminfo() -> str:
         mem_total_kb = kv.get("MemTotal", 0)
         mem_avail_kb = kv.get("MemAvailable", kv.get("MemFree", 0))
         mem_used_kb = max(mem_total_kb - mem_avail_kb, 0)
-
-        sw_total_kb = kv.get("SwapTotal", 0)
-        sw_free_kb = kv.get("SwapFree", 0)
-        sw_used_kb = max(sw_total_kb - sw_free_kb, 0)
-
-        def kb_to_mib(x: int) -> int:
-            return int(round(x / 1024.0))
-
-        mem_s = f"{kb_to_mib(mem_used_kb)} / {kb_to_mib(mem_total_kb)} MiB (avail {kb_to_mib(mem_avail_kb)} MiB)"
-        sw_s = f"{kb_to_mib(sw_used_kb)} / {kb_to_mib(sw_total_kb)} MiB" if sw_total_kb else "н/д"
-        return f"RAM: {mem_s}; Swap: {sw_s}"
+        used_mib = int(round(mem_used_kb / 1024.0))
+        total_mib = int(round(mem_total_kb / 1024.0))
+        return f"{used_mib} / {total_mib} MiB"
     except Exception:
         rc, out, _ = await run_exec(["free", "-m"], timeout=SUBPROC_SHORT_TIMEOUT)
         if rc != 0:
@@ -104,24 +96,12 @@ async def meminfo() -> str:
         if len(lines) < 2:
             return "н/д"
         mem = re.split(r"\s+", lines[1].strip())
-        swp = re.split(r"\s+", lines[2].strip()) if len(lines) > 2 else []
         try:
             mem_total = int(mem[1])
             mem_used = int(mem[2])
-            mem_free = int(mem[3])
-            mem_s = f"{mem_used} / {mem_total} MiB (free {mem_free} MiB)"
+            return f"{mem_used} / {mem_total} MiB"
         except Exception:
-            mem_s = "н/д"
-        try:
-            if swp and swp[0].lower().startswith("swap"):
-                sw_total = int(swp[1])
-                sw_used = int(swp[2])
-                sw_s = f"{sw_used} / {sw_total} MiB"
-            else:
-                sw_s = "н/д"
-        except Exception:
-            sw_s = "н/д"
-        return f"RAM: {mem_s}; Swap: {sw_s}"
+            return "н/д"
 
 
 async def disk_root() -> str:

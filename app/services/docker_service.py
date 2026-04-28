@@ -1,11 +1,15 @@
 import json
+import logging
 import re
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Sequence, Set, Tuple
 
 from ..config import DOCKER_BIN, SUBPROC_MEDIUM_TIMEOUT, SUDO_BIN
-from .system_service import run_exec
+from .system_process import run_exec
+
+logger = logging.getLogger("maint-bot")
 
 _CONTAINER_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.\-]{0,62}$")
+_REPORTED_MISSING: Set[str] = set()
 
 
 def is_valid_container_name(name: str) -> bool:
@@ -94,8 +98,12 @@ async def docker_containers(names: Sequence[str]) -> List[Tuple[str, bool, str, 
     for n in names:
         st = info.get(n)
         if st is None:
+            if n not in _REPORTED_MISSING:
+                logger.warning("Container '%s' from MONITOR_CONTAINERS not found in docker ps output", n)
+                _REPORTED_MISSING.add(n)
             result.append((n, False, "не найден", "-"))
         else:
+            _REPORTED_MISSING.discard(n)
             up = st.lower().startswith("up")
             result.append((n, up, st, "-"))
     return result

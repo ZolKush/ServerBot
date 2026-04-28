@@ -7,20 +7,14 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
-from ..config import DNS_RESOLVERS, SERVERS, ServerTarget, TZ, logger
+from ..config import DNS_RESOLVERS, SERVER_KEY_PATTERN, SERVERS, ServerTarget, TZ, logger
 from ..services.docker_service import docker_containers
 from ..services.remote_service import (
     remote_status_bundle,
 )
-from ..services.system_service import (
-    disk_root,
-    dns_supports_custom_resolver,
-    meminfo,
-    resolve_a_record,
-    ufw_status_basic,
-    ufw_summary_for_admin,
-    check_uptime,
-)
+from ..services.system_dns import dns_supports_custom_resolver, resolve_a_record
+from ..services.system_metrics import check_uptime, disk_root, meminfo
+from ..services.system_ufw import ufw_status_basic, ufw_summary_for_admin
 from ..storage import get_dns_status_cache, set_dns_status_cache
 from .common import breadcrumbs, html_escape, is_admin, now_str, require_admin, require_auth, ui_error_text, ui_info_text
 from .status_format import format_status_message, format_ufw_message
@@ -82,17 +76,17 @@ def _status_actions_kb(admin_mode: bool, server_key: str) -> InlineKeyboardMarku
 
 
 def _resolve_server_key_from_callback(data: str, prefix: str) -> Optional[str]:
-    m = re.fullmatch(prefix + r":([a-z0-9_-]{1,12})", data or "")
+    m = re.fullmatch(prefix + rf":({SERVER_KEY_PATTERN})", data or "")
     return m.group(1) if m else None
 
 
 def _parse_status_ufw_callback(data: str) -> Optional[str]:
-    m = re.fullmatch(r"status:ufw:([a-z0-9_-]{1,12})", data or "")
+    m = re.fullmatch(rf"status:ufw:({SERVER_KEY_PATTERN})", data or "")
     return m.group(1) if m else None
 
 
 def _parse_status_dnsrefresh_callback(data: str) -> Optional[str]:
-    m = re.fullmatch(r"status:dnsrefresh:([a-z0-9_-]{1,12})", data or "")
+    m = re.fullmatch(rf"status:dnsrefresh:({SERVER_KEY_PATTERN})", data or "")
     return m.group(1) if m else None
 
 
@@ -112,6 +106,14 @@ async def cmd_health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
     if q:
         await q.answer()
+    if not SERVERS:
+        no_servers_kb = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Меню", callback_data="menu:home")]])
+        text = ui_error_text("Сервер не настроен.")
+        if q:
+            await q.edit_message_text(text, reply_markup=no_servers_kb)
+        else:
+            await msg.reply_text(text, reply_markup=no_servers_kb)
+        return
     if len(SERVERS) > 1:
         if q:
             await q.edit_message_text(_status_pick_text(), parse_mode=ParseMode.HTML, reply_markup=_status_pick_kb())
@@ -225,7 +227,8 @@ async def _build_status_payload_local(admin_mode: bool, server: ServerTarget):
     if isinstance(disk, Exception):
         disk = "н/д"
     if isinstance(cont, Exception):
-        cont = [(n, False, f"ошибка: {_exc_brief(cont)}", "-") for n in server.monitor_containers]
+        cont_err = _exc_brief(cont)
+        cont = [(n, False, f"ошибка: {cont_err}", "-") for n in server.monitor_containers]
     if isinstance(ufw_data, Exception):
         ufw_data = ("н/д", [], [], []) if admin_mode else "н/д"
     if admin_mode:
@@ -415,7 +418,14 @@ async def build_status_message(
 ) -> Tuple[str, Optional[InlineKeyboardMarkup]]:
     server = get_server_target(server_key) if server_key else _default_server_target()
     if not server:
-        return "Сервер не настроен.", _status_pick_kb() if len(SERVERS) > 1 else None
+        if not SERVERS:
+            no_servers_kb = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Меню", callback_data="menu:home")]])
+            return ui_error_text("Сервер не настроен."), no_servers_kb
+        if len(SERVERS) > 1:
+            return ui_error_text("Сервер не найден."), _status_pick_kb()
+        return ui_error_text("Сервер не найден."), InlineKeyboardMarkup(
+            [[InlineKeyboardButton("🏠 Меню", callback_data="menu:home")]]
+        )
 
     snapshot = await _build_status_snapshot(update, server)
     markup = _status_actions_kb(admin_mode=snapshot.admin_mode, server_key=server.key)
