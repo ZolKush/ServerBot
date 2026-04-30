@@ -145,6 +145,7 @@ class ImportantData:
     maintenance: Dict[str, Any] = field(default_factory=dict)
     scheduled_maintenance: Dict[str, Any] = field(default_factory=dict)
     dns_status: Dict[str, Any] = field(default_factory=dict)
+    daily_node_status: Dict[str, Any] = field(default_factory=dict)
 
     @staticmethod
     def _migrate(raw: Dict[str, Any]) -> "ImportantData":
@@ -161,19 +162,31 @@ class ImportantData:
         dns_status = raw.get("dns_status", {})
         if not isinstance(dns_status, dict):
             dns_status = {}
+        daily_node_status = raw.get("daily_node_status", {})
+        if not isinstance(daily_node_status, dict):
+            daily_node_status = {}
         return ImportantData(
             tickets_seq=tickets_seq,
             tickets=tickets,
             maintenance=maintenance,
             scheduled_maintenance=scheduled_maintenance,
             dns_status=dns_status,
+            daily_node_status=daily_node_status,
         )
 
     @staticmethod
     def _needs_rewrite(raw: Dict[str, Any]) -> bool:
         if raw.get("schema_version") != IMPORTANT_DATA_SCHEMA_VERSION:
             return True
-        allowed_keys = {"schema_version", "tickets_seq", "tickets", "maintenance", "scheduled_maintenance", "dns_status"}
+        allowed_keys = {
+            "schema_version",
+            "tickets_seq",
+            "tickets",
+            "maintenance",
+            "scheduled_maintenance",
+            "dns_status",
+            "daily_node_status",
+        }
         return any(k not in allowed_keys for k in raw.keys())
 
     @classmethod
@@ -206,6 +219,7 @@ class ImportantData:
             "maintenance": self.maintenance,
             "scheduled_maintenance": self.scheduled_maintenance,
             "dns_status": self.dns_status,
+            "daily_node_status": self.daily_node_status,
         }
         tmp_path = Path(path)
         tmp_path.parent.mkdir(parents=True, exist_ok=True)
@@ -224,6 +238,7 @@ class ImportantData:
                 "maintenance": self.maintenance,
                 "scheduled_maintenance": self.scheduled_maintenance,
                 "dns_status": self.dns_status,
+                "daily_node_status": self.daily_node_status,
             },
         )
 
@@ -265,6 +280,7 @@ def _refresh_important_snapshot() -> None:
         "maintenance": dict(getattr(IMPORTANT_DATA, "maintenance", {}) or {}),
         "scheduled_maintenance": dict(getattr(IMPORTANT_DATA, "scheduled_maintenance", {}) or {}),
         "dns_status": dict(getattr(IMPORTANT_DATA, "dns_status", {}) or {}),
+        "daily_node_status": dict(getattr(IMPORTANT_DATA, "daily_node_status", {}) or {}),
     }
 
 
@@ -284,6 +300,7 @@ async def _reload_important_data_from_disk() -> None:
     IMPORTANT_DATA.maintenance = copy.deepcopy(latest.maintenance)
     IMPORTANT_DATA.scheduled_maintenance = copy.deepcopy(latest.scheduled_maintenance)
     IMPORTANT_DATA.dns_status = copy.deepcopy(latest.dns_status)
+    IMPORTANT_DATA.daily_node_status = copy.deepcopy(latest.daily_node_status)
 
 
 async def update_user_data(update_fn: Callable[[UserData], T]) -> T:
@@ -309,6 +326,7 @@ async def update_important_data(update_fn: Callable[[ImportantData], T]) -> T:
         prev_maintenance = copy.deepcopy(IMPORTANT_DATA.maintenance)
         prev_scheduled_maintenance = copy.deepcopy(IMPORTANT_DATA.scheduled_maintenance)
         prev_dns_status = copy.deepcopy(IMPORTANT_DATA.dns_status)
+        prev_daily_node_status = copy.deepcopy(IMPORTANT_DATA.daily_node_status)
         try:
             result = update_fn(IMPORTANT_DATA)
             await IMPORTANT_DATA.save_async(IMPORTANT_DATA_PATH)
@@ -318,6 +336,7 @@ async def update_important_data(update_fn: Callable[[ImportantData], T]) -> T:
             IMPORTANT_DATA.maintenance = prev_maintenance
             IMPORTANT_DATA.scheduled_maintenance = prev_scheduled_maintenance
             IMPORTANT_DATA.dns_status = prev_dns_status
+            IMPORTANT_DATA.daily_node_status = prev_daily_node_status
             logger.exception("Не удалось обновить important_data")
             raise
         _refresh_important_snapshot()
@@ -357,6 +376,13 @@ def _set_dns_status(cfg: ImportantData, server_key: str, payload: Dict[str, Any]
     cur = dict(getattr(cfg, "dns_status", {}) or {})
     cur[str(server_key)] = dict(payload or {})
     cfg.dns_status = cur
+    return dict(cur[str(server_key)])
+
+
+def _set_daily_node_status(cfg: ImportantData, server_key: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    cur = dict(getattr(cfg, "daily_node_status", {}) or {})
+    cur[str(server_key)] = dict(payload or {})
+    cfg.daily_node_status = cur
     return dict(cur[str(server_key)])
 
 
@@ -434,6 +460,18 @@ def get_dns_status_cache(server_key: str) -> Optional[Dict[str, Any]]:
 
 async def set_dns_status_cache(server_key: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     return await update_important_data(lambda cfg: _set_dns_status(cfg, server_key, payload))
+
+
+def get_daily_node_status_cache(server_key: str) -> Optional[Dict[str, Any]]:
+    daily = IMPORTANT_DATA_SNAPSHOT.get("daily_node_status")
+    if not isinstance(daily, dict):
+        return None
+    item = daily.get(str(server_key))
+    return dict(item) if isinstance(item, dict) else None
+
+
+async def set_daily_node_status_cache(server_key: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    return await update_important_data(lambda cfg: _set_daily_node_status(cfg, server_key, payload))
 
 
 async def set_scheduled_maintenance_record(payload: Dict[str, Any]) -> Dict[str, Any]:

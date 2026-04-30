@@ -26,6 +26,7 @@ _SSH_TARGET_RE = re.compile(r"^[A-Za-z0-9_.:@\-\[\]]{1,255}$")
 _SSH_TARGET_WITH_PORT_RE = re.compile(r"^[A-Za-z0-9_.@\-\[\]:]+:(\d{1,5})$")
 _SERVER_CODE_RE = re.compile(r"[^a-z0-9_-]+")
 _CONTAINER_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.\-]{0,62}$")
+_UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 SERVER_KEY_PATTERN = r"[a-z0-9_-]{1,12}"
 _COUNTRY_NAMES = {
     "DE": "Germany",
@@ -328,6 +329,17 @@ class AppSettings(BaseSettings):
     REMOTE_SERVER_CODES: List[str] = Field(default_factory=list)
     REMOTE_SERVER_LABELS: List[str] = Field(default_factory=list)
 
+    BOT_MODE: Literal["ssh", "mixed"] = "ssh"
+    REMNAWAVE_METRICS_URL: str = ""
+    REMNAWAVE_METRICS_USER: str = ""
+    REMNAWAVE_METRICS_PASS: str = ""
+    REMNAWAVE_METRICS_TIMEOUT_SEC: int = 3
+    REMNAWAVE_METRICS_CACHE_TTL_SEC: int = 8
+    REMNAWAVE_HIDDEN_UUIDS: List[str] = Field(default_factory=list)
+    LOCAL_SERVER_REMNAWAVE_UUID: str = ""
+    REMOTE_SERVER_REMNAWAVE_UUIDS: List[str] = Field(default_factory=list)
+    DAILY_NODE_STATUS_REFRESH_AT: str = "12:00"
+
     @field_validator(
         "MONITOR_CONTAINERS",
         "CHECK_A_DOMAINS",
@@ -339,6 +351,7 @@ class AppSettings(BaseSettings):
         "REMOTE_SERVER_EXPECTED_A_IPS",
         "REMOTE_SERVER_CODES",
         "REMOTE_SERVER_LABELS",
+        "REMNAWAVE_HIDDEN_UUIDS",
         mode="before",
     )
     @classmethod
@@ -351,6 +364,75 @@ class AppSettings(BaseSettings):
             "REMOTE_SERVER_LABELS",
         }
         return split_env_list(v, dedupe=info.field_name not in ordered_fields)
+
+    @field_validator("REMOTE_SERVER_REMNAWAVE_UUIDS", mode="before")
+    @classmethod
+    def _parse_uuid_list_keep_empty(cls, v: Any) -> List[str]:
+        if v is None:
+            return []
+        if isinstance(v, list):
+            return [str(x or "").strip() for x in v]
+        s = str(v or "").strip()
+        if not s:
+            return []
+        # Сохраняем пустые позиции — пользователь может пропустить сервер,
+        # для которого UUID нет (например, нода не зарегистрирована в RW).
+        return [p.strip() for p in s.split(",")]
+
+    @field_validator("BOT_MODE", mode="before")
+    @classmethod
+    def _normalize_bot_mode(cls, v: Any) -> str:
+        s = str(v or "").strip().lower() or "ssh"
+        if s not in ("ssh", "mixed"):
+            raise ValueError("BOT_MODE must be 'ssh' or 'mixed'")
+        return s
+
+    @field_validator("REMNAWAVE_METRICS_URL", mode="before")
+    @classmethod
+    def _normalize_metrics_url(cls, v: Any) -> str:
+        return str(v or "").strip()
+
+    @field_validator("REMNAWAVE_METRICS_USER", "REMNAWAVE_METRICS_PASS", "LOCAL_SERVER_REMNAWAVE_UUID", mode="before")
+    @classmethod
+    def _strip_str(cls, v: Any) -> str:
+        return str(v or "").strip()
+
+    @field_validator("LOCAL_SERVER_REMNAWAVE_UUID", "REMOTE_SERVER_REMNAWAVE_UUIDS", "REMNAWAVE_HIDDEN_UUIDS", mode="after")
+    @classmethod
+    def _validate_uuids(cls, v: Any, info: ValidationInfo) -> Any:
+        if isinstance(v, str):
+            s = v.strip()
+            if s and not _UUID_RE.fullmatch(s):
+                raise ValueError(f"{info.field_name}: invalid UUID format")
+            return s
+        if isinstance(v, list):
+            for item in v:
+                s = str(item or "").strip()
+                if s and not _UUID_RE.fullmatch(s):
+                    raise ValueError(f"{info.field_name}: invalid UUID '{item}'")
+            return [str(x or "").strip() for x in v]
+        return v
+
+    @field_validator("REMNAWAVE_METRICS_TIMEOUT_SEC", "REMNAWAVE_METRICS_CACHE_TTL_SEC")
+    @classmethod
+    def _positive_metrics_int(cls, v: int) -> int:
+        iv = int(v)
+        if iv < 1 or iv > 600:
+            raise ValueError("metrics timeout/ttl out of range (1..600)")
+        return iv
+
+    @field_validator("DAILY_NODE_STATUS_REFRESH_AT")
+    @classmethod
+    def _validate_daily_node_status_at(cls, v: str) -> str:
+        s = (v or "").strip() or "12:00"
+        try:
+            hh, mm = s.split(":", 1)
+            ih, im = int(hh), int(mm)
+            if ih < 0 or ih > 23 or im < 0 or im > 59:
+                raise ValueError
+        except Exception as e:
+            raise ValueError("DAILY_NODE_STATUS_REFRESH_AT must be HH:MM") from e
+        return f"{ih:02d}:{im:02d}"
 
     @field_validator("REMOTE_SERVER_DOMAINS", "REMOTE_SERVER_MONITOR_CONTAINERS_BY_SERVER", mode="before")
     @classmethod
@@ -492,8 +574,15 @@ class AppSettings(BaseSettings):
                         "REMOTE_SERVER_MONITOR_CONTAINERS_BY_SERVER must contain exactly "
                         f"{total} semicolon-separated groups"
                     )
+            if self.REMOTE_SERVER_REMNAWAVE_UUIDS and len(self.REMOTE_SERVER_REMNAWAVE_UUIDS) != total:
+                raise ValueError(
+                    f"REMOTE_SERVER_REMNAWAVE_UUIDS must contain exactly {total} comma-separated UUIDs "
+                    "(use empty value between commas to skip a server)"
+                )
         if self.SUBPROC_SHORT_TIMEOUT > self.SUBPROC_MEDIUM_TIMEOUT:
             raise ValueError("SUBPROC_SHORT_TIMEOUT must be <= SUBPROC_MEDIUM_TIMEOUT")
+        if self.BOT_MODE == "mixed" and not self.REMNAWAVE_METRICS_URL:
+            raise ValueError("BOT_MODE=mixed requires REMNAWAVE_METRICS_URL to be set")
         return self
 
 
@@ -508,6 +597,7 @@ class ServerTarget:
     monitor_containers: List[str]
     fail2ban_log_path: str
     ssh_target: str = ""
+    remnawave_uuid: str = ""
 
 
 SETTINGS = AppSettings()
@@ -582,6 +672,17 @@ REMOTE_SERVER_MONITOR_CONTAINERS_BY_SERVER = [list(x) for x in SETTINGS.REMOTE_S
 REMOTE_SERVER_CODES = list(SETTINGS.REMOTE_SERVER_CODES)
 REMOTE_SERVER_LABELS = list(SETTINGS.REMOTE_SERVER_LABELS)
 
+BOT_MODE = SETTINGS.BOT_MODE
+REMNAWAVE_METRICS_URL = SETTINGS.REMNAWAVE_METRICS_URL
+REMNAWAVE_METRICS_USER = SETTINGS.REMNAWAVE_METRICS_USER
+REMNAWAVE_METRICS_PASS = SETTINGS.REMNAWAVE_METRICS_PASS
+REMNAWAVE_METRICS_TIMEOUT_SEC = int(SETTINGS.REMNAWAVE_METRICS_TIMEOUT_SEC)
+REMNAWAVE_METRICS_CACHE_TTL_SEC = int(SETTINGS.REMNAWAVE_METRICS_CACHE_TTL_SEC)
+REMNAWAVE_HIDDEN_UUIDS = list(SETTINGS.REMNAWAVE_HIDDEN_UUIDS)
+LOCAL_SERVER_REMNAWAVE_UUID = SETTINGS.LOCAL_SERVER_REMNAWAVE_UUID
+REMOTE_SERVER_REMNAWAVE_UUIDS = list(SETTINGS.REMOTE_SERVER_REMNAWAVE_UUIDS)
+DAILY_NODE_STATUS_REFRESH_AT = SETTINGS.DAILY_NODE_STATUS_REFRESH_AT
+
 SUBPROC_SHORT_TIMEOUT = SETTINGS.SUBPROC_SHORT_TIMEOUT
 SUBPROC_MEDIUM_TIMEOUT = SETTINGS.SUBPROC_MEDIUM_TIMEOUT
 
@@ -600,6 +701,7 @@ def _build_servers() -> Dict[str, ServerTarget]:
         check_a_domains=list(CHECK_A_DOMAINS),
         monitor_containers=list(MONITOR_CONTAINERS),
         fail2ban_log_path=FAIL2BAN_LOG_PATH,
+        remnawave_uuid=LOCAL_SERVER_REMNAWAVE_UUID,
     )
 
     if not REMOTE_SERVER_ENABLED:
@@ -654,6 +756,7 @@ def _build_servers() -> Dict[str, ServerTarget]:
             monitor_containers=_group_for_index(container_groups, idx, REMOTE_SERVER_MONITOR_CONTAINERS),
             fail2ban_log_path=REMOTE_SERVER_FAIL2BAN_LOG_PATH,
             ssh_target=target,
+            remnawave_uuid=_nth_or_default(REMOTE_SERVER_REMNAWAVE_UUIDS, idx, ""),
         )
     return servers
 

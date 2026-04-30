@@ -25,7 +25,9 @@ from telegram.ext import (
 
 from app.config import (
     AUTH_PRUNE_INTERVAL_SEC,
+    BOT_MODE,
     BOT_TOKEN,
+    DAILY_NODE_STATUS_REFRESH_AT,
     DNS_DAILY_REFRESH_AT,
     DNS_STARTUP_REFRESH_DELAY_SEC,
     ERROR_NOTIFY_INTERVAL_SEC,
@@ -72,11 +74,16 @@ from app.handlers.maint import (
 from app.handlers.subscription import subscription_show
 from app.handlers.status import (
     cmd_health,
+    daily_node_status_refresh,
     dns_daily_refresh,
     dns_back_cb,
     status_dns_refresh_cb,
     status_pick_cb,
     status_show_cb,
+    status_ssh_diag_cb,
+    status_ssh_diag_confirm_cb,
+    status_ssh_refresh_cb,
+    status_ssh_refresh_confirm_cb,
     status_ufw_cb,
 )
 from app.handlers.tickets import (
@@ -313,6 +320,31 @@ def build_app() -> Application:
     app.add_handler(CallbackQueryHandler(status_show_cb, pattern=rf"^status:show:{SERVER_KEY_PATTERN}$"))
     app.add_handler(CallbackQueryHandler(status_ufw_cb, pattern=rf"^status:ufw:{SERVER_KEY_PATTERN}$"))
     app.add_handler(CallbackQueryHandler(status_dns_refresh_cb, pattern=rf"^status:dnsrefresh:{SERVER_KEY_PATTERN}$"))
+    if BOT_MODE == "mixed":
+        app.add_handler(
+            CallbackQueryHandler(
+                status_ssh_refresh_confirm_cb,
+                pattern=rf"^status:sshrefresh:confirm:{SERVER_KEY_PATTERN}$",
+            )
+        )
+        app.add_handler(
+            CallbackQueryHandler(
+                status_ssh_refresh_cb,
+                pattern=rf"^status:sshrefresh:{SERVER_KEY_PATTERN}$",
+            )
+        )
+        app.add_handler(
+            CallbackQueryHandler(
+                status_ssh_diag_confirm_cb,
+                pattern=rf"^status:sshdiag:confirm:{SERVER_KEY_PATTERN}$",
+            )
+        )
+        app.add_handler(
+            CallbackQueryHandler(
+                status_ssh_diag_cb,
+                pattern=rf"^status:sshdiag:{SERVER_KEY_PATTERN}$",
+            )
+        )
     app.add_handler(CallbackQueryHandler(dns_back_cb, pattern=rf"^dns:back:{SERVER_KEY_PATTERN}$"))
     app.add_handler(CallbackQueryHandler(docker_list_menu, pattern=rf"^docker:list:{SERVER_KEY_PATTERN}$"))
     app.add_handler(CallbackQueryHandler(docker_back_to_status, pattern=rf"^docker:back:{SERVER_KEY_PATTERN}$"))
@@ -346,6 +378,22 @@ def build_app() -> Application:
             name="dns_daily_refresh",
         )
         app.job_queue.run_once(dns_daily_refresh, when=DNS_STARTUP_REFRESH_DELAY_SEC, name="dns_refresh_startup")
+        if BOT_MODE == "mixed":
+            dns_hh2, dns_mm2 = _parse_schedule_hhmm(
+                DAILY_NODE_STATUS_REFRESH_AT,
+                field_name="DAILY_NODE_STATUS_REFRESH_AT",
+                fallback="12:00",
+            )
+            app.job_queue.run_daily(
+                daily_node_status_refresh,
+                time=dtime(hour=dns_hh2, minute=dns_mm2, tzinfo=TZ),
+                name="daily_node_status_refresh",
+            )
+            app.job_queue.run_once(
+                daily_node_status_refresh,
+                when=DNS_STARTUP_REFRESH_DELAY_SEC + 5,
+                name="daily_node_status_startup",
+            )
         app.job_queue.run_repeating(
             maint_restart_notify,
             interval=MAINT_RESTART_REMINDER_INTERVAL_SEC,
