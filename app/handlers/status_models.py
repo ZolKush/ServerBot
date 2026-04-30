@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Optional
 
 
 @dataclass(frozen=True)
@@ -30,3 +30,12 @@ class StatusSnapshot:
     ufw_reject: List[str] = field(default_factory=list)
     containers: List[DockerContainerView] = field(default_factory=list)
     admin_mode: bool = False
+    # mixed-mode (RemnaWave metrics) extras
+    source_mode: str = "ssh"  # "ssh" | "mixed"
+    node_online: Optional[bool] = None  # None — статус ноды не определён через метрики
+    online_users: Optional[int] = None
+    last_seen_text: str = ""
+    metrics_error: str = ""
+    disk_updated_at_text: str = ""
+    ufw_updated_at_text: str = ""
+    show_containers_block: bool = True

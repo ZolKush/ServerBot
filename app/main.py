@@ -1,12 +1,16 @@
 import re
 import sys
+import time
 import warnings
 from datetime import datetime, time as dtime
 from pathlib import Path
 
-if __package__ is None or __package__ == "":
-    sys.path.append(str(Path(__file__).resolve().parent.parent))
+if __package__ in (None, ""):
+    _PROJECT_ROOT = Path(__file__).resolve().parent.parent
+    if str(_PROJECT_ROOT) not in sys.path:
+        sys.path.insert(0, str(_PROJECT_ROOT))
 
+from telegram.constants import ParseMode
 from telegram.warnings import PTBUserWarning
 from telegram.ext import (
     Application,
@@ -15,22 +19,28 @@ from telegram.ext import (
     CommandHandler,
     ConversationHandler,
     MessageHandler,
+    PicklePersistence,
     filters,
 )
 
 from app.config import (
-    ADMIN_PASSWORD,
-    AUTH_PASSWORD,
+    AUTH_PRUNE_INTERVAL_SEC,
+    BOT_MODE,
     BOT_TOKEN,
+    DAILY_NODE_STATUS_REFRESH_AT,
     DNS_DAILY_REFRESH_AT,
     DNS_STARTUP_REFRESH_DELAY_SEC,
+    ERROR_NOTIFY_INTERVAL_SEC,
     FAIL2BAN_DAILY_AT,
     MAINT_RESTART_NOTIFY_DELAY_SEC,
+    MAINT_RESTART_REMINDER_INTERVAL_SEC,
+    ROOT_DIR,
+    SERVER_KEY_PATTERN,
     TZ,
     logger,
 )
-from app.handlers.auth import cmd_auth, cmd_help, cmd_logout, cmd_start
-from app.handlers.common import MENU_HOME_TEXT_PATTERN, cancel, cancel_to_menu_cb, menu_home_cb, menu_home_text
+from app.handlers.auth import auth_prune_task, cmd_auth, cmd_help, cmd_logout, cmd_start
+from app.handlers.common import authorized_ids, cancel, cancel_to_menu_cb, html_escape, is_authorized, is_enabled, menu_home_cb
 from app.handlers.docker import docker_back_to_status, docker_inspect, docker_list_menu, docker_logs, docker_show
 from app.handlers.fail2ban import (
     f2b_back_cb,
@@ -64,11 +74,16 @@ from app.handlers.maint import (
 from app.handlers.subscription import subscription_show
 from app.handlers.status import (
     cmd_health,
+    daily_node_status_refresh,
     dns_daily_refresh,
     dns_back_cb,
     status_dns_refresh_cb,
     status_pick_cb,
     status_show_cb,
+    status_ssh_diag_cb,
+    status_ssh_diag_confirm_cb,
+    status_ssh_refresh_cb,
+    status_ssh_refresh_confirm_cb,
     status_ufw_cb,
 )
 from app.handlers.tickets import (
@@ -111,6 +126,11 @@ from app.handlers.users import (
 )
 
 PRIVATE_TEXT = filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND
+PRIVATE_TICKET_INPUT = (
+    filters.ChatType.PRIVATE
+    & ~filters.COMMAND
+    & (filters.TEXT | filters.PHOTO | filters.Document.ALL)
+)
 
 warnings.filterwarnings(
     "ignore",
@@ -129,6 +149,9 @@ def _parse_schedule_hhmm(raw: str, *, field_name: str, fallback: str) -> tuple[i
         return t.hour, t.minute
 
 
+_LAST_ERROR_NOTIFY_AT = 0.0
+
+
 async def on_error(update: object, context) -> None:
     try:
         cb_data = getattr(getattr(update, "callback_query", None), "data", None)
@@ -144,19 +167,50 @@ async def on_error(update: object, context) -> None:
         cb_data,
     )
 
+    global _LAST_ERROR_NOTIFY_AT
+    now = time.monotonic()
+    if now - _LAST_ERROR_NOTIFY_AT < ERROR_NOTIFY_INTERVAL_SEC:
+        return
+    _LAST_ERROR_NOTIFY_AT = now
+    try:
+        admins = authorized_ids(role_filter="admin")
+        if not admins:
+            return
+        err_text = (
+            "⚠️ <b>Необработанная ошибка в боте</b>\n"
+            f"<code>{html_escape(str(context.error))[:500]}</code>"
+        )
+        for aid in admins:
+            try:
+                await context.bot.send_message(chat_id=aid, text=err_text, parse_mode=ParseMode.HTML)
+            except Exception:
+                pass
+    except Exception:
+        logger.exception("Не удалось уведомить админов об ошибке")
+
+
+async def fallback_text(update, context) -> None:
+    if not is_authorized(update) or not is_enabled(update):
+        return
+    msg = update.effective_message
+    if msg:
+        await msg.reply_text("Не понимаю команду. Используйте /menu для меню или /help для подсказок.")
+
 
 def build_app() -> Application:
     if not BOT_TOKEN:
         raise RuntimeError("Не задан BOT_TOKEN в app/env.secrets, app/.env или переменных окружения")
-    if not AUTH_PASSWORD and not ADMIN_PASSWORD:
-        logger.warning("Не заданы AUTH_PASSWORD и ADMIN_PASSWORD: авторизация невозможна.")
 
-    app: Application = ApplicationBuilder().token(BOT_TOKEN).build()
+    persistence_dir = Path(ROOT_DIR) / "data"
+    persistence_dir.mkdir(parents=True, exist_ok=True)
+    persistence = PicklePersistence(filepath=str(persistence_dir / "ptb_persistence"))
+    app: Application = ApplicationBuilder().token(BOT_TOKEN).persistence(persistence).build()
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("menu", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("auth", cmd_auth))
+    app.add_handler(CommandHandler("login", cmd_auth))
     app.add_handler(CommandHandler("logout", cmd_logout))
     app.add_handler(CommandHandler("health", cmd_health))
     app.add_handler(CommandHandler("subscription", subscription_show))
@@ -169,7 +223,7 @@ def build_app() -> Application:
         ],
         states={
             STATE_MAINT_MODE: [CallbackQueryHandler(maint_mode, pattern=r"^maint:mode:(announce|schedule)$")],
-            STATE_MAINT_SCOPE: [CallbackQueryHandler(maint_scope, pattern=r"^maint:scope:[a-z0-9_-]{1,12}$")],
+            STATE_MAINT_SCOPE: [CallbackQueryHandler(maint_scope, pattern=rf"^maint:scope:{SERVER_KEY_PATTERN}$")],
             STATE_MAINT_URGENCY: [CallbackQueryHandler(maint_urgency, pattern=r"^maint:urgency:(urgent|planned)$")],
             STATE_MAINT_DURATION: [MessageHandler(PRIVATE_TEXT, maint_duration)],
             STATE_MAINT_EXTEND: [MessageHandler(PRIVATE_TEXT, maint_extend_duration)],
@@ -178,10 +232,9 @@ def build_app() -> Application:
         fallbacks=[
             CommandHandler("cancel", cancel),
             CallbackQueryHandler(cancel_to_menu_cb, pattern=r"^menu:home$"),
-            MessageHandler(PRIVATE_TEXT & filters.Regex(MENU_HOME_TEXT_PATTERN), menu_home_text),
         ],
         name="maint_flow",
-        persistent=False,
+        persistent=True,
     )
     app.add_handler(maint_conv)
     app.add_handler(CallbackQueryHandler(maint_end_confirm_cb, pattern=r"^maint:endconfirm:[0-9a-f]+$"))
@@ -198,18 +251,17 @@ def build_app() -> Application:
         states={
             TICKET_SUBJECT: [MessageHandler(PRIVATE_TEXT, ticket_subject)],
             TICKET_URGENCY: [CallbackQueryHandler(ticket_urgency, pattern=r"^ticket:(p1|p2|p3)$")],
-            TICKET_TEXT: [MessageHandler(PRIVATE_TEXT, ticket_text)],
+            TICKET_TEXT: [MessageHandler(PRIVATE_TICKET_INPUT, ticket_text)],
             TICKET_CONFIRM: [CallbackQueryHandler(ticket_confirm, pattern=r"^ticket:(send|edit_subj|edit_text|cancel)$")],
-            TICKET_USER_REPLY_TEXT: [MessageHandler(PRIVATE_TEXT, ticket_user_reply_text)],
-            TICKET_ADMIN_REPLY_TEXT: [MessageHandler(PRIVATE_TEXT, ticket_admin_reply_text)],
+            TICKET_USER_REPLY_TEXT: [MessageHandler(PRIVATE_TICKET_INPUT, ticket_user_reply_text)],
+            TICKET_ADMIN_REPLY_TEXT: [MessageHandler(PRIVATE_TICKET_INPUT, ticket_admin_reply_text)],
         },
         fallbacks=[
             CommandHandler("cancel", cancel),
             CallbackQueryHandler(cancel_to_menu_cb, pattern=r"^menu:home$"),
-            MessageHandler(PRIVATE_TEXT & filters.Regex(MENU_HOME_TEXT_PATTERN), menu_home_text),
         ],
         name="ticket_flow",
-        persistent=False,
+        persistent=True,
     )
     app.add_handler(ticket_conv)
     app.add_handler(CallbackQueryHandler(ticket_take_cb, pattern=r"^ticket:take:\d+$"))
@@ -222,7 +274,7 @@ def build_app() -> Application:
         ],
         states={
             ADMIN_PICK: [
-                CallbackQueryHandler(users_pick, pattern=r"^users:(all|main|back|noop|filter:(all|active|disabled|unpaid|admins)|user:\d+)$"),
+                CallbackQueryHandler(users_pick, pattern=r"^users:(all|main|back|filter:(all|active|disabled|unpaid|admins)|user:\d+)$"),
             ],
             ADMIN_ALL_MENU: [
                 CallbackQueryHandler(users_all_menu, pattern=r"^users:(allmsg|back)$"),
@@ -236,7 +288,7 @@ def build_app() -> Application:
             ADMIN_USER_MENU: [
                 CallbackQueryHandler(
                     users_user_menu,
-                    pattern=r"^users:(msg:\d+|nick:\d+|cfg:\d+|subassign:\d+|subsend:\d+|refresh:\d+|toggle:\d+|toggleapply:\d+|paid:\d+|paidapply:\d+|back)$",
+                    pattern=r"^users:(msg:\d+|nick:\d+|cfg:\d+|subassign:\d+|subsend:\d+|toggle:\d+|toggleapply:\d+|paid:\d+|paidapply:\d+|back)$",
                 ),
                 CallbackQueryHandler(users_pick, pattern=r"^users:user:\d+$"),
             ],
@@ -254,40 +306,63 @@ def build_app() -> Application:
         fallbacks=[
             CommandHandler("cancel", cancel),
             CallbackQueryHandler(cancel_to_menu_cb, pattern=r"^menu:home$"),
-            MessageHandler(PRIVATE_TEXT & filters.Regex(MENU_HOME_TEXT_PATTERN), menu_home_text),
         ],
         name="users_flow",
-        persistent=False,
+        persistent=True,
     )
     app.add_handler(users_conv)
-    app.add_handler(MessageHandler(PRIVATE_TEXT & filters.Regex(MENU_HOME_TEXT_PATTERN), menu_home_text))
     app.add_handler(CallbackQueryHandler(menu_home_cb, pattern=r"^menu:home$"))
     app.add_handler(CallbackQueryHandler(cmd_help, pattern=r"^menu:help$"))
     app.add_handler(CallbackQueryHandler(cmd_health, pattern=r"^menu:status$"))
     app.add_handler(CallbackQueryHandler(subscription_show, pattern=r"^menu:subscription$"))
 
     app.add_handler(CallbackQueryHandler(status_pick_cb, pattern=r"^status:pick$"))
-    app.add_handler(CallbackQueryHandler(status_show_cb, pattern=r"^status:show:[a-z0-9_-]{1,12}$"))
-    app.add_handler(CallbackQueryHandler(status_ufw_cb, pattern=r"^status:ufw:[a-z0-9_-]{1,12}$"))
-    app.add_handler(CallbackQueryHandler(status_dns_refresh_cb, pattern=r"^status:dnsrefresh:[a-z0-9_-]{1,12}$"))
-    app.add_handler(CallbackQueryHandler(dns_back_cb, pattern=r"^dns:back:[a-z0-9_-]{1,12}$"))
-    app.add_handler(CallbackQueryHandler(docker_list_menu, pattern=r"^docker:list:[a-z0-9_-]{1,12}$"))
-    app.add_handler(CallbackQueryHandler(docker_back_to_status, pattern=r"^docker:back:[a-z0-9_-]{1,12}$"))
+    app.add_handler(CallbackQueryHandler(status_show_cb, pattern=rf"^status:show:{SERVER_KEY_PATTERN}$"))
+    app.add_handler(CallbackQueryHandler(status_ufw_cb, pattern=rf"^status:ufw:{SERVER_KEY_PATTERN}$"))
+    app.add_handler(CallbackQueryHandler(status_dns_refresh_cb, pattern=rf"^status:dnsrefresh:{SERVER_KEY_PATTERN}$"))
+    if BOT_MODE == "mixed":
+        app.add_handler(
+            CallbackQueryHandler(
+                status_ssh_refresh_confirm_cb,
+                pattern=rf"^status:sshrefresh:confirm:{SERVER_KEY_PATTERN}$",
+            )
+        )
+        app.add_handler(
+            CallbackQueryHandler(
+                status_ssh_refresh_cb,
+                pattern=rf"^status:sshrefresh:{SERVER_KEY_PATTERN}$",
+            )
+        )
+        app.add_handler(
+            CallbackQueryHandler(
+                status_ssh_diag_confirm_cb,
+                pattern=rf"^status:sshdiag:confirm:{SERVER_KEY_PATTERN}$",
+            )
+        )
+        app.add_handler(
+            CallbackQueryHandler(
+                status_ssh_diag_cb,
+                pattern=rf"^status:sshdiag:{SERVER_KEY_PATTERN}$",
+            )
+        )
+    app.add_handler(CallbackQueryHandler(dns_back_cb, pattern=rf"^dns:back:{SERVER_KEY_PATTERN}$"))
+    app.add_handler(CallbackQueryHandler(docker_list_menu, pattern=rf"^docker:list:{SERVER_KEY_PATTERN}$"))
+    app.add_handler(CallbackQueryHandler(docker_back_to_status, pattern=rf"^docker:back:{SERVER_KEY_PATTERN}$"))
     app.add_handler(
-        CallbackQueryHandler(docker_show, pattern=r"^docker:show:[a-z0-9_-]{1,12}:[a-zA-Z0-9_.\-]{1,64}$")
+        CallbackQueryHandler(docker_show, pattern=rf"^docker:show:{SERVER_KEY_PATTERN}:[a-zA-Z0-9_.\-]{{1,64}}$")
     )
     app.add_handler(
-        CallbackQueryHandler(docker_inspect, pattern=r"^docker:inspect:[a-z0-9_-]{1,12}:[a-zA-Z0-9_.\-]{1,64}$")
+        CallbackQueryHandler(docker_inspect, pattern=rf"^docker:inspect:{SERVER_KEY_PATTERN}:[a-zA-Z0-9_.\-]{{1,64}}$")
     )
     app.add_handler(
-        CallbackQueryHandler(docker_logs, pattern=r"^docker:logs:[a-z0-9_-]{1,12}:[a-zA-Z0-9_.\-]{1,64}:\d{1,3}$")
+        CallbackQueryHandler(docker_logs, pattern=rf"^docker:logs:{SERVER_KEY_PATTERN}:[a-zA-Z0-9_.\-]{{1,64}}:\d{{1,3}}$")
     )
 
     app.add_handler(CommandHandler("fail2ban", fail2ban_menu))
-    app.add_handler(CallbackQueryHandler(f2b_menu_cb, pattern=r"^f2b:menu:[a-z0-9_-]{1,12}$"))
-    app.add_handler(CallbackQueryHandler(f2b_tail_cb, pattern=r"^f2b:tail:[a-z0-9_-]{1,12}:\d{1,5}$"))
-    app.add_handler(CallbackQueryHandler(f2b_digest_cb, pattern=r"^f2b:digest:[a-z0-9_-]{1,12}$"))
-    app.add_handler(CallbackQueryHandler(f2b_back_cb, pattern=r"^f2b:back:[a-z0-9_-]{1,12}$"))
+    app.add_handler(CallbackQueryHandler(f2b_menu_cb, pattern=rf"^f2b:menu:{SERVER_KEY_PATTERN}$"))
+    app.add_handler(CallbackQueryHandler(f2b_tail_cb, pattern=rf"^f2b:tail:{SERVER_KEY_PATTERN}:\d{{1,5}}$"))
+    app.add_handler(CallbackQueryHandler(f2b_digest_cb, pattern=rf"^f2b:digest:{SERVER_KEY_PATTERN}$"))
+    app.add_handler(CallbackQueryHandler(f2b_back_cb, pattern=rf"^f2b:back:{SERVER_KEY_PATTERN}$"))
 
     if app.job_queue:
         hh, mm = _parse_schedule_hhmm(FAIL2BAN_DAILY_AT, field_name="FAIL2BAN_DAILY_AT", fallback="12:00")
@@ -303,10 +378,27 @@ def build_app() -> Application:
             name="dns_daily_refresh",
         )
         app.job_queue.run_once(dns_daily_refresh, when=DNS_STARTUP_REFRESH_DELAY_SEC, name="dns_refresh_startup")
-        app.job_queue.run_once(
+        if BOT_MODE == "mixed":
+            dns_hh2, dns_mm2 = _parse_schedule_hhmm(
+                DAILY_NODE_STATUS_REFRESH_AT,
+                field_name="DAILY_NODE_STATUS_REFRESH_AT",
+                fallback="12:00",
+            )
+            app.job_queue.run_daily(
+                daily_node_status_refresh,
+                time=dtime(hour=dns_hh2, minute=dns_mm2, tzinfo=TZ),
+                name="daily_node_status_refresh",
+            )
+            app.job_queue.run_once(
+                daily_node_status_refresh,
+                when=DNS_STARTUP_REFRESH_DELAY_SEC + 5,
+                name="daily_node_status_startup",
+            )
+        app.job_queue.run_repeating(
             maint_restart_notify,
-            when=MAINT_RESTART_NOTIFY_DELAY_SEC,
-            name="maint_restart_notify",
+            interval=MAINT_RESTART_REMINDER_INTERVAL_SEC,
+            first=MAINT_RESTART_NOTIFY_DELAY_SEC,
+            name="maint_active_reminder",
         )
         app.job_queue.run_repeating(
             maint_schedule_tick,
@@ -314,9 +406,16 @@ def build_app() -> Application:
             first=10,
             name="maint_schedule_tick",
         )
+        app.job_queue.run_repeating(
+            auth_prune_task,
+            interval=AUTH_PRUNE_INTERVAL_SEC,
+            first=AUTH_PRUNE_INTERVAL_SEC,
+            name="auth_prune",
+        )
     else:
         logger.warning("JobQueue недоступен: для ежедневной выжимки установите python-telegram-bot[job-queue].")
 
+    app.add_handler(MessageHandler(PRIVATE_TEXT, fallback_text), group=10)
     app.add_error_handler(on_error)
     return app
 

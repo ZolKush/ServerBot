@@ -1,6 +1,7 @@
 import asyncio
 import copy
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, TypeVar
@@ -28,6 +29,16 @@ async def _write_json_atomic(path: str, data: Dict[str, Any]) -> None:
     async with aiofiles.open(tmp, "w", encoding="utf-8") as f:
         await f.write(payload)
     await asyncio.to_thread(tmp.replace, p)
+    await asyncio.to_thread(_tighten_file_permissions, p)
+
+
+def _tighten_file_permissions(path: Path) -> None:
+    if os.name == "nt":
+        return
+    try:
+        path.chmod(0o600)
+    except Exception:
+        pass
 
 
 @dataclass
@@ -121,6 +132,7 @@ class UserData:
         tmp = tmp_path.with_suffix(tmp_path.suffix + ".tmp")
         tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.replace(tmp_path)
+        _tighten_file_permissions(tmp_path)
 
     async def save_async(self, path: str) -> None:
         await _write_json_atomic(path, {"schema_version": USER_DATA_SCHEMA_VERSION, "authorized_users": self.authorized_users})
@@ -133,6 +145,7 @@ class ImportantData:
     maintenance: Dict[str, Any] = field(default_factory=dict)
     scheduled_maintenance: Dict[str, Any] = field(default_factory=dict)
     dns_status: Dict[str, Any] = field(default_factory=dict)
+    daily_node_status: Dict[str, Any] = field(default_factory=dict)
 
     @staticmethod
     def _migrate(raw: Dict[str, Any]) -> "ImportantData":
@@ -149,19 +162,31 @@ class ImportantData:
         dns_status = raw.get("dns_status", {})
         if not isinstance(dns_status, dict):
             dns_status = {}
+        daily_node_status = raw.get("daily_node_status", {})
+        if not isinstance(daily_node_status, dict):
+            daily_node_status = {}
         return ImportantData(
             tickets_seq=tickets_seq,
             tickets=tickets,
             maintenance=maintenance,
             scheduled_maintenance=scheduled_maintenance,
             dns_status=dns_status,
+            daily_node_status=daily_node_status,
         )
 
     @staticmethod
     def _needs_rewrite(raw: Dict[str, Any]) -> bool:
         if raw.get("schema_version") != IMPORTANT_DATA_SCHEMA_VERSION:
             return True
-        allowed_keys = {"schema_version", "tickets_seq", "tickets", "maintenance", "scheduled_maintenance", "dns_status"}
+        allowed_keys = {
+            "schema_version",
+            "tickets_seq",
+            "tickets",
+            "maintenance",
+            "scheduled_maintenance",
+            "dns_status",
+            "daily_node_status",
+        }
         return any(k not in allowed_keys for k in raw.keys())
 
     @classmethod
@@ -194,12 +219,14 @@ class ImportantData:
             "maintenance": self.maintenance,
             "scheduled_maintenance": self.scheduled_maintenance,
             "dns_status": self.dns_status,
+            "daily_node_status": self.daily_node_status,
         }
         tmp_path = Path(path)
         tmp_path.parent.mkdir(parents=True, exist_ok=True)
         tmp = tmp_path.with_suffix(tmp_path.suffix + ".tmp")
         tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.replace(tmp_path)
+        _tighten_file_permissions(tmp_path)
 
     async def save_async(self, path: str) -> None:
         await _write_json_atomic(
@@ -211,16 +238,31 @@ class ImportantData:
                 "maintenance": self.maintenance,
                 "scheduled_maintenance": self.scheduled_maintenance,
                 "dns_status": self.dns_status,
+                "daily_node_status": self.daily_node_status,
             },
         )
 
 
 USER_DATA = UserData.load(USER_DATA_PATH, legacy_path=LEGACY_CONFIG_PATH)
 IMPORTANT_DATA = ImportantData.load(IMPORTANT_DATA_PATH, legacy_path=LEGACY_CONFIG_PATH)
-USER_DATA_LOCK = asyncio.Lock()
-IMPORTANT_DATA_LOCK = asyncio.Lock()
+_USER_DATA_LOCK: Optional[asyncio.Lock] = None
+_IMPORTANT_DATA_LOCK: Optional[asyncio.Lock] = None
 USER_DATA_SNAPSHOT: Dict[str, Dict[str, Any]] = {}
 IMPORTANT_DATA_SNAPSHOT: Dict[str, Any] = {}
+
+
+def _get_user_data_lock() -> asyncio.Lock:
+    global _USER_DATA_LOCK
+    if _USER_DATA_LOCK is None:
+        _USER_DATA_LOCK = asyncio.Lock()
+    return _USER_DATA_LOCK
+
+
+def _get_important_data_lock() -> asyncio.Lock:
+    global _IMPORTANT_DATA_LOCK
+    if _IMPORTANT_DATA_LOCK is None:
+        _IMPORTANT_DATA_LOCK = asyncio.Lock()
+    return _IMPORTANT_DATA_LOCK
 
 
 def _refresh_user_snapshot() -> None:
@@ -238,6 +280,7 @@ def _refresh_important_snapshot() -> None:
         "maintenance": dict(getattr(IMPORTANT_DATA, "maintenance", {}) or {}),
         "scheduled_maintenance": dict(getattr(IMPORTANT_DATA, "scheduled_maintenance", {}) or {}),
         "dns_status": dict(getattr(IMPORTANT_DATA, "dns_status", {}) or {}),
+        "daily_node_status": dict(getattr(IMPORTANT_DATA, "daily_node_status", {}) or {}),
     }
 
 
@@ -245,8 +288,24 @@ _refresh_user_snapshot()
 _refresh_important_snapshot()
 
 
+async def _reload_user_data_from_disk() -> None:
+    latest = await asyncio.to_thread(UserData.load, USER_DATA_PATH, None)
+    USER_DATA.authorized_users = copy.deepcopy(latest.authorized_users)
+
+
+async def _reload_important_data_from_disk() -> None:
+    latest = await asyncio.to_thread(ImportantData.load, IMPORTANT_DATA_PATH, None)
+    IMPORTANT_DATA.tickets_seq = int(latest.tickets_seq or 0)
+    IMPORTANT_DATA.tickets = copy.deepcopy(latest.tickets)
+    IMPORTANT_DATA.maintenance = copy.deepcopy(latest.maintenance)
+    IMPORTANT_DATA.scheduled_maintenance = copy.deepcopy(latest.scheduled_maintenance)
+    IMPORTANT_DATA.dns_status = copy.deepcopy(latest.dns_status)
+    IMPORTANT_DATA.daily_node_status = copy.deepcopy(latest.daily_node_status)
+
+
 async def update_user_data(update_fn: Callable[[UserData], T]) -> T:
-    async with USER_DATA_LOCK:
+    async with _get_user_data_lock():
+        await _reload_user_data_from_disk()
         prev_authorized_users = copy.deepcopy(USER_DATA.authorized_users)
         try:
             result = update_fn(USER_DATA)
@@ -260,12 +319,14 @@ async def update_user_data(update_fn: Callable[[UserData], T]) -> T:
 
 
 async def update_important_data(update_fn: Callable[[ImportantData], T]) -> T:
-    async with IMPORTANT_DATA_LOCK:
+    async with _get_important_data_lock():
+        await _reload_important_data_from_disk()
         prev_tickets_seq = IMPORTANT_DATA.tickets_seq
         prev_tickets = copy.deepcopy(IMPORTANT_DATA.tickets)
         prev_maintenance = copy.deepcopy(IMPORTANT_DATA.maintenance)
         prev_scheduled_maintenance = copy.deepcopy(IMPORTANT_DATA.scheduled_maintenance)
         prev_dns_status = copy.deepcopy(IMPORTANT_DATA.dns_status)
+        prev_daily_node_status = copy.deepcopy(IMPORTANT_DATA.daily_node_status)
         try:
             result = update_fn(IMPORTANT_DATA)
             await IMPORTANT_DATA.save_async(IMPORTANT_DATA_PATH)
@@ -275,6 +336,7 @@ async def update_important_data(update_fn: Callable[[ImportantData], T]) -> T:
             IMPORTANT_DATA.maintenance = prev_maintenance
             IMPORTANT_DATA.scheduled_maintenance = prev_scheduled_maintenance
             IMPORTANT_DATA.dns_status = prev_dns_status
+            IMPORTANT_DATA.daily_node_status = prev_daily_node_status
             logger.exception("Не удалось обновить important_data")
             raise
         _refresh_important_snapshot()
@@ -283,6 +345,7 @@ async def update_important_data(update_fn: Callable[[ImportantData], T]) -> T:
 
 def _set_user_meta(cfg: UserData, uid: int, meta: Dict[str, Any]) -> Dict[str, Any]:
     normalized = UserData._normalize_user(meta)
+    normalized["user_id"] = int(uid)
     cfg.authorized_users[str(uid)] = normalized
     return normalized
 
@@ -313,6 +376,13 @@ def _set_dns_status(cfg: ImportantData, server_key: str, payload: Dict[str, Any]
     cur = dict(getattr(cfg, "dns_status", {}) or {})
     cur[str(server_key)] = dict(payload or {})
     cfg.dns_status = cur
+    return dict(cur[str(server_key)])
+
+
+def _set_daily_node_status(cfg: ImportantData, server_key: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    cur = dict(getattr(cfg, "daily_node_status", {}) or {})
+    cur[str(server_key)] = dict(payload or {})
+    cfg.daily_node_status = cur
     return dict(cur[str(server_key)])
 
 
@@ -370,11 +440,14 @@ def get_ticket_copy(ticket_id: int) -> Optional[Dict[str, Any]]:
     return dict(item) if isinstance(item, dict) else None
 
 
-def tickets_snapshot() -> Dict[str, Dict[str, Any]]:
+def get_user_open_tickets(uid: int) -> list:
     tickets = IMPORTANT_DATA_SNAPSHOT.get("tickets")
     if not isinstance(tickets, dict):
-        return {}
-    return {str(k): dict(v) for k, v in tickets.items() if isinstance(v, dict)}
+        return []
+    return [
+        dict(t) for t in tickets.values()
+        if isinstance(t, dict) and int(t.get("user_id", 0) or 0) == uid and str(t.get("status", "open")) != "closed"
+    ]
 
 
 def get_dns_status_cache(server_key: str) -> Optional[Dict[str, Any]]:
@@ -387,6 +460,18 @@ def get_dns_status_cache(server_key: str) -> Optional[Dict[str, Any]]:
 
 async def set_dns_status_cache(server_key: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     return await update_important_data(lambda cfg: _set_dns_status(cfg, server_key, payload))
+
+
+def get_daily_node_status_cache(server_key: str) -> Optional[Dict[str, Any]]:
+    daily = IMPORTANT_DATA_SNAPSHOT.get("daily_node_status")
+    if not isinstance(daily, dict):
+        return None
+    item = daily.get(str(server_key))
+    return dict(item) if isinstance(item, dict) else None
+
+
+async def set_daily_node_status_cache(server_key: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    return await update_important_data(lambda cfg: _set_daily_node_status(cfg, server_key, payload))
 
 
 async def set_scheduled_maintenance_record(payload: Dict[str, Any]) -> Dict[str, Any]:

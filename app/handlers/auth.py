@@ -1,4 +1,5 @@
 from datetime import datetime
+import hmac
 from time import monotonic
 from typing import Optional
 
@@ -6,10 +7,17 @@ from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
-from ..config import ADMIN_PASSWORD, AUTH_PASSWORD, TZ, logger
+from ..config import (
+    ADMIN_PASSWORD,
+    AUTH_FAIL_WINDOW_SEC,
+    AUTH_LOCKOUT_SEC,
+    AUTH_MAX_FAILS_IN_WINDOW,
+    AUTH_PASSWORD,
+    TZ,
+    logger,
+)
 from ..storage import get_user_meta_copy, remove_user_meta, upsert_user_meta
 from .common import (
-    ensure_context_menu_button,
     get_user_id,
     get_user_meta,
     is_admin,
@@ -21,9 +29,6 @@ from .common import (
     show_main_menu,
 )
 
-AUTH_FAIL_WINDOW_SEC = 300
-AUTH_MAX_FAILS_IN_WINDOW = 5
-AUTH_LOCKOUT_SEC = 600
 _AUTH_FAILS: dict[str, list[float]] = {}
 _AUTH_LOCKED_UNTIL: dict[str, float] = {}
 
@@ -83,13 +88,26 @@ def _auth_reset_limits(update: Update) -> None:
     _AUTH_LOCKED_UNTIL.pop(key, None)
 
 
+async def auth_prune_task(context) -> None:
+    _auth_prune()
+
+
+async def _auth_delete_sensitive_message(update: Update) -> None:
+    msg = update.effective_message
+    if not msg:
+        return
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+
+
 @require_private
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if is_authorized(update) and not is_enabled(update):
         await reply_disabled(update)
         return
     await show_main_menu(update)
-    await ensure_context_menu_button(update, context)
 
 
 @require_private
@@ -136,60 +154,66 @@ async def cmd_auth(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await msg.reply_text("Формат: <b>/auth пароль</b>", parse_mode=ParseMode.HTML)
         return
 
-    passwd = parts[1].strip()
+    passwd = parts[1]
     if not passwd:
         if msg:
             await msg.reply_text("Пустой пароль.")
         return
 
-    role: Optional[str] = None
-    if ADMIN_PASSWORD and passwd == ADMIN_PASSWORD:
-        role = "admin"
-    elif AUTH_PASSWORD and passwd == AUTH_PASSWORD:
-        role = "user"
+    try:
+        role: Optional[str] = None
+        if ADMIN_PASSWORD and hmac.compare_digest(passwd, ADMIN_PASSWORD):
+            role = "admin"
+        elif AUTH_PASSWORD and hmac.compare_digest(passwd, AUTH_PASSWORD):
+            role = "user"
 
-    if role is None:
-        _auth_register_failure(update)
-        logger.warning("Auth failed for %s", _auth_actor_key(update))
-        if msg:
-            await msg.reply_text("Пароль неверный.")
-        return
+        if role is None:
+            _auth_register_failure(update)
+            logger.warning("Auth failed for %s", _auth_actor_key(update))
+            if msg:
+                await msg.reply_text("Пароль неверный.")
+            return
 
-    u = update.effective_user
-    if not u:
-        if msg:
-            await msg.reply_text("Ошибка: не удалось определить пользователя.")
-        return
+        u = update.effective_user
+        if not u:
+            if msg:
+                await msg.reply_text("Ошибка: не удалось определить пользователя.")
+            return
 
-    existing = get_user_meta(u.id) or {}
-    preserved_enabled = bool(existing.get("enabled", True))
-    preserved_nick = existing.get("nickname")
-    preserved_role = existing.get("role")
-    preserved_paid = bool(existing.get("is_paid", False))
+        existing = get_user_meta(u.id) or {}
+        preserved_enabled = bool(existing.get("enabled", True))
+        preserved_nick = existing.get("nickname")
+        preserved_role = existing.get("role")
+        preserved_paid = bool(existing.get("is_paid", False))
 
-    role_to_set = preserved_role if (preserved_role and not preserved_enabled) else role
+        role_to_set = preserved_role if (preserved_role and not preserved_enabled) else role
 
-    meta = dict(existing)
-    meta.update({
-        "user_id": u.id,
-        "role": role_to_set,
-        "enabled": preserved_enabled,
-        "nickname": preserved_nick,
-        "username": u.username,
-        "first_name": u.first_name,
-        "last_name": u.last_name,
-        "auth_at": datetime.now(TZ).isoformat(),
-        "is_paid": preserved_paid,
-    })
-    await upsert_user_meta(u.id, meta)
-    _auth_reset_limits(update)
+        meta = dict(existing)
+        new_values = {
+            "user_id": u.id,
+            "role": role_to_set,
+            "enabled": preserved_enabled,
+            "nickname": preserved_nick,
+            "username": u.username,
+            "first_name": u.first_name,
+            "last_name": u.last_name,
+            "auth_at": datetime.now(TZ).isoformat(),
+            "is_paid": preserved_paid,
+        }
+        relevant_keys = [k for k in new_values if k != "auth_at"]
+        meta_changed = any(existing.get(k) != new_values[k] for k in relevant_keys) or not existing
+        meta.update(new_values)
+        if meta_changed:
+            await upsert_user_meta(u.id, meta)
+        _auth_reset_limits(update)
 
-    if not preserved_enabled:
-        await reply_disabled(update)
-        return
+        if not preserved_enabled:
+            await reply_disabled(update)
+            return
 
-    await show_main_menu(update, text="Авторизация успешна ✅\n\nМеню:")
-    await ensure_context_menu_button(update, context)
+        await show_main_menu(update, text="Авторизация успешна ✅\n\nМеню:")
+    finally:
+        await _auth_delete_sensitive_message(update)
 
 
 @require_private

@@ -1,11 +1,25 @@
-import json
 import re
 import shlex
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from ..config import DOCKER_BIN, SSH_BIN, SUBPROC_MEDIUM_TIMEOUT, SUBPROC_SHORT_TIMEOUT, SUDO_BIN, TZ, UFW_BIN, logger
-from .system_service import Fail2banEvent, _fmt_bytes_binary, _parse_ufw_rules, parse_fail2ban_events, run_exec
+from ..config import (
+    DOCKER_BIN,
+    SSH_BIN,
+    SSH_KNOWN_HOSTS_FILE,
+    SSH_STRICT_HOST_KEY_CHECKING,
+    SUBPROC_MEDIUM_TIMEOUT,
+    SUBPROC_SHORT_TIMEOUT,
+    SUDO_BIN,
+    TZ,
+    UFW_BIN,
+    logger,
+)
+from .docker_service import _parse_docker_inspect_json
+from .system_fail2ban import Fail2banEvent, parse_fail2ban_events
+from .system_metrics import _fmt_bytes_binary
+from .system_process import run_exec
+from .system_ufw import _parse_ufw_rules
 
 _OUT_BEGIN = "__MBOT_OUT_BEGIN_43e1f3c4__"
 _OUT_END = "__MBOT_OUT_END_43e1f3c4__"
@@ -14,6 +28,7 @@ _SEC_MEMINFO = "__MBOT_SEC_MEMINFO__"
 _SEC_DF = "__MBOT_SEC_DF__"
 _SEC_UFW = "__MBOT_SEC_UFW__"
 _SEC_DOCKER_STATUS = "__MBOT_SEC_DOCKER_STATUS__"
+_SSH_TARGET_WITH_PORT_RE = re.compile(r"^(?P<host>[A-Za-z0-9_.@\-\[\]:]+):(?P<port>\d{1,5})$")
 
 
 def _extract_wrapped_stdout(text: str) -> str:
@@ -53,10 +68,26 @@ def _split_sections(text: str) -> Dict[str, str]:
     return {k: "\n".join(v).strip("\n") for k, v in buf.items()}
 
 
+def _split_ssh_target(target: str) -> Tuple[str, Optional[int]]:
+    tgt = (target or "").strip()
+    m = _SSH_TARGET_WITH_PORT_RE.fullmatch(tgt)
+    if not m:
+        return tgt, None
+    host = m.group("host")
+    port = int(m.group("port"))
+    if not 1 <= port <= 65535:
+        raise ValueError("ssh port out of range")
+    return host, port
+
+
 async def ssh_run_shell(target: str, command: str, timeout: int) -> Tuple[int, str, str]:
     tgt = (target or "").strip()
     if not tgt:
         return 127, "", "ssh target is not configured"
+    try:
+        ssh_host, ssh_port = _split_ssh_target(tgt)
+    except ValueError as e:
+        return 127, "", str(e)
     wrapped = (
         "PATH=/usr/sbin:/usr/bin:/sbin:/bin:$PATH; export PATH; "
         f"printf '%s\\n' {shlex.quote(_OUT_BEGIN)}; "
@@ -73,11 +104,14 @@ async def ssh_run_shell(target: str, command: str, timeout: int) -> Tuple[int, s
         f"ConnectTimeout={max(2, min(timeout, 10))}",
         "-o",
         "LogLevel=ERROR",
-        tgt,
-        "sh",
-        "-c",
-        wrapped,
+        "-o",
+        f"StrictHostKeyChecking={SSH_STRICT_HOST_KEY_CHECKING}",
     ]
+    if SSH_KNOWN_HOSTS_FILE:
+        args.extend(["-o", f"UserKnownHostsFile={SSH_KNOWN_HOSTS_FILE}"])
+    if ssh_port is not None:
+        args.extend(["-p", str(ssh_port)])
+    args.extend([ssh_host, "sh", "-c", wrapped])
     rc, out, err = await run_exec(args, timeout=max(timeout + 2, 5))
     return rc, _extract_wrapped_stdout(out), err
 
@@ -116,16 +150,9 @@ def _parse_meminfo_text(raw: str) -> str:
         mem_total_kb = kv.get("MemTotal", 0)
         mem_avail_kb = kv.get("MemAvailable", kv.get("MemFree", 0))
         mem_used_kb = max(mem_total_kb - mem_avail_kb, 0)
-        sw_total_kb = kv.get("SwapTotal", 0)
-        sw_free_kb = kv.get("SwapFree", 0)
-        sw_used_kb = max(sw_total_kb - sw_free_kb, 0)
-
-        def kb_to_mib(x: int) -> int:
-            return int(round(x / 1024.0))
-
-        mem_s = f"{kb_to_mib(mem_used_kb)} / {kb_to_mib(mem_total_kb)} MiB (avail {kb_to_mib(mem_avail_kb)} MiB)"
-        sw_s = f"{kb_to_mib(sw_used_kb)} / {kb_to_mib(sw_total_kb)} MiB" if sw_total_kb else "н/д"
-        return f"RAM: {mem_s}; Swap: {sw_s}"
+        used_mib = int(round(mem_used_kb / 1024.0))
+        total_mib = int(round(mem_total_kb / 1024.0))
+        return f"{used_mib} / {total_mib} MiB"
     except Exception:
         return "н/д"
 
@@ -154,6 +181,50 @@ async def remote_status_bundle(
     admin_mode: bool,
 ) -> Tuple[str, str, str, List[Tuple[str, bool, str, str]], str, List[str], List[str], List[str]]:
     name_list = [n for n in names if n]
+    docker_candidates: List[str] = []
+    for cand in [DOCKER_BIN, "/usr/bin/docker", "docker"]:
+        if cand and cand not in docker_candidates:
+            docker_candidates.append(cand)
+    ufw_candidates: List[str] = []
+    for cand in [UFW_BIN, "/usr/sbin/ufw", "ufw"]:
+        if cand and cand not in ufw_candidates:
+            ufw_candidates.append(cand)
+
+    sudo_quoted = shlex.quote(SUDO_BIN) if SUDO_BIN else ""
+    docker_for_loop = " ".join(shlex.quote(c) for c in docker_candidates) or '""'
+    ufw_for_loop = " ".join(shlex.quote(c) for c in ufw_candidates) or '""'
+
+    docker_block_lines: List[str] = [
+        "_docker_done=0",
+        f"for d in {docker_for_loop}; do",
+        '  [ -n "$d" ] || continue',
+        '  if command -v "$d" >/dev/null 2>&1 || [ -x "$d" ]; then',
+        "    if \"$d\" ps -a --format '{{.Names}}|{{.Status}}' 2>/dev/null; then",
+        "      _docker_done=1; break",
+        "    fi",
+    ]
+    if sudo_quoted:
+        docker_block_lines.extend(
+            [
+                f'    if {sudo_quoted} -n "$d" ps -a --format ' "'{{.Names}}|{{.Status}}' 2>/dev/null; then",
+                "      _docker_done=1; break",
+                "    fi",
+            ]
+        )
+    docker_block_lines.extend(["  fi", "done"])
+    docker_block = "\n".join(docker_block_lines)
+
+    ufw_block_lines: List[str] = [
+        f"for u in {ufw_for_loop}; do",
+        '  [ -n "$u" ] || continue',
+        '  if command -v "$u" >/dev/null 2>&1 || [ -x "$u" ]; then',
+        '    if "$u" status 2>/dev/null; then break; fi',
+    ]
+    if sudo_quoted:
+        ufw_block_lines.append(f'    if {sudo_quoted} -n "$u" status 2>/dev/null; then break; fi')
+    ufw_block_lines.extend(["  fi", "done"])
+    ufw_block = "\n".join(ufw_block_lines)
+
     shell = f"""
 PATH=/usr/sbin:/usr/bin:/sbin:/bin:$PATH; export PATH
 echo {_SEC_UPTIME}
@@ -163,41 +234,18 @@ cat /proc/meminfo 2>/dev/null || true
 echo {_SEC_DF}
 df -B1 / 2>/dev/null || true
 echo {_SEC_UFW}
-ufw_out=""
-for u in {shlex.quote(UFW_BIN)} /usr/sbin/ufw ufw; do
-  [ -n "$u" ] || continue
-  if command -v "$u" >/dev/null 2>&1 || [ -x "$u" ]; then
-    ufw_out=$("$u" status 2>/dev/null) && break
-    if [ -n {shlex.quote(SUDO_BIN)} ]; then
-      ufw_out=$({shlex.quote(SUDO_BIN)} -n "$u" status 2>/dev/null) && break
-    fi
-  fi
-done
-printf "%s\\n" "$ufw_out"
+{ufw_block}
 echo {_SEC_DOCKER_STATUS}
-docker_cmd=""
-for d in {shlex.quote(DOCKER_BIN)} /usr/bin/docker docker; do
-  [ -n "$d" ] || continue
-  if command -v "$d" >/dev/null 2>&1 || [ -x "$d" ]; then
-    "$d" ps -a --format '{{{{.Names}}}}|{{{{.Status}}}}' >/dev/null 2>&1 && docker_cmd="$d" && break
-    if [ -n {shlex.quote(SUDO_BIN)} ] && {shlex.quote(SUDO_BIN)} -n "$d" ps -a --format '{{{{.Names}}}}|{{{{.Status}}}}' >/dev/null 2>&1; then
-      docker_cmd="{shlex.quote(SUDO_BIN)} -n $d"
-      break
-    fi
-  fi
-done
-if [ -n "$docker_cmd" ]; then
-  sh -c "$docker_cmd ps -a --format '{{{{.Names}}}}|{{{{.Status}}}}' 2>/dev/null" || true
-fi
+{docker_block}
 """.strip()
     rc, out, _ = await ssh_run_shell(ssh_target, shell, timeout=max(SUBPROC_MEDIUM_TIMEOUT, SUBPROC_SHORT_TIMEOUT) + 4)
     if rc != 0 and not out.strip():
         return "н/д", "н/д", "н/д", [(n, False, "ssh ошибка", "-") for n in name_list], "н/д", [], [], []
+    if rc != 0:
+        logger.debug("remote_status_bundle: rc=%s for %s, partial output present", rc, ssh_target)
 
     sec = _split_sections(out)
     up = _parse_uptime_from_proc(sec.get(_SEC_UPTIME, "") or "") or "н/д"
-    if up == "н/д":
-        up = "н/д"
     mem = _parse_meminfo_text(sec.get(_SEC_MEMINFO, "") or "") or "н/д"
     disk = _parse_df_bytes_text(sec.get(_SEC_DF, "") or "") or "н/д"
 
@@ -240,53 +288,7 @@ async def remote_docker_inspect_summary(ssh_target: str, name: str) -> str:
             break
     if rc != 0:
         return f"docker inspect error: {err.strip() or out.strip() or 'н/д'}"
-    try:
-        data = json.loads(out)
-        if not isinstance(data, list) or not data:
-            return "inspect: пустой ответ"
-        c = data[0]
-        image = ((c.get("Config") or {}).get("Image")) or "-"
-        state = c.get("State") or {}
-        status = state.get("Status") or "-"
-        running = state.get("Running")
-        started = state.get("StartedAt") or "-"
-        finished = state.get("FinishedAt") or "-"
-        exit_code = state.get("ExitCode")
-        error = (state.get("Error") or "").strip() or "-"
-        health = ((state.get("Health") or {}).get("Status")) or "-"
-        restart_count = c.get("RestartCount")
-        ports = ((c.get("NetworkSettings") or {}).get("Ports")) or {}
-
-        port_items: List[str] = []
-        if isinstance(ports, dict):
-            for k, v in ports.items():
-                if v is None:
-                    port_items.append(f"{k}->-")
-                elif isinstance(v, list) and v:
-                    b = v[0]
-                    port_items.append(f"{k}->{b.get('HostIp', '')}:{b.get('HostPort', '')}")
-                else:
-                    port_items.append(f"{k}")
-        lines: List[str] = [
-            f"Container: {name}",
-            f"Image: {image}",
-            f"State: {status} (running={running})",
-            f"Health: {health}",
-        ]
-        if restart_count is not None:
-            lines.append(f"RestartCount: {restart_count}")
-        if exit_code is not None:
-            lines.append(f"ExitCode: {exit_code}")
-        lines.append(f"StartedAt: {started}")
-        if status not in ("running", "up"):
-            lines.append(f"FinishedAt: {finished}")
-        if error and error != "-":
-            lines.append(f"Error: {error}")
-        if port_items:
-            lines.append("Ports: " + ", ".join(port_items))
-        return "\n".join(lines)
-    except Exception as e:
-        return f"inspect parse error: {e}"
+    return _parse_docker_inspect_json(name, out)
 
 
 async def remote_docker_logs_tail(ssh_target: str, name: str, tail: int) -> str:
@@ -315,10 +317,11 @@ async def remote_docker_logs_tail(ssh_target: str, name: str, tail: int) -> str:
 async def remote_tail_text_file(ssh_target: str, path: str, n_lines: int) -> str:
     n = max(1, min(int(n_lines), 10000))
     quoted = shlex.quote(path)
+    sudo_bin = shlex.quote(SUDO_BIN or "sudo")
     cmd = (
         f"if [ ! -e {quoted} ]; then printf '__FNF__'; "
         f"elif [ -r {quoted} ]; then tail -n {n} {quoted}; "
-        f"else {SUDO_BIN} -n tail -n {n} {quoted} 2>/dev/null || printf '__PERM__'; fi"
+        f"else {sudo_bin} -n tail -n {n} {quoted} 2>/dev/null || printf '__PERM__'; fi"
     )
     rc, out, err = await ssh_run_shell(ssh_target, cmd, timeout=SUBPROC_MEDIUM_TIMEOUT)
     if out.startswith("__FNF__"):
@@ -332,9 +335,10 @@ async def remote_tail_text_file(ssh_target: str, path: str, n_lines: int) -> str
 
 async def remote_fail2ban_stat(ssh_target: str, path: str) -> Optional[Tuple[int, datetime]]:
     quoted = shlex.quote(path)
+    sudo_bin = shlex.quote(SUDO_BIN or "sudo")
     for cmd in (
         f"stat -c '%s|%Y' {quoted} 2>/dev/null || true",
-        f"{SUDO_BIN} -n stat -c '%s|%Y' {quoted} 2>/dev/null || true",
+        f"{sudo_bin} -n stat -c '%s|%Y' {quoted} 2>/dev/null || true",
     ):
         rc, out, _ = await ssh_run_shell(ssh_target, cmd, timeout=SUBPROC_SHORT_TIMEOUT)
         if rc != 0 or not out.strip():
@@ -348,9 +352,6 @@ async def remote_fail2ban_stat(ssh_target: str, path: str) -> Optional[Tuple[int
     return None
 
 
-async def remote_fail2ban_events_last_day(ssh_target: str, path: str) -> List[Fail2banEvent]:
-    raw = await remote_tail_text_file(ssh_target, path=path, n_lines=20000)
-    events = parse_fail2ban_events(raw.splitlines())
-    until = datetime.now(tz=TZ)
-    since = until - timedelta(days=1)
-    return [e for e in events if since <= e.ts <= until]
+async def remote_fail2ban_events(ssh_target: str, path: str, n_lines: int) -> List[Fail2banEvent]:
+    raw = await remote_tail_text_file(ssh_target, path=path, n_lines=n_lines)
+    return parse_fail2ban_events(raw.splitlines())

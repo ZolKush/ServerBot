@@ -3,18 +3,27 @@ from __future__ import annotations
 import asyncio
 import html
 import random
-import re
 from dataclasses import dataclass, field
 from functools import wraps
 from datetime import datetime
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatType, ParseMode
 from telegram.error import BadRequest, NetworkError, RetryAfter, TimedOut
 from telegram.ext import ContextTypes, ConversationHandler
 
-from ..config import MENU_MAINT, MENU_STATUS, MENU_SUBSCRIPTION, MENU_TICKET, MENU_USERS, TZ, logger
+from ..config import (
+    BROADCAST_MAX_ATTEMPTS,
+    BROADCAST_MAX_CONCURRENCY,
+    MENU_MAINT,
+    MENU_STATUS,
+    MENU_SUBSCRIPTION,
+    MENU_TICKET,
+    MENU_USERS,
+    TZ,
+    logger,
+)
 from ..storage import authorized_users_snapshot, get_user_meta_copy
 
 
@@ -26,8 +35,6 @@ UI_OK = "✅"
 UI_WARN = "⚠️"
 UI_ERR = "❌"
 UI_INFO = "ℹ️"
-CONTEXT_MENU_BUTTON = "📋 Меню"
-MENU_HOME_TEXT_PATTERN = rf"^(?:{re.escape(CONTEXT_MENU_BUTTON)}|Меню)$"
 
 
 def ui_ok_text(text: str) -> str:
@@ -64,6 +71,32 @@ def clip_text(s: str, limit: int = 3300) -> str:
 
 def now_str() -> str:
     return datetime.now(TZ).strftime("%d.%m.%Y %H:%M:%S")
+
+
+def format_dt_human(value: Any, *, empty: str = "-", tz_label: str = "по МСК") -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return empty
+
+    dt: Optional[datetime] = None
+    try:
+        dt = datetime.fromisoformat(raw)
+    except Exception:
+        for fmt in ("%Y-%m-%d %H:%M:%S,%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+            try:
+                dt = datetime.strptime(raw, fmt)
+                break
+            except Exception:
+                continue
+
+    if dt is None:
+        return raw
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=TZ)
+    else:
+        dt = dt.astimezone(TZ)
+    return f"{dt.strftime('%d.%m.%Y %H:%M')} {tz_label}"
 
 
 def is_private(update: Update) -> bool:
@@ -191,29 +224,6 @@ def display_name(update: Update) -> str:
     return nm if nm else str(u.id)
 
 
-def context_menu_reply_kb() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        [[KeyboardButton(CONTEXT_MENU_BUTTON)]],
-        resize_keyboard=True,
-        is_persistent=True,
-        input_field_placeholder="Нажмите «Меню» для вызова главного меню",
-    )
-
-
-async def ensure_context_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    return None
-
-
-async def try_delete_message(update: Update) -> None:
-    msg = update.effective_message
-    if not msg:
-        return
-    try:
-        await msg.delete()
-    except Exception:
-        pass
-
-
 def main_menu_inline_kb_for_admin(is_admin_user: bool) -> InlineKeyboardMarkup:
     rows: List[List[InlineKeyboardButton]] = [
         [
@@ -267,29 +277,10 @@ async def menu_home_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 def _clear_transient_user_context(context: ContextTypes.DEFAULT_TYPE) -> None:
+    transient_keys = {"selected_uid", "subscription_delivery_mode", "users_all_broadcast_text"}
     for key in tuple(context.user_data.keys()):
-        if key.startswith("ticket_") or key.startswith("maint_") or key in {"selected_uid", "subscription_delivery_mode"}:
+        if key.startswith("ticket_") or key.startswith("maint_") or key in transient_keys:
             context.user_data.pop(key, None)
-
-
-@require_private
-async def menu_home_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.effective_message
-    text = ((msg.text if msg else "") or "").strip()
-    if not re.fullmatch(MENU_HOME_TEXT_PATTERN, text):
-        return ConversationHandler.END
-    await try_delete_message(update)
-    _clear_transient_user_context(context)
-    if is_authorized(update) and not is_enabled(update):
-        await reply_disabled(update)
-        return ConversationHandler.END
-    if not is_authorized(update):
-        await reply_need_auth(update)
-        await ensure_context_menu_button(update, context)
-        return ConversationHandler.END
-    await show_main_menu(update)
-    await ensure_context_menu_button(update, context)
-    return ConversationHandler.END
 
 
 @require_auth
@@ -331,9 +322,13 @@ async def send_to_many(
     text: str,
     *,
     reply_markup: Optional[InlineKeyboardMarkup] = None,
-    max_concurrency: int = 8,
-    max_attempts: int = 3,
+    max_concurrency: Optional[int] = None,
+    max_attempts: Optional[int] = None,
 ) -> SendManyReport:
+    if max_concurrency is None:
+        max_concurrency = BROADCAST_MAX_CONCURRENCY
+    if max_attempts is None:
+        max_attempts = BROADCAST_MAX_ATTEMPTS
     ids = sorted(set(int(uid) for uid in user_ids))
     if not ids:
         return SendManyReport()

@@ -1,233 +1,131 @@
 # MaintBot
 
-Telegram-бот для администрирования серверов и поддержки пользователей.
+Telegram-бот для администрирования серверов, выдачи подписок пользователям и обработки обращений в поддержку.
 
-Бот работает в личных сообщениях Telegram, хранит состояние в JSON-файлах и использует `python-telegram-bot` с `JobQueue` для фоновых задач. Основной сценарий: пользователь авторизуется, получает меню, может открыть тикет и получить подписку, а администратор управляет пользователями, техработами, статусами серверов, Docker и fail2ban.
+Документ пересобран по текущему состоянию проекта. Последнее изменение прежнего `README.md` в git: коммит `940a2a0d05048c2ce8c450b20e44bb5c9ad13fbf` от `2026-04-24 20:39:32 +0300`, автор `kirill`, сообщение `Add systemd deployment support and local sudo fallbacks`.
 
-## Что умеет бот
+## Назначение
 
-### Для пользователей
+Бот работает в личных сообщениях Telegram. Пользователь авторизуется паролем, получает меню, может смотреть статус сервера, получить назначенную подписку и создать тикет. Администратор получает расширенные разделы: пользователи, рассылки, подписки, техработы, Docker, UFW, fail2ban и диагностика серверов.
 
-- авторизация по паролю `/auth`
-- просмотр главного меню
-- просмотр своей подписки через `📦 Моя подписка`
-- создание тикета в поддержку
-- ответ администратору внутри тикета, если администратор уже ответил
-- получение уведомлений о техработах
-- просмотр краткого статуса сервера
+Проект рассчитан на запуск как long-running service через `python-telegram-bot` и `JobQueue`. Состояние хранится локально в JSON-файлах, а проверки серверов выполняются локально или по SSH.
 
-### Для администраторов
+## Возможности
 
-- всё, что доступно пользователю
-- просмотр статуса локального и удалённого сервера
-- просмотр UFW
-- просмотр Docker `inspect` и `logs`
-- просмотр fail2ban tail и суточной выжимки
-- ежедневная автоматическая выжимка fail2ban
-- управление пользователями
-- массовая рассылка всем авторизованным пользователям
-- назначение и отправка подписок
-- скрытое обновление меню пользователя
-- объявление активных техработ
-- планирование техработ с уведомлением за 30 минут и в момент старта
-- обработка тикетов с исполнителем, ответами и закрытием
+Для пользователей:
 
-## Архитектура
+- авторизация через `/auth пароль`;
+- главное меню `/start` или `/menu`;
+- просмотр краткого статуса сервера;
+- получение своей подписки через меню или `/subscription`;
+- создание одного открытого тикета с текстом, фото или файлом;
+- ответ по тикету после ответа администратора;
+- получение уведомлений о техработах.
 
-### Точка входа
+Для администраторов:
 
-- [app/main.py](/C:/Users/kiril/Documents/server_bot/app/main.py)
+- все пользовательские действия;
+- выбор сервера при нескольких настроенных серверах;
+- просмотр uptime, RAM, disk, UFW, DNS и Docker;
+- просмотр Docker `inspect` и `logs`;
+- просмотр fail2ban tail и ручной digest за сутки;
+- ежедневная рассылка fail2ban digest администраторам;
+- управление пользователями: фильтры, бан/разбан, оплата, nickname;
+- массовая рассылка всем авторизованным пользователям;
+- назначение подписки без отправки или с немедленной отправкой;
+- объявление активных техработ;
+- планирование техработ с уведомлением за 30 минут и при старте;
+- продление и завершение активных техработ;
+- обработка тикетов с назначением исполнителя, ответами и закрытием;
+- в `BOT_MODE=mixed`: статус нод из RemnaWave `/metrics`, SSH-диагностика и ручное обновление disk/UFW.
 
-Там:
+## Структура
 
-- создаётся `Application`
-- регистрируются команды, callback и conversation flow
-- подключаются фоновые задачи `JobQueue`
-- включается polling c `drop_pending_updates=True`
+```text
+.
+├── app/
+│   ├── main.py                    # точка входа, handlers, jobs
+│   ├── __main__.py                # запуск через python -m app
+│   ├── config.py                  # публичный слой настроек
+│   ├── settings.py                # Pydantic settings, secrets, список серверов
+│   ├── storage.py                 # JSON-хранилище, миграции, atomic write
+│   ├── models.py                  # TypedDict-модели тикетов, пользователей, техработ
+│   ├── constants.py               # подписи пунктов меню
+│   ├── logging_setup.py           # обычные или JSON-логи
+│   ├── handlers/                  # Telegram-сценарии
+│   ├── services/                  # системные, SSH, Docker, DNS, fail2ban, metrics сервисы
+│   ├── requirements.txt
+│   └── requirements-dev.txt
+├── data/
+│   ├── user_data.json             # пользователи и подписки
+│   └── important_data.json        # тикеты, техработы, DNS/cache
+├── deploy/
+│   └── maintbot.service           # systemd unit
+├── pyproject.toml                 # package/dev metadata
+├── .gitignore
+├── .gitattributes
+└── README.md
+```
 
-### Конфигурация
+Локальные `.env`, `env.secrets`, `.venv`, `.idea`, `.claude`, `__pycache__` и runtime-данные не предназначены для публикации. В текущем рабочем дереве шаблоны `app/.env.example` и `app/env.secrets.example` удалены, но в истории git они есть.
 
-- [app/settings.py](/C:/Users/kiril/Documents/server_bot/app/settings.py)
-- [app/config.py](/C:/Users/kiril/Documents/server_bot/app/config.py)
-- [app/logging_setup.py](/C:/Users/kiril/Documents/server_bot/app/logging_setup.py)
+## Принцип работы
 
-`settings.py` читает:
+`app/main.py` строит `Application`, подключает `PicklePersistence` в `data/ptb_persistence`, регистрирует команды, callback handlers и несколько `ConversationHandler`. Затем запускает polling с `drop_pending_updates=True`.
 
-- `app/.env`
-- `app/env.secrets`
-- переменные окружения процесса
+На старте `app/config.py` импортирует `app/settings.py`, настраивает логирование и экспортирует нормализованные значения. `settings.py` читает:
 
-Секреты:
+- `app/.env` или путь из `ENV_PATH`;
+- `app/env.secrets` или путь из `SECRETS_ENV_PATH`;
+- переменные окружения процесса.
 
-- `BOT_TOKEN`
-- `AUTH_PASSWORD`
-- `ADMIN_PASSWORD`
+Секреты `BOT_TOKEN`, `AUTH_PASSWORD`, `ADMIN_PASSWORD` валидируются отдельно. `BOT_TOKEN` обязателен, а из пользовательского и админского паролей должен быть задан хотя бы один.
 
-Поддерживается и `app/.env`, и `app/env.secrets`, но для продакшена секреты лучше держать в `app/env.secrets`.
+Серверы собираются в словарь `SERVERS`. Всегда создаётся локальный сервер. Удалённые серверы добавляются из plural-настроек `REMOTE_SERVER_SSH_TARGETS`, `REMOTE_SERVER_CODES`, `REMOTE_SERVER_LABELS`, `REMOTE_SERVER_FLAGS`, `REMOTE_SERVER_EXPECTED_A_IPS`, `REMOTE_SERVER_DOMAINS` и `REMOTE_SERVER_MONITOR_CONTAINERS_BY_SERVER`. Legacy-настройки одного удалённого сервера тоже поддерживаются.
 
-### Хранилище данных
+Состояние лежит в двух JSON-файлах. `storage.py` мигрирует старые схемы, нормализует пользователей, пишет через временный файл и на Linux пытается выставлять права `0600`.
 
-- [app/storage.py](/C:/Users/kiril/Documents/server_bot/app/storage.py)
-- [data/user_data.json](/C:/Users/kiril/Documents/server_bot/data/user_data.json)
-- [data/important_data.json](/C:/Users/kiril/Documents/server_bot/data/important_data.json)
+## Основные модули
 
-`user_data.json` хранит:
+`app/handlers/auth.py`: `/start`, `/help`, `/auth`, `/logout`, rate-limit неудачных попыток авторизации, удаление сообщения с паролем.
 
-- авторизованных пользователей
-- роли `user/admin`
-- флаг `enabled`
-- флаг оплаты `is_paid`
-- nickname
-- подписку пользователя и метаданные её обновления
+`app/handlers/common.py`: проверки доступа, роли, меню, HTML escaping, форматирование дат, массовая отправка с retry и ограничением concurrency.
 
-`important_data.json` хранит:
+`app/handlers/status.py`: статус локального или SSH-сервера, DNS cache, ручной DNS refresh, UFW, mixed-mode через RemnaWave metrics, ручная SSH-диагностика.
 
-- счётчик тикетов `tickets_seq`
-- сами тикеты `tickets`
-- активные техработы `maintenance`
-- запланированные техработы `scheduled_maintenance`
-- кэш DNS-статуса `dns_status`
+`app/handlers/status_format.py` и `status_models.py`: структура и форматирование сообщений статуса.
 
-Запись идёт атомарно через временный файл.
+`app/handlers/docker.py`: админское меню контейнеров, `inspect`, `logs`, проверка допустимых имён контейнеров из настроек сервера.
 
-### Хендлеры
+`app/handlers/fail2ban.py`: tail логов, digest за период, ежедневный digest по каждому серверу, отдельный state-файл digest на сервер.
 
-- [app/handlers/auth.py](/C:/Users/kiril/Documents/server_bot/app/handlers/auth.py)  
-  Авторизация, старт, помощь, logout.
+`app/handlers/maint.py` и `maint_helpers.py`: активные и запланированные техработы, scope по серверу или всем серверам, уведомления пользователям и админам, продление и завершение.
 
-- [app/handlers/common.py](/C:/Users/kiril/Documents/server_bot/app/handlers/common.py)  
-  Общие helper’ы, доступ, меню, массовая отправка.
+`app/handlers/tickets.py`: создание тикетов, история сообщений, вложения Telegram, назначение исполнителя, ответы пользователя и администратора, закрытие.
 
-- [app/handlers/status.py](/C:/Users/kiril/Documents/server_bot/app/handlers/status.py)  
-  Статус серверов, DNS refresh, UFW.
+`app/handlers/users.py`, `users_ui.py`, `users_constants.py`: список пользователей, фильтры, карточка пользователя, рассылки, личные сообщения, nickname, оплата, подписки.
 
-- [app/handlers/docker.py](/C:/Users/kiril/Documents/server_bot/app/handlers/docker.py)  
-  Docker-меню, inspect и logs.
+`app/handlers/subscription.py`: выдача подписки пользователю. Короткий текст отправляется inline, длинный как `.txt` файл.
 
-- [app/handlers/fail2ban.py](/C:/Users/kiril/Documents/server_bot/app/handlers/fail2ban.py)  
-  Tail логов, digest за сутки, ежедневная рассылка админам.
+`app/services/system_process.py`: безопасный async-запуск subprocess с timeout.
 
-- [app/handlers/maint.py](/C:/Users/kiril/Documents/server_bot/app/handlers/maint.py)  
-  Активные и запланированные техработы, продление, завершение, автоматические уведомления.
+`app/services/system_metrics.py`: uptime, memory и disk локального сервера через `/proc`, `free`, `df`.
 
-- [app/handlers/tickets.py](/C:/Users/kiril/Documents/server_bot/app/handlers/tickets.py)  
-  Создание тикетов, взятие в работу, ответы админа и пользователя, закрытие, логирование тикетного потока.
+`app/services/system_dns.py`: A-записи через `aiodns` с custom resolvers и fallback на `socket.getaddrinfo`.
 
-- [app/handlers/users.py](/C:/Users/kiril/Documents/server_bot/app/handlers/users.py)  
-  Админ-панель пользователей, рассылки, никнеймы, оплата, подписки, обновление меню.
+`app/services/system_ufw.py`: UFW status и правила, с fallback на `sudo -n`.
 
-- [app/handlers/subscription.py](/C:/Users/kiril/Documents/server_bot/app/handlers/subscription.py)  
-  Выдача пользователю его подписки.
+`app/services/docker_service.py`: локальный Docker `ps`, `inspect`, `logs`, с fallback на `sudo -n`.
 
-### Сервисы
+`app/services/remote_service.py`: SSH-команды для удалённых серверов, сбор status bundle, Docker, fail2ban, UFW и disk.
 
-- [app/services/system_process.py](/C:/Users/kiril/Documents/server_bot/app/services/system_process.py)  
-  Базовый async запуск процессов.
+`app/services/system_fail2ban.py`: tail логов, sudo fallback, parser fail2ban events, JSON state.
 
-- [app/services/system_metrics.py](/C:/Users/kiril/Documents/server_bot/app/services/system_metrics.py)  
-  Uptime, RAM, диск.
-
-- [app/services/system_dns.py](/C:/Users/kiril/Documents/server_bot/app/services/system_dns.py)  
-  DNS A-записи, с `aiodns` и fallback на системный resolver.
-
-- [app/services/system_ufw.py](/C:/Users/kiril/Documents/server_bot/app/services/system_ufw.py)  
-  Чтение статуса и правил UFW.
-
-- [app/services/system_fail2ban.py](/C:/Users/kiril/Documents/server_bot/app/services/system_fail2ban.py)  
-  Парсинг fail2ban логов и работа с JSON state-файлами.
-
-- [app/services/docker_service.py](/C:/Users/kiril/Documents/server_bot/app/services/docker_service.py)  
-  Локальная работа с Docker.
-
-- [app/services/remote_service.py](/C:/Users/kiril/Documents/server_bot/app/services/remote_service.py)  
-  SSH-вызовы для удалённого сервера: статус, Docker, fail2ban.
-
-- [app/services/system_service.py](/C:/Users/kiril/Documents/server_bot/app/services/system_service.py)  
-  Переэкспорт системных helper’ов.
-
-## Меню и логика
-
-### Главное меню пользователя
-
-- `📊 Статус сервера`
-- `📦 Моя подписка`
-- `🎫 Создать тикет`
-- `ℹ️ Помощь`
-
-### Главное меню администратора
-
-- `📊 Статус сервера`
-- `📦 Моя подписка`
-- `🎫 Создать тикет`
-- `👥 Пользователи`
-- `🛠 Техработы`
-- `ℹ️ Помощь`
-
-### Тикеты
-
-Поток тикета такой:
-
-1. Пользователь создаёт тикет: тема -> срочность -> описание -> подтверждение.
-2. Тикет сохраняется в `important_data.json`.
-3. Все админы получают карточку тикета.
-4. Любой админ может взять тикет в работу.
-5. После взятия у тикета появляется исполнитель.
-6. Ответить пользователю и закрыть тикет может только исполнитель.
-7. После ответа администратора пользователю доступна кнопка ответа.
-8. После ответа пользователя право хода возвращается администратору.
-9. После закрытия тикета пользователь больше не может писать по нему.
-
-### Подписки
-
-Подписка хранится прямо в карточке пользователя в `user_data.json`.
-
-Админ может:
-
-- `💾 Назначить подписку`  
-  Только сохранить в базе.
-
-- `📤 Отправить подписку`  
-  Сохранить в базе и сразу отправить пользователю.
-
-Пользователь в любой момент может открыть `📦 Моя подписка` и получить актуальную версию.
-
-### Техработы
-
-Админский раздел техработ поддерживает два режима:
-
-- `🚨 Объявить техработы`  
-  Немедленно создаёт активные техработы и рассылает уведомления.
-
-- `🗓 Запланировать техработы`  
-  Создаёт запись в `scheduled_maintenance`, после чего бот сам:
-  - отправляет уведомление за 30 минут до старта
-  - отправляет уведомление в момент старта
-  - переводит план в активные техработы
-
-### Пользователи
-
-Админская карточка пользователя поддерживает:
-
-- личное сообщение
-- смену nickname
-- переключение оплаты
-- назначение/отправку подписки
-- обновление меню пользователя
-- бан/разбан обычных пользователей
+`app/services/remnawave_metrics.py`: получение Prometheus-метрик RemnaWave, cache, parsing node metrics, online/offline, RAM, uptime, online users.
 
 ## Конфигурация
 
-### Обязательные файлы
-
-- `app/.env`
-- `app/env.secrets`
-
-Шаблоны:
-
-- [app/.env.example](/C:/Users/kiril/Documents/server_bot/app/.env.example)
-- [app/env.secrets.example](/C:/Users/kiril/Documents/server_bot/app/env.secrets.example)
-
-### Минимальный `app/env.secrets`
+Минимальный `app/env.secrets`:
 
 ```env
 BOT_TOKEN=123456:telegram-token
@@ -235,7 +133,7 @@ AUTH_PASSWORD=user-password
 ADMIN_PASSWORD=admin-password
 ```
 
-### Рекомендуемый `app/.env` для локального запуска из репозитория
+Минимальный `app/.env` для локального запуска из корня проекта:
 
 ```env
 TZ=Europe/Moscow
@@ -245,277 +143,161 @@ LOG_JSON=false
 USER_DATA_PATH=data/user_data.json
 IMPORTANT_DATA_PATH=data/important_data.json
 
-LOCAL_SERVER_CODE=nl
-LOCAL_SERVER_LABEL=Netherlands
-EXPECTED_A_IP=127.0.0.1
-CHECK_A_DOMAINS=example.com
-MONITOR_CONTAINERS=remnawave,remnawave-db,remnawave-redis,remnanode,remnawave-nginx
-FAIL2BAN_LOG_PATH=/var/log/fail2ban.log
+LOCAL_SERVER_CODE=local
+LOCAL_SERVER_LABEL=Local server
+LOCAL_SERVER_FLAG=
+MONITOR_CONTAINERS=
+EXPECTED_A_IP=
+CHECK_A_DOMAINS=
 
 REMOTE_SERVER_ENABLED=false
 ```
 
-### Основные параметры `app/.env`
-
-#### Базовые
-
-- `TZ`
-- `LOG_LEVEL`
-- `LOG_JSON`
-- `USER_DATA_PATH`
-- `IMPORTANT_DATA_PATH`
-
-#### Локальный сервер
-
-- `LOCAL_SERVER_CODE`
-- `LOCAL_SERVER_LABEL`
-- `EXPECTED_A_IP`
-- `CHECK_A_DOMAINS`
-- `MONITOR_CONTAINERS`
-- `FAIL2BAN_LOG_PATH`
-
-#### Удалённый сервер
-
-- `REMOTE_SERVER_ENABLED`
-- `REMOTE_SERVER_CODE`
-- `REMOTE_SERVER_LABEL`
-- `REMOTE_SERVER_SSH_TARGET`
-- `REMOTE_SERVER_EXPECTED_A_IP`
-- `REMOTE_SERVER_CHECK_A_DOMAINS`
-- `REMOTE_SERVER_FAIL2BAN_LOG_PATH`
-- `REMOTE_SERVER_MONITOR_CONTAINERS`
-
-#### DNS и фоновые задачи
-
-- `DNS_RESOLVERS`
-- `FAIL2BAN_DAILY_AT`
-- `DNS_DAILY_REFRESH_AT`
-- `DNS_STARTUP_REFRESH_DELAY_SEC`
-- `MAINT_RESTART_NOTIFY_DELAY_SEC`
-
-#### Таймауты
-
-- `SUBPROC_SHORT_TIMEOUT`
-- `SUBPROC_MEDIUM_TIMEOUT`
-
-### Что реально читает код из `.env`
-
-Да, бот реально использует значения из `.env`:
-
-- пути к JSON-хранилищам
-- логирование
-- настройки локального и удалённого серверов
-- DNS resolver’ы и домены
-- пути fail2ban
-- расписание фоновых задач
-- SSH target удалённого сервера
-
-Секреты тоже могут читаться из `.env`, но для продакшена лучше держать их в `env.secrets`.
-
-## Установка
-
-### 1. Подготовить Python
-
-Рекомендуется Python 3.11+.
-
-### 2. Создать venv
-
-```bash
-python -m venv .venv
-```
-
-Linux:
-
-```bash
-source .venv/bin/activate
-```
-
-Windows PowerShell:
-
-```powershell
-.\.venv\Scripts\Activate.ps1
-```
-
-### 3. Установить зависимости
-
-```bash
-pip install -r app/requirements.txt
-```
-
-### 4. Создать конфиги
-
-Скопируйте шаблоны:
-
-```bash
-cp app/.env.example app/.env
-cp app/env.secrets.example app/env.secrets
-```
-
-Потом заполните реальные значения.
-
-### 5. Проверить синтаксис
-
-```bash
-python -m compileall app
-```
-
-### 6. Локовый тест запуска
-
-Из корня проекта:
-
-```bash
-python -m app.main
-```
-
-## Развёртывание на Linux сервере
-
-Ниже пример для каталога `/opt/maintbot`.
-
-### Рекомендуемая структура
-
-```text
-/opt/maintbot/
-  app/
-  data/
-  .venv/
-```
-
-### Рекомендуемые права на секреты
-
-```bash
-chown maintbot:maintbot /opt/maintbot/app/env.secrets
-chmod 600 /opt/maintbot/app/env.secrets
-```
-
-### Рекомендуемые значения путей на сервере
+Пример для локального сервера и нескольких SSH-серверов:
 
 ```env
+TZ=Europe/Moscow
+LOG_LEVEL=INFO
+LOG_JSON=false
+
 USER_DATA_PATH=/opt/maintbot/data/user_data.json
 IMPORTANT_DATA_PATH=/opt/maintbot/data/important_data.json
+
+LOCAL_SERVER_CODE=nl
+LOCAL_SERVER_LABEL=Netherlands(Bot)
+LOCAL_SERVER_FLAG=NL
+MONITOR_CONTAINERS=remnanode,remnawave-nginx
+EXPECTED_A_IP=203.0.113.20
+CHECK_A_DOMAINS=nl.example.com
+
+DNS_RESOLVERS=1.1.1.1,8.8.8.8
+FAIL2BAN_LOG_PATH=/var/log/fail2ban.log
+FAIL2BAN_DAILY_AT=12:00
+DNS_DAILY_REFRESH_AT=03:05
+DNS_STARTUP_REFRESH_DELAY_SEC=5
+
+REMOTE_SERVER_ENABLED=true
+REMOTE_SERVER_CODES=main,ru1,ru2
+REMOTE_SERVER_LABELS=Russia(Main),Russia(S1),Russia(S2)
+REMOTE_SERVER_FLAGS=RU,RU,RU
+REMOTE_SERVER_SSH_TARGETS=maintbot@203.0.113.10:1606,maintbot@203.0.113.11:1606,maintbot@203.0.113.12:1606
+REMOTE_SERVER_EXPECTED_A_IPS=203.0.113.10,203.0.113.11,203.0.113.12
+REMOTE_SERVER_DOMAINS=main.example.com;ru1.example.com;ru2.example.com
+REMOTE_SERVER_FAIL2BAN_LOG_PATH=/var/log/fail2ban.log
+REMOTE_SERVER_MONITOR_CONTAINERS=remnanode,remnawave-nginx
+REMOTE_SERVER_MONITOR_CONTAINERS_BY_SERVER=remnawave,remnawave-db,remnawave-redis;remnanode,remnawave-nginx;remnanode,remnawave-nginx
 ```
 
-## Запуск через systemd
-
-Рекомендуемый способ запуска: только через `systemd`.
-
-Пример unit-файла:
-
-```ini
-[Unit]
-Description=MaintBot Telegram Bot
-After=network.target
-
-[Service]
-Type=simple
-User=maintbot
-WorkingDirectory=/opt/maintbot
-ExecStart=/opt/maintbot/.venv/bin/python -m app.main
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-После создания:
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable maintbot.service
-sudo systemctl start maintbot.service
-```
-
-## Проверка работы
-
-### Проверка статуса сервиса
-
-```bash
-sudo systemctl status maintbot.service --no-pager -l
-```
-
-### Просмотр логов
-
-```bash
-sudo journalctl -u maintbot.service -n 200 --no-pager
-sudo journalctl -u maintbot.service -f
-```
-
-### Признаки успешного запуска
-
-- `Bot started`
-- `Application started`
-- `Scheduler started`
-- добавлены jobs `fail2ban_digest`, `dns_daily_refresh`, `dns_refresh_startup`, `maint_restart_notify`, `maint_schedule_tick`
-
-## Логирование
-
-Логирование настраивается через:
-
-- `LOG_LEVEL`
-- `LOG_JSON`
-
-Если `LOG_JSON=false`, логи обычные текстовые.  
-Если `LOG_JSON=true`, каждая запись идёт JSON-объектом.
-
-Отдельно логируются:
-
-- авторизация и ошибки авторизации
-- DNS refresh
-- запуск, продление и завершение техработ
-- планирование техработ
-- действия по пользователям
-- выдача подписки
-- весь жизненный цикл тикетов
-
-`httpx` и `httpcore` опущены до `WARNING`, чтобы не светить лишние детали Telegram API.
-
-## Типичные проблемы
-
-### `Conflict: terminated by other getUpdates request`
-
-Причина: бот запущен более чем в одном процессе с одним и тем же `BOT_TOKEN`.
-
-Что делать:
-
-- оставить только один экземпляр
-- не запускать вручную `python main.py` или `python -m app.main`, если сервис уже запущен
-- для локальной разработки использовать отдельный токен
-
-### Бот не видит локальные `data/*.json`
-
-Проверьте `USER_DATA_PATH` и `IMPORTANT_DATA_PATH`.
-
-Если хотите использовать файлы из репозитория, задайте:
+Для RemnaWave mixed-mode:
 
 ```env
-USER_DATA_PATH=data/user_data.json
-IMPORTANT_DATA_PATH=data/important_data.json
+BOT_MODE=mixed
+REMNAWAVE_METRICS_URL=https://panel.example.com/metrics
+REMNAWAVE_METRICS_USER=
+REMNAWAVE_METRICS_PASS=
+REMNAWAVE_METRICS_TIMEOUT_SEC=3
+REMNAWAVE_METRICS_CACHE_TTL_SEC=8
+REMNAWAVE_HIDDEN_UUIDS=
+
+LOCAL_SERVER_REMNAWAVE_UUID=
+REMOTE_SERVER_REMNAWAVE_UUIDS=uuid-for-main,uuid-for-ru1,uuid-for-ru2
+DAILY_NODE_STATUS_REFRESH_AT=12:00
 ```
 
-### Нет данных по удалённому серверу
+В `BOT_MODE=ssh` статус строится через локальные команды и SSH. В `BOT_MODE=mixed` для серверов с RemnaWave UUID uptime/RAM/online берутся из `/metrics`, а disk/UFW берутся из кэша, который обновляется ежедневным job или вручную администратором через SSH.
 
-Проверьте:
+## Переменные окружения
 
-- `REMOTE_SERVER_ENABLED=true`
-- `REMOTE_SERVER_SSH_TARGET`
-- доступ по SSH без интерактивного пароля
-- наличие Docker/UFW/fail2ban на удалённой машине
+Базовые:
 
-### Не отправляются уведомления пользователям
+- `ENV_PATH`, `SECRETS_ENV_PATH`;
+- `TZ`;
+- `LOG_LEVEL`, `LOG_JSON`;
+- `USER_DATA_PATH`, `IMPORTANT_DATA_PATH`, `CONFIG_PATH`.
 
-Возможные причины:
+Авторизация и защита:
 
-- пользователь не запускал бота
-- пользователь заблокировал бота
-- Telegram вернул ошибку доставки
+- `BOT_TOKEN`;
+- `AUTH_PASSWORD`;
+- `ADMIN_PASSWORD`;
+- `AUTH_FAIL_WINDOW_SEC`;
+- `AUTH_MAX_FAILS_IN_WINDOW`;
+- `AUTH_LOCKOUT_SEC`;
+- `AUTH_PRUNE_INTERVAL_SEC`;
+- `ERROR_NOTIFY_INTERVAL_SEC`.
 
-Эти случаи попадают в лог.
+Локальный сервер:
 
-## Формат данных
+- `LOCAL_SERVER_CODE`;
+- `LOCAL_SERVER_LABEL`;
+- `LOCAL_SERVER_FLAG`;
+- `EXPECTED_A_IP`;
+- `CHECK_A_DOMAINS`;
+- `MONITOR_CONTAINERS`;
+- `FAIL2BAN_LOG_PATH`;
+- `FAIL2BAN_STATE_PATH`.
 
-### `data/user_data.json`
+Удалённые серверы:
 
-Пример:
+- `REMOTE_SERVER_ENABLED`;
+- `REMOTE_SERVER_CODES`;
+- `REMOTE_SERVER_LABELS`;
+- `REMOTE_SERVER_FLAGS`;
+- `REMOTE_SERVER_SSH_TARGETS`;
+- `REMOTE_SERVER_EXPECTED_A_IPS`;
+- `REMOTE_SERVER_DOMAINS`;
+- `REMOTE_SERVER_FAIL2BAN_LOG_PATH`;
+- `REMOTE_SERVER_MONITOR_CONTAINERS`;
+- `REMOTE_SERVER_MONITOR_CONTAINERS_BY_SERVER`.
+
+Legacy-настройки одного удалённого сервера:
+
+- `REMOTE_SERVER_CODE`;
+- `REMOTE_SERVER_LABEL`;
+- `REMOTE_SERVER_FLAG`;
+- `REMOTE_SERVER_SSH_TARGET`;
+- `REMOTE_SERVER_EXPECTED_A_IP`;
+- `REMOTE_SERVER_CHECK_A_DOMAINS`.
+
+DNS, jobs и subprocess:
+
+- `DNS_RESOLVERS`;
+- `FAIL2BAN_DAILY_AT`;
+- `FAIL2BAN_DIGEST_TAIL_LINES`;
+- `FAIL2BAN_DIGEST_MAX_BYTES`;
+- `DNS_DAILY_REFRESH_AT`;
+- `DNS_STARTUP_REFRESH_DELAY_SEC`;
+- `MAINT_RESTART_NOTIFY_DELAY_SEC`;
+- `MAINT_RESTART_REMINDER_INTERVAL_SEC`;
+- `SUBPROC_SHORT_TIMEOUT`;
+- `SUBPROC_MEDIUM_TIMEOUT`.
+
+SSH:
+
+- `SSH_STRICT_HOST_KEY_CHECKING`;
+- `SSH_KNOWN_HOSTS_FILE`.
+
+Рассылки:
+
+- `BROADCAST_MAX_CONCURRENCY`;
+- `BROADCAST_MAX_ATTEMPTS`.
+
+RemnaWave:
+
+- `BOT_MODE`;
+- `REMNAWAVE_METRICS_URL`;
+- `REMNAWAVE_METRICS_USER`;
+- `REMNAWAVE_METRICS_PASS`;
+- `REMNAWAVE_METRICS_TIMEOUT_SEC`;
+- `REMNAWAVE_METRICS_CACHE_TTL_SEC`;
+- `REMNAWAVE_HIDDEN_UUIDS`;
+- `LOCAL_SERVER_REMNAWAVE_UUID`;
+- `REMOTE_SERVER_REMNAWAVE_UUIDS`;
+- `DAILY_NODE_STATUS_REFRESH_AT`.
+
+## Данные
+
+`data/user_data.json`:
 
 ```json
 {
@@ -524,70 +306,238 @@ IMPORTANT_DATA_PATH=data/important_data.json
     "1111111": {
       "user_id": 1111111,
       "role": "admin",
-      "nickname": "Кирилл Французов",
-      "username": "ZoL_Kush",
-      "first_name": "ZoL",
-      "last_name": "Kush",
-      "auth_at": "2025",
+      "nickname": "Admin",
+      "username": "admin_username",
+      "first_name": "Admin",
+      "last_name": null,
+      "auth_at": "2026-01-01T12:00:00+03:00",
       "enabled": true,
-      "is_paid": true
+      "is_paid": true,
+      "subscription_text": "vless://...",
+      "subscription_updated_at": "2026-01-01T12:10:00+03:00",
+      "subscription_updated_by_id": 1111111,
+      "subscription_updated_by_name": "Admin"
     }
   }
 }
 ```
 
-Дополнительно у пользователя могут храниться:
+`data/important_data.json`:
 
-- `subscription_text`
-- `subscription_updated_at`
-- `subscription_updated_by_id`
-- `subscription_updated_by_name`
+```json
+{
+  "schema_version": 1,
+  "tickets_seq": 1,
+  "tickets": {},
+  "maintenance": {},
+  "scheduled_maintenance": {},
+  "dns_status": {},
+  "daily_node_status": {}
+}
+```
 
-### `data/important_data.json`
+Код умеет загрузить неполный старый JSON и дописать недостающие ключи при следующем сохранении.
 
-Содержит:
+## Установка
 
-- `tickets_seq`
-- `tickets`
-- `maintenance`
-- `scheduled_maintenance`
-- `dns_status`
+Требуется Python 3.10+.
 
-Даже если старый JSON ещё не содержит часть ключей, код их домигрирует при загрузке.
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r app/requirements.txt
+```
 
-## Команды
+Windows PowerShell:
 
-- `/start`
-- `/menu`
-- `/help`
-- `/auth пароль`
-- `/logout`
-- `/health`
-- `/subscription`
-- `/ticket`
-- `/users`
-- `/maint`
-- `/fail2ban`
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r app\requirements.txt
+```
 
-## Что не стоит делать
-
-- не хранить секреты в публичном репозитории
-- не запускать два экземпляра бота с одним токеном
-- не редактировать JSON-файлы вручную во время активной работы бота без понимания схемы
-- не запускать прод-бота локально тем же токеном, что и на сервере
-
-## Быстрая памятка
-
-Локальный запуск:
+Создайте `app/.env` и `app/env.secrets`, затем проверьте синтаксис:
 
 ```bash
 python -m compileall app
+```
+
+Локальный запуск из корня проекта:
+
+```bash
 python -m app.main
 ```
 
-Продакшен:
+Альтернативно, если проект установлен как package:
 
 ```bash
-sudo systemctl restart maintbot.service
-sudo journalctl -u maintbot.service -f
+maintbot
 ```
+
+## Развёртывание через systemd
+
+Рекомендуемый каталог:
+
+```text
+/opt/maintbot/
+  app/
+  data/
+  deploy/
+  .venv/
+```
+
+Unit-файл лежит в `deploy/maintbot.service`:
+
+```ini
+[Unit]
+Description=MaintBot Telegram Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=maintbot
+WorkingDirectory=/opt/maintbot
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/maintbot/.venv/bin/python -m app.main
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+LogsDirectory=maintbot
+StandardOutput=append:/var/log/maintbot/bot.log
+StandardError=append:/var/log/maintbot/bot.log
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Пример установки:
+
+```bash
+sudo useradd -r -m -d /opt/maintbot -s /bin/bash maintbot
+sudo chown -R maintbot:maintbot /opt/maintbot
+sudo chmod 600 /opt/maintbot/app/env.secrets
+sudo cp /opt/maintbot/deploy/maintbot.service /etc/systemd/system/maintbot.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now maintbot.service
+```
+
+Для Docker, UFW и fail2ban при запуске не от root нужен доступ к командам. Код пробует обычный вызов и fallback через `sudo -n`, поэтому для пользователя сервиса должен быть настроен `NOPASSWD`, если прямых прав недостаточно:
+
+```bash
+sudo usermod -aG sudo maintbot
+echo 'maintbot ALL=(ALL) NOPASSWD: ALL' | sudo tee /etc/sudoers.d/maintbot
+sudo chmod 440 /etc/sudoers.d/maintbot
+```
+
+Более строгий вариант лучше ограничить конкретными командами `docker`, `ufw`, `tail`, `stat`.
+
+## SSH-серверы
+
+`REMOTE_SERVER_SSH_TARGETS` использует формат `user@host` или `user@host:port`. SSH запускается с:
+
+- `BatchMode=yes`;
+- `ConnectTimeout`;
+- `LogLevel=ERROR`;
+- `StrictHostKeyChecking` из `SSH_STRICT_HOST_KEY_CHECKING`, по умолчанию `accept-new`;
+- опциональным `UserKnownHostsFile` из `SSH_KNOWN_HOSTS_FILE`.
+
+На удалённой стороне бот выполняет `sh -c`, читает `/proc/uptime`, `/proc/meminfo`, `df -B1 /`, `ufw status`, `docker ps`, `docker inspect`, `docker logs`, `tail` и `stat` для fail2ban. Если нужны повышенные права, на удалённом сервере тоже должен работать `sudo -n`.
+
+## Фоновые задачи
+
+При доступном `JobQueue` регистрируются:
+
+- `fail2ban_digest`: ежедневная выжимка fail2ban администраторам;
+- `dns_daily_refresh`: ежедневное обновление DNS cache;
+- `dns_refresh_startup`: одноразовый DNS refresh после старта;
+- `daily_node_status_refresh`: daily disk/UFW refresh в `BOT_MODE=mixed`;
+- `daily_node_status_startup`: startup refresh для mixed-mode;
+- `maint_active_reminder`: периодическое напоминание админам об активных техработах;
+- `maint_schedule_tick`: проверка запланированных техработ каждую минуту;
+- `auth_prune`: очистка памяти rate-limit авторизации.
+
+## Команды
+
+- `/start`;
+- `/menu`;
+- `/help`;
+- `/auth пароль`;
+- `/login пароль`;
+- `/logout`;
+- `/health`;
+- `/subscription`;
+- `/ticket`;
+- `/users`;
+- `/maint`;
+- `/fail2ban`;
+- `/cancel`.
+
+## Логирование
+
+Логирование настраивается через `LOG_LEVEL` и `LOG_JSON`.
+
+При `LOG_JSON=false` используется текстовый формат. При `LOG_JSON=true` каждая запись выводится JSON-объектом с `ts`, `level`, `logger`, `msg` и полями вроде `user_id`, `chat_id`, `server_key`, `action`, если они переданы.
+
+`httpx` и `httpcore` понижены до `WARNING`.
+
+Просмотр логов systemd-варианта:
+
+```bash
+sudo tail -n 200 /var/log/maintbot/bot.log
+sudo tail -f /var/log/maintbot/bot.log
+sudo systemctl status maintbot.service --no-pager -l
+```
+
+## Проверка
+
+```bash
+python -m compileall app
+```
+
+Для разработки доступны зависимости:
+
+```bash
+pip install -r app/requirements-dev.txt
+```
+
+`pyproject.toml` задаёт package `maintbot`, script entry point `maintbot = app.main:main`, dev-зависимости `pytest`, `pytest-asyncio`, `ruff`, `mypy` и `ruff` line length `120`.
+
+## Типичные проблемы
+
+`BOT_TOKEN` или пароли не заданы:
+
+Проверьте `app/env.secrets`, `app/.env`, `ENV_PATH`, `SECRETS_ENV_PATH` и переменные окружения процесса.
+
+`Conflict: terminated by other getUpdates request`:
+
+Один Telegram token уже используется другим процессом. Оставьте только один экземпляр бота.
+
+`sudo: a password is required`:
+
+Код вызвал `sudo -n`, но пользователь сервиса не имеет `NOPASSWD`. Настройте sudoers или дайте прямые права.
+
+Docker/UFW/fail2ban недоступны:
+
+Проверьте наличие команд на локальном или удалённом сервере, права пользователя, SSH-доступ и `sudo -n`.
+
+DNS показывает "нет свежих данных":
+
+DNS-статус хранится в cache. Нажмите "Обновить DNS статус" или дождитесь `dns_daily_refresh`.
+
+Mixed-mode показывает ноду offline или ошибку metrics:
+
+Проверьте `REMNAWAVE_METRICS_URL`, basic auth, доступ к `/metrics`, UUID ноды и `REMNAWAVE_HIDDEN_UUIDS`.
+
+Тикет не создаётся:
+
+У пользователя может уже быть открытый тикет, или нет авторизованных администраторов.
+
+## Безопасность
+
+- Не храните реальные `BOT_TOKEN`, пароли, SSH targets с приватными деталями и подписки в публичном репозитории.
+- `data/user_data.json` содержит Telegram ID, имена пользователей и подписки. Относитесь к нему как к чувствительным данным.
+- `data/important_data.json` может содержать тексты тикетов и вложения через Telegram file id.
+- Не запускайте локально production token, если systemd-сервис уже работает.
+- Не редактируйте JSON во время активной работы бота без понимания схемы.
+- Для production ограничьте sudoers конкретными командами вместо полного `NOPASSWD: ALL`.

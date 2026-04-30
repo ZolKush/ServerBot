@@ -9,7 +9,8 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import aiofiles
 
-from ..config import TZ, logger
+from ..config import SUBPROC_MEDIUM_TIMEOUT, SUBPROC_SHORT_TIMEOUT, SUDO_BIN, TZ, logger
+from .system_process import run_exec
 
 F2B_LINE_RE = re.compile(
     r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:,\d{3})?)\s+"
@@ -17,7 +18,13 @@ F2B_LINE_RE = re.compile(
     r"(?P<level>[A-Z]+)\s+\[(?P<jail>[^\]]+)\]\s+"
     r"(?P<msg>.+?)\s*$"
 )
-F2B_IP_RE = re.compile(r"(?P<ip>\b(?:\d{1,3}\.){3}\d{1,3}\b|\b[0-9a-fA-F:]{2,}\b)")
+F2B_IP_RE = re.compile(
+    r"(?P<ip>"
+    r"\b(?:\d{1,3}\.){3}\d{1,3}\b"              # IPv4
+    r"|"
+    r"(?:[0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}"  # IPv6 (requires ≥2 colon-separated groups)
+    r")"
+)
 
 
 def _f2b_parse_time(ts: str) -> Optional[datetime]:
@@ -82,7 +89,49 @@ async def tail_text_file_async(path: str, n_lines: int, max_bytes: int = 2_000_0
     return await asyncio.to_thread(tail_text_file, path, n_lines, max_bytes)
 
 
-FAIL2BAN_STATE_LOCK = asyncio.Lock()
+async def tail_text_file_with_sudo_async(path: str, n_lines: int, max_bytes: int = 2_000_000) -> str:
+    try:
+        return await tail_text_file_async(path, n_lines, max_bytes)
+    except PermissionError:
+        if not SUDO_BIN:
+            raise
+        n = max(1, min(int(n_lines), 10000))
+        rc, out, err = await run_exec([SUDO_BIN, "-n", "tail", "-n", str(n), path], timeout=SUBPROC_MEDIUM_TIMEOUT)
+        if rc == 0:
+            return out
+        err_text = (err or out or "").strip().lower()
+        if "no such file" in err_text or "cannot open" in err_text or "cannot access" in err_text:
+            raise FileNotFoundError(path)
+        raise PermissionError(path)
+
+
+async def fail2ban_stat_with_sudo_async(path: str) -> Optional[Tuple[int, datetime]]:
+    p = Path(path)
+    try:
+        st = await asyncio.to_thread(p.stat)
+        return st.st_size, datetime.fromtimestamp(st.st_mtime, tz=TZ)
+    except FileNotFoundError:
+        raise
+    except PermissionError:
+        pass
+    except Exception:
+        return None
+
+    if not SUDO_BIN:
+        raise PermissionError(path)
+
+    rc, out, err = await run_exec([SUDO_BIN, "-n", "stat", "-c", "%s|%Y", path], timeout=SUBPROC_SHORT_TIMEOUT)
+    if rc != 0:
+        err_text = (err or out or "").strip().lower()
+        if "no such file" in err_text or "cannot stat" in err_text:
+            raise FileNotFoundError(path)
+        raise PermissionError(path)
+    try:
+        size_s, mtime_s = out.strip().split("|", 1)
+        return int(size_s), datetime.fromtimestamp(int(mtime_s), tz=TZ)
+    except Exception:
+        logger.debug("fail2ban_stat_with_sudo_async parse failed for %s", path)
+        return None
 
 
 @dataclass(frozen=True)

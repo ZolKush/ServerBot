@@ -10,6 +10,7 @@ from telegram.ext import ContextTypes
 from ..logging_setup import logger
 from ..storage import get_user_meta_copy
 from .common import (
+    format_dt_human,
     get_user_id,
     html_escape,
     main_menu_inline_kb,
@@ -37,12 +38,9 @@ def has_subscription(meta: Optional[Dict[str, Any]]) -> bool:
 
 def _subscription_intro(meta: Dict[str, Any]) -> str:
     updated_at = str(meta.get(SUBSCRIPTION_UPDATED_AT_KEY, "") or "").strip()
-    updated_by = str(meta.get(SUBSCRIPTION_UPDATED_BY_NAME_KEY, "") or "").strip()
-    lines = ["📦 <b>Моя подписка</b>"]
+    lines = ["📦 <b>Моя подписка</b>", "Администрация назначила вам подписку."]
     if updated_at:
-        lines.append(f"• Обновлена: <code>{html_escape(updated_at)}</code>")
-    if updated_by:
-        lines.append(f"• Назначил: <b>{html_escape(updated_by)}</b>")
+        lines.append(f"• Обновлена: <code>{html_escape(format_dt_human(updated_at))}</code>")
     return "\n".join(lines)
 
 

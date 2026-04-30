@@ -1,0 +1,20 @@
+[Unit]
+Description=MaintBot Telegram Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=maintbot
+WorkingDirectory=/opt/maintbot
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/maintbot/.venv/bin/python -m app.main
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+LogsDirectory=maintbot
+StandardOutput=append:/var/log/maintbot/bot.log
+StandardError=append:/var/log/maintbot/bot.log
+
+[Install]
+WantedBy=multi-user.target

@@ -1,14 +1,16 @@
 import json
 import os
+import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Literal
+from typing import Any, Dict, List, Literal, Optional
 from zoneinfo import ZoneInfo
 
 from dotenv import dotenv_values
-from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
+from pydantic import BaseModel, Field, ValidationError, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings.sources import DotEnvSettingsSource
 
 from .logging_setup import logger
 
@@ -20,9 +22,25 @@ ENV_FILE = Path(_ENV_PATH) if _ENV_PATH else (BASE_DIR / ".env")
 _SECRETS_ENV_PATH = os.getenv("SECRETS_ENV_PATH", "").strip()
 SECRETS_ENV_FILE = Path(_SECRETS_ENV_PATH) if _SECRETS_ENV_PATH else (BASE_DIR / "env.secrets")
 _SECRET_KEYS = ("BOT_TOKEN", "AUTH_PASSWORD", "ADMIN_PASSWORD")
+_SSH_TARGET_RE = re.compile(r"^[A-Za-z0-9_.:@\-\[\]]{1,255}$")
+_SSH_TARGET_WITH_PORT_RE = re.compile(r"^[A-Za-z0-9_.@\-\[\]:]+:(\d{1,5})$")
+_SERVER_CODE_RE = re.compile(r"[^a-z0-9_-]+")
+_CONTAINER_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.\-]{0,62}$")
+_UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+SERVER_KEY_PATTERN = r"[a-z0-9_-]{1,12}"
+_COUNTRY_NAMES = {
+    "DE": "Germany",
+    "NL": "Netherlands",
+    "RU": "Russia",
+    "FI": "Finland",
+    "FR": "France",
+    "PL": "Poland",
+    "US": "United States",
+    "GB": "United Kingdom",
+}
 
 
-def split_env_list(raw: Any) -> List[str]:
+def split_env_list(raw: Any, *, dedupe: bool = True) -> List[str]:
     if raw is None:
         return []
     if isinstance(raw, str):
@@ -42,9 +60,29 @@ def split_env_list(raw: Any) -> List[str]:
         items = [p.strip() for p in str(raw).split(",")]
     out: List[str] = []
     for item in items:
-        if item and item not in out:
+        if item and (not dedupe or item not in out):
             out.append(item)
     return out
+
+
+def split_env_groups(raw: Any) -> List[List[str]]:
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        groups: List[List[str]] = []
+        for item in raw:
+            group = split_env_list(item)
+            if group:
+                groups.append(group)
+        return groups
+
+    s = str(raw or "").strip()
+    if not s:
+        return []
+    if ";" in s:
+        return [split_env_list(part, dedupe=False) for part in s.split(";")]
+    items = split_env_list(s)
+    return [items] if items else []
 
 
 def resolve_path(value: str, base: Path) -> str:
@@ -65,18 +103,87 @@ def resolve_bin(*candidates: str) -> str:
     return candidates[-1] if candidates else ""
 
 
+def country_flag(value: str) -> str:
+    code = (value or "").strip().upper()
+    if len(code) != 2 or not code.isalpha():
+        return "🖥"
+    base = 0x1F1E6
+    return "".join(chr(base + ord(ch) - ord("A")) for ch in code)
+
+
+def country_label(value: str, fallback: str) -> str:
+    code = (value or "").strip().upper()
+    if len(code) == 2 and code.isalpha():
+        return _COUNTRY_NAMES.get(code, code)
+    return fallback.strip() or "Server"
+
+
+def normalize_server_key(value: str, fallback: str) -> str:
+    raw = (value or fallback or "srv").strip().lower()
+    raw = _SERVER_CODE_RE.sub("-", raw).strip("-_")
+    return (raw or "srv")[:12]
+
+
+def _nth_or_default(items: List[str], index: int, default: str = "") -> str:
+    if index < len(items):
+        return items[index]
+    return default
+
+
+def _domains_for_index(groups: List[List[str]], index: int, total: int, fallback: Optional[List[str]] = None) -> List[str]:
+    if not groups:
+        return list(fallback or [])
+    if len(groups) == total:
+        return list(groups[index])
+    if len(groups) == 1:
+        one = list(groups[0])
+        if total > 1 and len(one) == total:
+            return [one[index]]
+        return one if index == 0 else list(fallback or [])
+    return list(groups[index]) if index < len(groups) else list(fallback or [])
+
+
+def _group_for_index(groups: List[List[str]], index: int, fallback: Optional[List[str]] = None) -> List[str]:
+    if not groups:
+        return list(fallback or [])
+    return list(groups[index]) if index < len(groups) else list(fallback or [])
+
+
+def _validate_ssh_target(value: str) -> str:
+    s = str(value or "").strip()
+    if not s:
+        return ""
+    if s.startswith("-") or not _SSH_TARGET_RE.fullmatch(s):
+        raise ValueError("SSH target has invalid format")
+    m = _SSH_TARGET_WITH_PORT_RE.fullmatch(s)
+    if m and not 1 <= int(m.group(1)) <= 65535:
+        raise ValueError("SSH target port out of range")
+    return s
+
+
 class SecretSettings(BaseModel):
     BOT_TOKEN: str
-    AUTH_PASSWORD: str
-    ADMIN_PASSWORD: str
+    AUTH_PASSWORD: str = ""
+    ADMIN_PASSWORD: str = ""
 
-    @field_validator("BOT_TOKEN", "AUTH_PASSWORD", "ADMIN_PASSWORD", mode="before")
+    @field_validator("BOT_TOKEN", mode="before")
     @classmethod
-    def _strip_non_empty(cls, v: Any) -> str:
+    def _strip_bot_token(cls, v: Any) -> str:
         s = str(v or "").strip()
         if not s:
             raise ValueError("empty secret")
         return s
+
+    @field_validator("AUTH_PASSWORD", "ADMIN_PASSWORD", mode="before")
+    @classmethod
+    def _strip_password(cls, v: Any) -> str:
+        return str(v or "").strip()
+
+    @model_validator(mode="after")
+    def _require_at_least_one_password(self) -> "SecretSettings":
+        if not self.AUTH_PASSWORD and not self.ADMIN_PASSWORD:
+            raise ValueError("хотя бы один из AUTH_PASSWORD или ADMIN_PASSWORD должен быть задан")
+        return self
 
 
 def _load_env_file_values(path: Path) -> Dict[str, str]:
@@ -136,13 +243,31 @@ def load_required_secrets(path: Path, *, fallback_path: Path | None = None) -> S
         ) from e
 
 
+class _PermissiveDotEnvSource(DotEnvSettingsSource):
+    """Allows comma-separated list values in .env without requiring JSON format."""
+
+    def decode_complex_value(self, field_name: str, field: Any, value: Any) -> Any:
+        try:
+            return super().decode_complex_value(field_name, field, value)
+        except Exception:
+            return value
+
+
 class AppSettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=str(ENV_FILE),
         env_file_encoding="utf-8",
         extra="ignore",
-        enable_decoding=False,
+        env_ignore_empty=True,
     )
+
+    @classmethod
+    def settings_customise_sources(cls, settings_cls, init_settings, env_settings, dotenv_settings, **kwargs):
+        secrets = kwargs.get("secrets_settings") or kwargs.get("file_secret_settings")
+        sources = [init_settings, env_settings, _PermissiveDotEnvSource(settings_cls)]
+        if secrets is not None:
+            sources.append(secrets)
+        return tuple(sources)
 
     TZ: str = "Europe/Moscow"
     LOG_LEVEL: str = "INFO"
@@ -152,36 +277,68 @@ class AppSettings(BaseSettings):
     IMPORTANT_DATA_PATH: str = str(ROOT_DIR / "data" / "important_data.json")
     CONFIG_PATH: str = str(ROOT_DIR / "data" / "config.json")
 
-    MONITOR_CONTAINERS: List[str] = Field(default_factory=lambda: ["remnawave", "remnawave-db", "remnawave-redis", "remnanode", "remnawave-nginx"])
-    MONITOR_PANEL_HOST: str = "xvui.ittelecom.pl"
-    PING_COUNT: int = 1
-    PING_TIMEOUT_SEC: int = 1
-
-    EXPECTED_A_IP: str = "95.164.47.185"
-    CHECK_A_DOMAINS: List[str] = Field(default_factory=lambda: ["nxc.ittelecom.pl", "xvui.ittelecom.pl", "supsub.ittelecom.pl"])
+    MONITOR_CONTAINERS: List[str] = Field(default_factory=list)
+    EXPECTED_A_IP: str = ""
+    CHECK_A_DOMAINS: List[str] = Field(default_factory=list)
     DNS_RESOLVERS: List[str] = Field(default_factory=lambda: ["1.1.1.1", "8.8.8.8", "77.88.8.8"])
 
     FAIL2BAN_LOG_PATH: str = "/var/log/fail2ban.log"
     FAIL2BAN_STATE_PATH: str = ""
     FAIL2BAN_DAILY_AT: str = "12:00"
+    FAIL2BAN_DIGEST_TAIL_LINES: int = 20000
+    FAIL2BAN_DIGEST_MAX_BYTES: int = 3_000_000
     DNS_DAILY_REFRESH_AT: str = "03:05"
     DNS_STARTUP_REFRESH_DELAY_SEC: int = 5
     MAINT_RESTART_NOTIFY_DELAY_SEC: int = 2
+    MAINT_RESTART_REMINDER_INTERVAL_SEC: int = 600
 
     SUBPROC_SHORT_TIMEOUT: int = 3
     SUBPROC_MEDIUM_TIMEOUT: int = 8
 
-    LOCAL_SERVER_CODE: str = "nl"
-    LOCAL_SERVER_LABEL: str = "Netherlands"
+    SSH_STRICT_HOST_KEY_CHECKING: str = "accept-new"
+    SSH_KNOWN_HOSTS_FILE: str = ""
+
+    BROADCAST_MAX_CONCURRENCY: int = 8
+    BROADCAST_MAX_ATTEMPTS: int = 3
+
+    AUTH_FAIL_WINDOW_SEC: int = 300
+    AUTH_MAX_FAILS_IN_WINDOW: int = 5
+    AUTH_LOCKOUT_SEC: int = 600
+    AUTH_PRUNE_INTERVAL_SEC: int = 300
+    ERROR_NOTIFY_INTERVAL_SEC: int = 300
+
+    LOCAL_SERVER_CODE: str = "local"
+    LOCAL_SERVER_LABEL: str = "Local server"
+    LOCAL_SERVER_FLAG: str = ""
 
     REMOTE_SERVER_ENABLED: bool = True
-    REMOTE_SERVER_CODE: str = "de"
-    REMOTE_SERVER_LABEL: str = "Germany"
+    REMOTE_SERVER_CODE: str = "remote"
+    REMOTE_SERVER_LABEL: str = "Remote server"
+    REMOTE_SERVER_FLAG: str = ""
     REMOTE_SERVER_SSH_TARGET: str = ""
-    REMOTE_SERVER_EXPECTED_A_IP: str = "144.31.111.77"
-    REMOTE_SERVER_CHECK_A_DOMAINS: List[str] = Field(default_factory=lambda: ["nextfiles.ittelecom.pl"])
+    REMOTE_SERVER_EXPECTED_A_IP: str = ""
+    REMOTE_SERVER_CHECK_A_DOMAINS: List[str] = Field(default_factory=list)
     REMOTE_SERVER_FAIL2BAN_LOG_PATH: str = "/var/log/fail2ban.log"
     REMOTE_SERVER_MONITOR_CONTAINERS: List[str] = Field(default_factory=list)
+
+    REMOTE_SERVER_FLAGS: List[str] = Field(default_factory=list)
+    REMOTE_SERVER_SSH_TARGETS: List[str] = Field(default_factory=list)
+    REMOTE_SERVER_EXPECTED_A_IPS: List[str] = Field(default_factory=list)
+    REMOTE_SERVER_DOMAINS: List[List[str]] = Field(default_factory=list)
+    REMOTE_SERVER_MONITOR_CONTAINERS_BY_SERVER: List[List[str]] = Field(default_factory=list)
+    REMOTE_SERVER_CODES: List[str] = Field(default_factory=list)
+    REMOTE_SERVER_LABELS: List[str] = Field(default_factory=list)
+
+    BOT_MODE: Literal["ssh", "mixed"] = "ssh"
+    REMNAWAVE_METRICS_URL: str = ""
+    REMNAWAVE_METRICS_USER: str = ""
+    REMNAWAVE_METRICS_PASS: str = ""
+    REMNAWAVE_METRICS_TIMEOUT_SEC: int = 3
+    REMNAWAVE_METRICS_CACHE_TTL_SEC: int = 8
+    REMNAWAVE_HIDDEN_UUIDS: List[str] = Field(default_factory=list)
+    LOCAL_SERVER_REMNAWAVE_UUID: str = ""
+    REMOTE_SERVER_REMNAWAVE_UUIDS: List[str] = Field(default_factory=list)
+    DAILY_NODE_STATUS_REFRESH_AT: str = "12:00"
 
     @field_validator(
         "MONITOR_CONTAINERS",
@@ -189,11 +346,129 @@ class AppSettings(BaseSettings):
         "DNS_RESOLVERS",
         "REMOTE_SERVER_CHECK_A_DOMAINS",
         "REMOTE_SERVER_MONITOR_CONTAINERS",
+        "REMOTE_SERVER_FLAGS",
+        "REMOTE_SERVER_SSH_TARGETS",
+        "REMOTE_SERVER_EXPECTED_A_IPS",
+        "REMOTE_SERVER_CODES",
+        "REMOTE_SERVER_LABELS",
+        "REMNAWAVE_HIDDEN_UUIDS",
         mode="before",
     )
     @classmethod
-    def _parse_list(cls, v: Any) -> List[str]:
-        return split_env_list(v)
+    def _parse_list(cls, v: Any, info: ValidationInfo) -> List[str]:
+        ordered_fields = {
+            "REMOTE_SERVER_FLAGS",
+            "REMOTE_SERVER_SSH_TARGETS",
+            "REMOTE_SERVER_EXPECTED_A_IPS",
+            "REMOTE_SERVER_CODES",
+            "REMOTE_SERVER_LABELS",
+        }
+        return split_env_list(v, dedupe=info.field_name not in ordered_fields)
+
+    @field_validator("REMOTE_SERVER_REMNAWAVE_UUIDS", mode="before")
+    @classmethod
+    def _parse_uuid_list_keep_empty(cls, v: Any) -> List[str]:
+        if v is None:
+            return []
+        if isinstance(v, list):
+            return [str(x or "").strip() for x in v]
+        s = str(v or "").strip()
+        if not s:
+            return []
+        # Сохраняем пустые позиции — пользователь может пропустить сервер,
+        # для которого UUID нет (например, нода не зарегистрирована в RW).
+        return [p.strip() for p in s.split(",")]
+
+    @field_validator("BOT_MODE", mode="before")
+    @classmethod
+    def _normalize_bot_mode(cls, v: Any) -> str:
+        s = str(v or "").strip().lower() or "ssh"
+        if s not in ("ssh", "mixed"):
+            raise ValueError("BOT_MODE must be 'ssh' or 'mixed'")
+        return s
+
+    @field_validator("REMNAWAVE_METRICS_URL", mode="before")
+    @classmethod
+    def _normalize_metrics_url(cls, v: Any) -> str:
+        return str(v or "").strip()
+
+    @field_validator("REMNAWAVE_METRICS_USER", "REMNAWAVE_METRICS_PASS", "LOCAL_SERVER_REMNAWAVE_UUID", mode="before")
+    @classmethod
+    def _strip_str(cls, v: Any) -> str:
+        return str(v or "").strip()
+
+    @field_validator("LOCAL_SERVER_REMNAWAVE_UUID", "REMOTE_SERVER_REMNAWAVE_UUIDS", "REMNAWAVE_HIDDEN_UUIDS", mode="after")
+    @classmethod
+    def _validate_uuids(cls, v: Any, info: ValidationInfo) -> Any:
+        if isinstance(v, str):
+            s = v.strip()
+            if s and not _UUID_RE.fullmatch(s):
+                raise ValueError(f"{info.field_name}: invalid UUID format")
+            return s
+        if isinstance(v, list):
+            for item in v:
+                s = str(item or "").strip()
+                if s and not _UUID_RE.fullmatch(s):
+                    raise ValueError(f"{info.field_name}: invalid UUID '{item}'")
+            return [str(x or "").strip() for x in v]
+        return v
+
+    @field_validator("REMNAWAVE_METRICS_TIMEOUT_SEC", "REMNAWAVE_METRICS_CACHE_TTL_SEC")
+    @classmethod
+    def _positive_metrics_int(cls, v: int) -> int:
+        iv = int(v)
+        if iv < 1 or iv > 600:
+            raise ValueError("metrics timeout/ttl out of range (1..600)")
+        return iv
+
+    @field_validator("DAILY_NODE_STATUS_REFRESH_AT")
+    @classmethod
+    def _validate_daily_node_status_at(cls, v: str) -> str:
+        s = (v or "").strip() or "12:00"
+        try:
+            hh, mm = s.split(":", 1)
+            ih, im = int(hh), int(mm)
+            if ih < 0 or ih > 23 or im < 0 or im > 59:
+                raise ValueError
+        except Exception as e:
+            raise ValueError("DAILY_NODE_STATUS_REFRESH_AT must be HH:MM") from e
+        return f"{ih:02d}:{im:02d}"
+
+    @field_validator("REMOTE_SERVER_DOMAINS", "REMOTE_SERVER_MONITOR_CONTAINERS_BY_SERVER", mode="before")
+    @classmethod
+    def _parse_domain_groups(cls, v: Any) -> List[List[str]]:
+        return split_env_groups(v)
+
+    @field_validator("MONITOR_CONTAINERS", "REMOTE_SERVER_MONITOR_CONTAINERS", mode="after")
+    @classmethod
+    def _filter_container_names(cls, v: List[str]) -> List[str]:
+        valid: List[str] = []
+        for name in v:
+            nm = (name or "").strip()
+            if not nm:
+                continue
+            if _CONTAINER_NAME_RE.fullmatch(nm):
+                valid.append(nm)
+            else:
+                logger.warning("Invalid container name in config skipped: %s", nm)
+        return valid
+
+    @field_validator("REMOTE_SERVER_MONITOR_CONTAINERS_BY_SERVER", mode="after")
+    @classmethod
+    def _filter_container_groups(cls, v: List[List[str]]) -> List[List[str]]:
+        out: List[List[str]] = []
+        for group in v:
+            valid: List[str] = []
+            for name in group:
+                nm = (name or "").strip()
+                if not nm:
+                    continue
+                if _CONTAINER_NAME_RE.fullmatch(nm):
+                    valid.append(nm)
+                else:
+                    logger.warning("Invalid container name in config skipped: %s", nm)
+            out.append(valid)
+        return out
 
     @field_validator("TZ")
     @classmethod
@@ -227,8 +502,6 @@ class AppSettings(BaseSettings):
     @field_validator(
         "SUBPROC_SHORT_TIMEOUT",
         "SUBPROC_MEDIUM_TIMEOUT",
-        "PING_COUNT",
-        "PING_TIMEOUT_SEC",
         "DNS_STARTUP_REFRESH_DELAY_SEC",
         "MAINT_RESTART_NOTIFY_DELAY_SEC",
     )
@@ -242,25 +515,74 @@ class AppSettings(BaseSettings):
     @field_validator("LOCAL_SERVER_CODE", "REMOTE_SERVER_CODE", mode="before")
     @classmethod
     def _normalize_server_code(cls, v: Any) -> str:
-        s = (str(v or "").strip().lower() or "srv")[:12]
-        if not s:
-            raise ValueError("empty server code")
-        return s
+        return normalize_server_key(str(v or ""), "srv")
 
     @field_validator("LOCAL_SERVER_LABEL", "REMOTE_SERVER_LABEL", mode="before")
     @classmethod
     def _normalize_label(cls, v: Any) -> str:
-        s = str(v or "").strip()
-        if not s:
-            raise ValueError("empty server label")
-        return s
+        return str(v or "").strip()
+
+    @field_validator("REMOTE_SERVER_SSH_TARGET", mode="before")
+    @classmethod
+    def _normalize_ssh_target(cls, v: Any) -> str:
+        return _validate_ssh_target(str(v or ""))
+
+    @field_validator("REMOTE_SERVER_SSH_TARGETS", mode="after")
+    @classmethod
+    def _normalize_ssh_targets(cls, v: List[str]) -> List[str]:
+        return [_validate_ssh_target(x) for x in v if str(x or "").strip()]
 
     @model_validator(mode="after")
     def _validate_server_codes(self) -> "AppSettings":
-        if self.REMOTE_SERVER_ENABLED and self.REMOTE_SERVER_SSH_TARGET.strip() and self.REMOTE_SERVER_CODE == self.LOCAL_SERVER_CODE:
-            raise ValueError("LOCAL_SERVER_CODE and REMOTE_SERVER_CODE must differ")
+        targets = list(self.REMOTE_SERVER_SSH_TARGETS)
+        if not targets and self.REMOTE_SERVER_SSH_TARGET.strip():
+            targets = [self.REMOTE_SERVER_SSH_TARGET.strip()]
+        if self.REMOTE_SERVER_ENABLED and targets:
+            if not self.REMOTE_SERVER_CODES and self.REMOTE_SERVER_CODE == self.LOCAL_SERVER_CODE:
+                raise ValueError("LOCAL_SERVER_CODE and REMOTE_SERVER_CODE must differ")
+            total = len(targets)
+            exact_order_fields = {
+                "REMOTE_SERVER_FLAGS": self.REMOTE_SERVER_FLAGS,
+                "REMOTE_SERVER_EXPECTED_A_IPS": self.REMOTE_SERVER_EXPECTED_A_IPS,
+                "REMOTE_SERVER_CODES": self.REMOTE_SERVER_CODES,
+                "REMOTE_SERVER_LABELS": self.REMOTE_SERVER_LABELS,
+            }
+            for field_name, values in exact_order_fields.items():
+                if values and len(values) != total:
+                    raise ValueError(f"{field_name} must contain exactly {total} comma-separated values")
+            if self.REMOTE_SERVER_CODES:
+                normalized_codes = [normalize_server_key(code, "srv") for code in self.REMOTE_SERVER_CODES]
+                if len(set(normalized_codes)) != len(normalized_codes):
+                    raise ValueError("REMOTE_SERVER_CODES must contain unique values")
+                if self.LOCAL_SERVER_CODE in normalized_codes:
+                    raise ValueError("REMOTE_SERVER_CODES must not contain LOCAL_SERVER_CODE")
+            if self.REMOTE_SERVER_DOMAINS:
+                group_count = len(self.REMOTE_SERVER_DOMAINS)
+                if group_count > 1 and group_count != total:
+                    raise ValueError(
+                        f"REMOTE_SERVER_DOMAINS must contain exactly {total} semicolon-separated groups"
+                    )
+                if group_count == 1 and total > 1 and len(self.REMOTE_SERVER_DOMAINS[0]) != total:
+                    raise ValueError(
+                        "REMOTE_SERVER_DOMAINS must contain one comma-separated domain per server, "
+                        "or semicolon-separated domain groups per server"
+                    )
+            if self.REMOTE_SERVER_MONITOR_CONTAINERS_BY_SERVER:
+                group_count = len(self.REMOTE_SERVER_MONITOR_CONTAINERS_BY_SERVER)
+                if group_count != total:
+                    raise ValueError(
+                        "REMOTE_SERVER_MONITOR_CONTAINERS_BY_SERVER must contain exactly "
+                        f"{total} semicolon-separated groups"
+                    )
+            if self.REMOTE_SERVER_REMNAWAVE_UUIDS and len(self.REMOTE_SERVER_REMNAWAVE_UUIDS) != total:
+                raise ValueError(
+                    f"REMOTE_SERVER_REMNAWAVE_UUIDS must contain exactly {total} comma-separated UUIDs "
+                    "(use empty value between commas to skip a server)"
+                )
         if self.SUBPROC_SHORT_TIMEOUT > self.SUBPROC_MEDIUM_TIMEOUT:
             raise ValueError("SUBPROC_SHORT_TIMEOUT must be <= SUBPROC_MEDIUM_TIMEOUT")
+        if self.BOT_MODE == "mixed" and not self.REMNAWAVE_METRICS_URL:
+            raise ValueError("BOT_MODE=mixed requires REMNAWAVE_METRICS_URL to be set")
         return self
 
 
@@ -268,12 +590,14 @@ class AppSettings(BaseSettings):
 class ServerTarget:
     key: str
     label: str
+    flag: str
     mode: Literal["local", "ssh"]
     expected_a_ip: str
     check_a_domains: List[str]
     monitor_containers: List[str]
     fail2ban_log_path: str
     ssh_target: str = ""
+    remnawave_uuid: str = ""
 
 
 SETTINGS = AppSettings()
@@ -301,62 +625,140 @@ FAIL2BAN_STATE_PATH = resolve_path(
 )
 
 MONITOR_CONTAINERS = list(SETTINGS.MONITOR_CONTAINERS)
-MONITOR_CONTAINER_SET = set(MONITOR_CONTAINERS)
-MONITOR_PANEL_HOST = SETTINGS.MONITOR_PANEL_HOST
-PING_COUNT = SETTINGS.PING_COUNT
-PING_TIMEOUT_SEC = SETTINGS.PING_TIMEOUT_SEC
 EXPECTED_A_IP = SETTINGS.EXPECTED_A_IP.strip()
 CHECK_A_DOMAINS = list(SETTINGS.CHECK_A_DOMAINS)
 DNS_RESOLVERS = list(SETTINGS.DNS_RESOLVERS)
 
 DOCKER_BIN = resolve_bin("/usr/bin/docker", "docker")
 UFW_BIN = resolve_bin("/usr/sbin/ufw", "ufw")
-PING_BIN = resolve_bin("/bin/ping", "/usr/bin/ping", "ping")
-SUDO_BIN = resolve_bin("/usr/bin/sudo", "sudo")
+SUDO_BIN = shutil.which("sudo") or ""
 SSH_BIN = resolve_bin("/usr/bin/ssh", "ssh")
 
 FAIL2BAN_LOG_PATH = SETTINGS.FAIL2BAN_LOG_PATH.strip()
 FAIL2BAN_DAILY_AT = SETTINGS.FAIL2BAN_DAILY_AT.strip()
+FAIL2BAN_DIGEST_TAIL_LINES = int(SETTINGS.FAIL2BAN_DIGEST_TAIL_LINES)
+FAIL2BAN_DIGEST_MAX_BYTES = int(SETTINGS.FAIL2BAN_DIGEST_MAX_BYTES)
 DNS_DAILY_REFRESH_AT = SETTINGS.DNS_DAILY_REFRESH_AT.strip()
 DNS_STARTUP_REFRESH_DELAY_SEC = SETTINGS.DNS_STARTUP_REFRESH_DELAY_SEC
 MAINT_RESTART_NOTIFY_DELAY_SEC = SETTINGS.MAINT_RESTART_NOTIFY_DELAY_SEC
+MAINT_RESTART_REMINDER_INTERVAL_SEC = int(SETTINGS.MAINT_RESTART_REMINDER_INTERVAL_SEC)
+BROADCAST_MAX_CONCURRENCY = int(SETTINGS.BROADCAST_MAX_CONCURRENCY)
+BROADCAST_MAX_ATTEMPTS = int(SETTINGS.BROADCAST_MAX_ATTEMPTS)
+AUTH_FAIL_WINDOW_SEC = int(SETTINGS.AUTH_FAIL_WINDOW_SEC)
+AUTH_MAX_FAILS_IN_WINDOW = int(SETTINGS.AUTH_MAX_FAILS_IN_WINDOW)
+AUTH_LOCKOUT_SEC = int(SETTINGS.AUTH_LOCKOUT_SEC)
+AUTH_PRUNE_INTERVAL_SEC = int(SETTINGS.AUTH_PRUNE_INTERVAL_SEC)
+ERROR_NOTIFY_INTERVAL_SEC = int(SETTINGS.ERROR_NOTIFY_INTERVAL_SEC)
 LOG_LEVEL = SETTINGS.LOG_LEVEL
 LOG_JSON = bool(SETTINGS.LOG_JSON)
 LOCAL_SERVER_CODE = SETTINGS.LOCAL_SERVER_CODE
 LOCAL_SERVER_LABEL = SETTINGS.LOCAL_SERVER_LABEL
+LOCAL_SERVER_FLAG = SETTINGS.LOCAL_SERVER_FLAG.strip().upper()
 
 REMOTE_SERVER_ENABLED = bool(SETTINGS.REMOTE_SERVER_ENABLED)
 REMOTE_SERVER_CODE = SETTINGS.REMOTE_SERVER_CODE
 REMOTE_SERVER_LABEL = SETTINGS.REMOTE_SERVER_LABEL
+REMOTE_SERVER_FLAG = SETTINGS.REMOTE_SERVER_FLAG.strip().upper()
 REMOTE_SERVER_SSH_TARGET = SETTINGS.REMOTE_SERVER_SSH_TARGET.strip()
 REMOTE_SERVER_EXPECTED_A_IP = SETTINGS.REMOTE_SERVER_EXPECTED_A_IP.strip()
 REMOTE_SERVER_CHECK_A_DOMAINS = list(SETTINGS.REMOTE_SERVER_CHECK_A_DOMAINS)
 REMOTE_SERVER_FAIL2BAN_LOG_PATH = SETTINGS.REMOTE_SERVER_FAIL2BAN_LOG_PATH.strip() or "/var/log/fail2ban.log"
 REMOTE_SERVER_MONITOR_CONTAINERS = list(SETTINGS.REMOTE_SERVER_MONITOR_CONTAINERS) or list(MONITOR_CONTAINERS)
-ALL_MONITOR_CONTAINER_SET = set(MONITOR_CONTAINERS) | set(REMOTE_SERVER_MONITOR_CONTAINERS)
+REMOTE_SERVER_FLAGS = list(SETTINGS.REMOTE_SERVER_FLAGS)
+REMOTE_SERVER_SSH_TARGETS = list(SETTINGS.REMOTE_SERVER_SSH_TARGETS)
+REMOTE_SERVER_EXPECTED_A_IPS = list(SETTINGS.REMOTE_SERVER_EXPECTED_A_IPS)
+REMOTE_SERVER_DOMAINS = [list(x) for x in SETTINGS.REMOTE_SERVER_DOMAINS]
+REMOTE_SERVER_MONITOR_CONTAINERS_BY_SERVER = [list(x) for x in SETTINGS.REMOTE_SERVER_MONITOR_CONTAINERS_BY_SERVER]
+REMOTE_SERVER_CODES = list(SETTINGS.REMOTE_SERVER_CODES)
+REMOTE_SERVER_LABELS = list(SETTINGS.REMOTE_SERVER_LABELS)
+
+BOT_MODE = SETTINGS.BOT_MODE
+REMNAWAVE_METRICS_URL = SETTINGS.REMNAWAVE_METRICS_URL
+REMNAWAVE_METRICS_USER = SETTINGS.REMNAWAVE_METRICS_USER
+REMNAWAVE_METRICS_PASS = SETTINGS.REMNAWAVE_METRICS_PASS
+REMNAWAVE_METRICS_TIMEOUT_SEC = int(SETTINGS.REMNAWAVE_METRICS_TIMEOUT_SEC)
+REMNAWAVE_METRICS_CACHE_TTL_SEC = int(SETTINGS.REMNAWAVE_METRICS_CACHE_TTL_SEC)
+REMNAWAVE_HIDDEN_UUIDS = list(SETTINGS.REMNAWAVE_HIDDEN_UUIDS)
+LOCAL_SERVER_REMNAWAVE_UUID = SETTINGS.LOCAL_SERVER_REMNAWAVE_UUID
+REMOTE_SERVER_REMNAWAVE_UUIDS = list(SETTINGS.REMOTE_SERVER_REMNAWAVE_UUIDS)
+DAILY_NODE_STATUS_REFRESH_AT = SETTINGS.DAILY_NODE_STATUS_REFRESH_AT
 
 SUBPROC_SHORT_TIMEOUT = SETTINGS.SUBPROC_SHORT_TIMEOUT
 SUBPROC_MEDIUM_TIMEOUT = SETTINGS.SUBPROC_MEDIUM_TIMEOUT
 
-SERVERS: Dict[str, ServerTarget] = {
-    LOCAL_SERVER_CODE: ServerTarget(
+SSH_STRICT_HOST_KEY_CHECKING = (SETTINGS.SSH_STRICT_HOST_KEY_CHECKING or "").strip() or "accept-new"
+SSH_KNOWN_HOSTS_FILE = (SETTINGS.SSH_KNOWN_HOSTS_FILE or "").strip()
+
+def _build_servers() -> Dict[str, ServerTarget]:
+    local_flag = LOCAL_SERVER_FLAG or LOCAL_SERVER_CODE.upper()
+    servers: Dict[str, ServerTarget] = {}
+    servers[LOCAL_SERVER_CODE] = ServerTarget(
         key=LOCAL_SERVER_CODE,
-        label=LOCAL_SERVER_LABEL,
+        label=LOCAL_SERVER_LABEL or country_label(local_flag, "Main"),
+        flag=country_flag(local_flag),
         mode="local",
         expected_a_ip=EXPECTED_A_IP,
         check_a_domains=list(CHECK_A_DOMAINS),
         monitor_containers=list(MONITOR_CONTAINERS),
         fail2ban_log_path=FAIL2BAN_LOG_PATH,
+        remnawave_uuid=LOCAL_SERVER_REMNAWAVE_UUID,
     )
-}
-if REMOTE_SERVER_ENABLED and REMOTE_SERVER_SSH_TARGET:
-    SERVERS[REMOTE_SERVER_CODE] = ServerTarget(
-        key=REMOTE_SERVER_CODE,
-        label=REMOTE_SERVER_LABEL,
-        mode="ssh",
-        expected_a_ip=REMOTE_SERVER_EXPECTED_A_IP,
-        check_a_domains=list(REMOTE_SERVER_CHECK_A_DOMAINS),
-        monitor_containers=list(REMOTE_SERVER_MONITOR_CONTAINERS),
-        fail2ban_log_path=REMOTE_SERVER_FAIL2BAN_LOG_PATH,
-        ssh_target=REMOTE_SERVER_SSH_TARGET,
-    )
+
+    if not REMOTE_SERVER_ENABLED:
+        return servers
+
+    targets = list(REMOTE_SERVER_SSH_TARGETS)
+    if not targets and REMOTE_SERVER_SSH_TARGET:
+        targets = [REMOTE_SERVER_SSH_TARGET]
+    if not targets:
+        return servers
+
+    total = len(targets)
+    flags = list(REMOTE_SERVER_FLAGS) or ([REMOTE_SERVER_FLAG] if REMOTE_SERVER_FLAG else [])
+    labels = list(REMOTE_SERVER_LABELS)
+    codes = list(REMOTE_SERVER_CODES)
+    ips = list(REMOTE_SERVER_EXPECTED_A_IPS) or ([REMOTE_SERVER_EXPECTED_A_IP] if REMOTE_SERVER_EXPECTED_A_IP else [])
+    old_domains = [list(REMOTE_SERVER_CHECK_A_DOMAINS)] if REMOTE_SERVER_CHECK_A_DOMAINS else []
+    domain_groups = list(REMOTE_SERVER_DOMAINS) or old_domains
+    container_groups = list(REMOTE_SERVER_MONITOR_CONTAINERS_BY_SERVER)
+
+    flag_counts: Dict[str, int] = {}
+    key_counts: Dict[str, int] = {}
+    for idx, target in enumerate(targets):
+        flag_code = _nth_or_default(flags, idx, "").strip().upper()
+        fallback_code = flag_code.lower() if flag_code else f"srv{idx + 1}"
+        explicit_code = _nth_or_default(codes, idx, "")
+        key = normalize_server_key(explicit_code, fallback_code)
+        if key in servers:
+            if explicit_code:
+                raise RuntimeError(f"Duplicate server code: {key}")
+            base_key = key
+            key_counts[base_key] = max(key_counts.get(base_key, 0), 1)
+            while key in servers:
+                key_counts[base_key] += 1
+                key = normalize_server_key(f"{base_key}{key_counts[base_key]}", f"srv{idx + 1}")
+        else:
+            key_counts[key] = max(key_counts.get(key, 0), 1)
+
+        base_label = _nth_or_default(labels, idx, "")
+        if not base_label:
+            country = country_label(flag_code, f"Server {idx + 1}")
+            flag_counts[flag_code or key] = flag_counts.get(flag_code or key, 0) + 1
+            base_label = f"{country}(S{flag_counts[flag_code or key]})"
+
+        servers[key] = ServerTarget(
+            key=key,
+            label=base_label,
+            flag=country_flag(flag_code),
+            mode="ssh",
+            expected_a_ip=_nth_or_default(ips, idx, ""),
+            check_a_domains=_domains_for_index(domain_groups, idx, total),
+            monitor_containers=_group_for_index(container_groups, idx, REMOTE_SERVER_MONITOR_CONTAINERS),
+            fail2ban_log_path=REMOTE_SERVER_FAIL2BAN_LOG_PATH,
+            ssh_target=target,
+            remnawave_uuid=_nth_or_default(REMOTE_SERVER_REMNAWAVE_UUIDS, idx, ""),
+        )
+    return servers
+
+
+SERVERS: Dict[str, ServerTarget] = _build_servers()
