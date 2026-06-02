@@ -450,6 +450,27 @@ def get_user_open_tickets(uid: int) -> list:
     ]
 
 
+def get_all_tickets_snapshot() -> Dict[str, Dict[str, Any]]:
+    tickets = IMPORTANT_DATA_SNAPSHOT.get("tickets")
+    if not isinstance(tickets, dict):
+        return {}
+    return {k: dict(v) for k, v in tickets.items() if isinstance(v, dict)}
+
+
+def get_admin_name_by_id(admin_id: int) -> Optional[str]:
+    meta = USER_DATA_SNAPSHOT.get(str(admin_id))
+    if not isinstance(meta, dict) or meta.get("role") != "admin":
+        return None
+    nick = (meta.get("nickname") or "").strip()
+    if nick:
+        return nick
+    uname = meta.get("username")
+    if uname:
+        return f"@{uname}"
+    nm = " ".join(x for x in [meta.get("first_name"), meta.get("last_name")] if x)
+    return nm.strip() or str(admin_id)
+
+
 def get_dns_status_cache(server_key: str) -> Optional[Dict[str, Any]]:
     dns = IMPORTANT_DATA_SNAPSHOT.get("dns_status")
     if not isinstance(dns, dict):
