@@ -95,12 +95,18 @@ from app.handlers.tickets import (
     TICKET_USER_REPLY_TEXT,
     ticket_admin_reply_start,
     ticket_admin_reply_text,
+    ticket_archive_cb,
+    ticket_archive_page_cb,
     ticket_close_cb,
     ticket_confirm,
+    ticket_list_cb,
+    ticket_open_cb,
     ticket_start,
     ticket_subject,
     ticket_take_cb,
     ticket_text,
+    ticket_transfer_init_cb,
+    ticket_transfer_to_cb,
     ticket_urgency,
     ticket_user_reply_start,
     ticket_user_reply_text,
@@ -241,12 +247,21 @@ def build_app() -> Application:
     app.add_handler(CallbackQueryHandler(maint_cancel_end_cb, pattern=r"^maint:cancelend:[0-9a-f]+$"))
     app.add_handler(CallbackQueryHandler(maint_end_cb, pattern=r"^maint:end:[0-9a-f]+$"))
 
+    _ticket_persistent_eps = [
+        CallbackQueryHandler(ticket_list_cb, pattern=r"^ticket:list$"),
+        CallbackQueryHandler(ticket_open_cb, pattern=r"^ticket:open:\d+$"),
+        CallbackQueryHandler(ticket_archive_cb, pattern=r"^ticket:archive$"),
+        CallbackQueryHandler(ticket_archive_page_cb, pattern=r"^ticket:archive_page:\d+$"),
+        CallbackQueryHandler(ticket_transfer_init_cb, pattern=r"^ticket:transfer_init:\d+$"),
+        CallbackQueryHandler(ticket_transfer_to_cb, pattern=r"^ticket:transfer_to:\d+:\d+$"),
+    ]
     ticket_conv = ConversationHandler(
         entry_points=[
             CommandHandler("ticket", ticket_start),
             CallbackQueryHandler(ticket_start, pattern=r"^menu:ticket$"),
             CallbackQueryHandler(ticket_admin_reply_start, pattern=r"^ticket:adminreply:\d+$"),
             CallbackQueryHandler(ticket_user_reply_start, pattern=r"^ticket:userreply:\d+$"),
+            *_ticket_persistent_eps,
         ],
         states={
             TICKET_SUBJECT: [MessageHandler(PRIVATE_TEXT, ticket_subject)],
@@ -259,6 +274,7 @@ def build_app() -> Application:
         fallbacks=[
             CommandHandler("cancel", cancel),
             CallbackQueryHandler(cancel_to_menu_cb, pattern=r"^menu:home$"),
+            *_ticket_persistent_eps,
         ],
         name="ticket_flow",
         persistent=True,
