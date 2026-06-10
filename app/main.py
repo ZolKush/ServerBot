@@ -1,4 +1,3 @@
-import re
 import sys
 import time
 import warnings
@@ -196,11 +195,15 @@ async def on_error(update: object, context) -> None:
 
 
 async def fallback_text(update, context) -> None:
-    if not is_authorized(update) or not is_enabled(update):
-        return
     msg = update.effective_message
-    if msg:
-        await msg.reply_text("Не понимаю команду. Используйте /menu для меню или /help для подсказок.")
+    if not msg:
+        return
+    if not is_authorized(update):
+        await msg.reply_text("Доступ ограничен. Авторизуйтесь командой: /auth пароль")
+        return
+    if not is_enabled(update):
+        return
+    await msg.reply_text("Не понимаю команду. Используйте /menu для меню или /help для подсказок.")
 
 
 def build_app() -> Application:
@@ -290,7 +293,7 @@ def build_app() -> Application:
         ],
         states={
             ADMIN_PICK: [
-                CallbackQueryHandler(users_pick, pattern=r"^users:(all|main|back|filter:(all|active|disabled|unpaid|admins)|user:\d+)$"),
+                CallbackQueryHandler(users_pick, pattern=r"^users:(all|main|back|filter:(all|active|disabled|unpaid|admins)|user:\d+|page:\d+)$"),
             ],
             ADMIN_ALL_MENU: [
                 CallbackQueryHandler(users_all_menu, pattern=r"^users:(allmsg|back)$"),
@@ -371,7 +374,7 @@ def build_app() -> Application:
         CallbackQueryHandler(docker_inspect, pattern=rf"^docker:inspect:{SERVER_KEY_PATTERN}:[a-zA-Z0-9_.\-]{{1,64}}$")
     )
     app.add_handler(
-        CallbackQueryHandler(docker_logs, pattern=rf"^docker:logs:{SERVER_KEY_PATTERN}:[a-zA-Z0-9_.\-]{{1,64}}:\d{{1,3}}$")
+        CallbackQueryHandler(docker_logs, pattern=rf"^docker:logs:{SERVER_KEY_PATTERN}:[a-zA-Z0-9_.\-]{{1,64}}:\d{{1,4}}$")
     )
 
     app.add_handler(CommandHandler("fail2ban", fail2ban_menu))

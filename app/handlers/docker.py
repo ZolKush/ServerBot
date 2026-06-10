@@ -8,7 +8,7 @@ from telegram.ext import ContextTypes
 from ..config import SERVER_KEY_PATTERN
 from ..services.docker_service import docker_inspect_summary, docker_logs_tail, is_valid_container_name
 from ..services.remote_service import remote_docker_inspect_summary, remote_docker_logs_tail
-from .common import breadcrumbs, clip_text, html_escape, require_admin, ui_error_text, wrap_as_codeblock_html
+from .common import breadcrumbs, html_escape, require_admin, ui_error_text, wrap_as_codeblock_html
 from .status import build_status_message, get_server_target
 
 DOCKER_LOGS_TAIL_MIN = 120
@@ -145,7 +145,7 @@ async def docker_inspect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         summary = await docker_inspect_summary(name)
     payload = (
         f"<b>{html_escape(breadcrumbs('Статус', srv.label, 'Docker', name, 'Inspect'))}</b>\n\n"
-        + wrap_as_codeblock_html(clip_text(summary))
+        + wrap_as_codeblock_html(summary)
     )
     await q.edit_message_text(payload, parse_mode=ParseMode.HTML, reply_markup=_docker_item_kb(server_key, name))
 
@@ -193,6 +193,6 @@ async def docker_logs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     payload = (
         f"<b>{html_escape(breadcrumbs('Статус', srv.label, 'Docker', name, 'Logs'))}</b>\n"
         f"<code>tail={tail}</code>{max_note}\n"
-        + wrap_as_codeblock_html(clip_text(log_text))
+        + wrap_as_codeblock_html(log_text)
     )
     await q.edit_message_text(payload, parse_mode=ParseMode.HTML, reply_markup=kb)

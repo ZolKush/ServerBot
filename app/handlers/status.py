@@ -35,7 +35,7 @@ from ..storage import (
     set_daily_node_status_cache,
     set_dns_status_cache,
 )
-from .common import breadcrumbs, html_escape, is_admin, now_str, require_admin, require_auth, ui_error_text, ui_info_text
+from .common import html_escape, is_admin, now_str, require_admin, require_auth, ui_error_text, ui_info_text
 from .status_format import format_status_message, format_ufw_message
 from .status_models import DockerContainerView, StatusSnapshot
 

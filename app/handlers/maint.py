@@ -7,7 +7,6 @@ from telegram.constants import ParseMode
 from telegram.ext import ContextTypes, ConversationHandler
 
 from ..config import TZ, logger
-from ..models import Maintenance, ScheduledMaintenance
 from ..storage import (
     clear_scheduled_maintenance_record,
     get_active_maintenance,
@@ -219,19 +218,20 @@ async def maint_duration(update: Update, context: ContextTypes.DEFAULT_TYPE):
     urgency = str(context.user_data.get("maint_urgency", "planned"))
     author = display_name(update)
     author_id = get_user_id(update)
-    msg_text = format_maint(scope, urgency, hh, mm, author)
 
+    # Сначала сохраняем запись, потом рассылаем: иначе при сбое сохранения
+    # пользователи получат уведомление о несуществующих техработах.
+    maint = _build_maint_record(scope, urgency, hh, mm, author_id, author)
+    maint_id = maint.get("id")
+    await set_maintenance_record(maint)
+    logger.info("Maintenance started by user_id=%s scope=%s urgency=%s duration_min=%s", author_id, scope, urgency, _hhmm_to_minutes(hh, mm))
+
+    msg_text = format_maint(scope, urgency, hh, mm, author)
     (users_ok, users_fail), (admins_ok, admins_fail) = await _send_maint_notice_with_admin_copy(
         context,
         author_id=author_id,
         text=msg_text,
     )
-
-    maint = _build_maint_record(scope, urgency, hh, mm, author_id, author)
-    maint_id = maint.get("id")
-    if maint_id:
-        await set_maintenance_record(maint)
-    logger.info("Maintenance started by user_id=%s scope=%s urgency=%s duration_min=%s", author_id, scope, urgency, _hhmm_to_minutes(hh, mm))
 
     panel_text = f"{_maint_panel_text(maint)}\n\n{_maint_delivery_status(users_ok, users_fail, admins_ok, admins_fail)}"
     panel_chat_id = context.user_data.get("maint_panel_chat_id")
@@ -501,21 +501,43 @@ async def maint_schedule_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     now = datetime.now(TZ)
 
-    if now >= (start_at - timedelta(minutes=30)) and now < start_at and not bool(scheduled.get("notified_before", False)):
-        notice = _maint_scheduled_soon_notice(scheduled)
-        author_id = scheduled.get("author_id")
-        await _send_maint_notice_with_admin_copy(context, author_id=author_id if isinstance(author_id, int) else None, text=notice)
+    if now >= end_at:
+        # Окно плановых работ полностью прошло (бот был выключен или активация
+        # откладывалась из-за других работ) — задним числом не активируем.
+        logger.warning(
+            "Scheduled maintenance %s expired (end=%s), clearing",
+            scheduled.get("id"),
+            scheduled.get("scheduled_end"),
+        )
+        await clear_scheduled_maintenance_record()
+        admin_ids = authorized_ids(role_filter="admin")
+        if admin_ids:
+            await send_to_many(
+                context,
+                admin_ids,
+                "⚠️ <b>Запланированные техработы отменены</b>\n"
+                "Окно работ прошло, пока они не были запущены (бот был недоступен или шли другие работы).",
+                reply_markup=_maint_notice_menu_kb(),
+            )
+        return
 
+    if now >= (start_at - timedelta(minutes=30)) and now < start_at and not bool(scheduled.get("notified_before", False)):
+        # Сначала фиксируем отметку, потом рассылаем — иначе сбой записи
+        # приведёт к повторной рассылке на каждом тике.
         def _mark_before(cfg):
             cur = dict(getattr(cfg, "scheduled_maintenance", {}) or {})
             if str(cur.get("id") or "") != str(scheduled.get("id") or ""):
-                return cur
+                return None
             cur["notified_before"] = True
             cur["updated_at"] = now.isoformat()
             cfg.scheduled_maintenance = cur
             return cur
 
-        await update_important_data(_mark_before)
+        marked = await update_important_data(_mark_before)
+        if marked:
+            notice = _maint_scheduled_soon_notice(scheduled)
+            author_id = scheduled.get("author_id")
+            await _send_maint_notice_with_admin_copy(context, author_id=author_id if isinstance(author_id, int) else None, text=notice)
         scheduled = get_scheduled_maintenance() or scheduled
 
     if now >= start_at and not bool(scheduled.get("notified_start", False)):
@@ -528,22 +550,23 @@ async def maint_schedule_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             return
 
-        notice = _maint_scheduled_start_notice(scheduled)
-        author_id = scheduled.get("author_id")
-        await _send_maint_notice_with_admin_copy(context, author_id=author_id if isinstance(author_id, int) else None, text=notice)
-
         def _activate_scheduled(cfg):
             cur = dict(getattr(cfg, "scheduled_maintenance", {}) or {})
             if str(cur.get("id") or "") != str(scheduled.get("id") or ""):
-                return cur
+                return None
             existing = getattr(cfg, "maintenance", {}) or {}
             if isinstance(existing, dict) and existing.get("active"):
-                return cur
+                return None
             cfg.maintenance = _scheduled_to_active_record(cur)
             cfg.scheduled_maintenance = {}
             return dict(cfg.maintenance)
 
-        await update_important_data(_activate_scheduled)
+        activated = await update_important_data(_activate_scheduled)
+        if not activated:
+            return
+        notice = _maint_scheduled_start_notice(scheduled)
+        author_id = scheduled.get("author_id")
+        await _send_maint_notice_with_admin_copy(context, author_id=author_id if isinstance(author_id, int) else None, text=notice)
         logger.info(
             "Scheduled maintenance activated id=%s start=%s end=%s",
             scheduled.get("id"),

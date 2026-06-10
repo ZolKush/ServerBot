@@ -6,6 +6,8 @@ from ..storage import authorized_users_snapshot
 from .common import breadcrumbs, display_name_from_meta, format_dt_human, get_user_meta, html_escape
 from .subscription import SUBSCRIPTION_TEXT_KEY
 
+USERS_PAGE_SIZE = 30  # кнопок на страницу: лимит Telegram — 100 кнопок на клавиатуру
+
 USER_FILTER_ALL = "all"
 USER_FILTER_ACTIVE = "active"
 USER_FILTER_DISABLED = "disabled"
@@ -60,7 +62,7 @@ def _passes_filter(meta: Dict[str, Any], filter_key: str) -> bool:
     return True
 
 
-def users_list_kb(active_filter: str = USER_FILTER_ALL) -> InlineKeyboardMarkup:
+def users_list_kb(active_filter: str = USER_FILTER_ALL, page: int = 0) -> InlineKeyboardMarkup:
     if active_filter not in USER_FILTERS:
         active_filter = USER_FILTER_ALL
 
@@ -84,8 +86,12 @@ def users_list_kb(active_filter: str = USER_FILTER_ALL) -> InlineKeyboardMarkup:
 
     items.sort(key=lambda x: (0 if x[0] == "admin" else 1, x[3], x[4]))
 
+    total_pages = max(1, (len(items) + USERS_PAGE_SIZE - 1) // USERS_PAGE_SIZE)
+    page = max(0, min(int(page), total_pages - 1))
+    page_items = items[page * USERS_PAGE_SIZE: (page + 1) * USERS_PAGE_SIZE]
+
     row: List[InlineKeyboardButton] = []
-    for role, enabled, is_paid, _, uid, name in items:
+    for role, enabled, is_paid, _, uid, name in page_items:
         prefix = ""
         if not enabled:
             prefix += "⛔ "
@@ -100,6 +106,14 @@ def users_list_kb(active_filter: str = USER_FILTER_ALL) -> InlineKeyboardMarkup:
             row = []
     if row:
         buttons.append(row)
+    if total_pages > 1:
+        nav: List[InlineKeyboardButton] = []
+        if page > 0:
+            nav.append(InlineKeyboardButton("◀ Назад", callback_data=f"users:page:{page - 1}"))
+        nav.append(InlineKeyboardButton(f"{page + 1}/{total_pages}", callback_data=f"users:page:{page}"))
+        if page < total_pages - 1:
+            nav.append(InlineKeyboardButton("▶ Далее", callback_data=f"users:page:{page + 1}"))
+        buttons.append(nav)
     buttons.append([InlineKeyboardButton("🏠 Меню", callback_data="menu:home")])
     return InlineKeyboardMarkup(buttons)
 

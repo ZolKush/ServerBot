@@ -20,11 +20,12 @@ from ..storage import get_user_meta_copy, remove_user_meta, upsert_user_meta
 from .common import (
     get_user_id,
     get_user_meta,
-    is_admin,
     is_authorized,
     is_enabled,
+    is_private,
     main_menu_inline_kb,
     reply_disabled,
+    reply_need_auth,
     require_private,
     show_main_menu,
 )
@@ -104,7 +105,10 @@ async def _auth_delete_sensitive_message(update: Update) -> None:
 
 @require_private
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if is_authorized(update) and not is_enabled(update):
+    if not is_authorized(update):
+        await reply_need_auth(update)
+        return
+    if not is_enabled(update):
         await reply_disabled(update)
         return
     await show_main_menu(update)
@@ -138,8 +142,11 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await msg.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=main_menu_inline_kb(update))
 
 
-@require_private
 async def cmd_auth(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_private(update):
+        # Пароль, отправленный в группу, нужно удалить, а не оставлять в чате.
+        await _auth_delete_sensitive_message(update)
+        return
     msg = update.effective_message
     left = _auth_lock_remaining_sec(update)
     if left > 0:
@@ -161,10 +168,12 @@ async def cmd_auth(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     try:
+        # Сравниваем байты: compare_digest со str падает на non-ASCII вводе.
+        passwd_b = passwd.encode("utf-8")
         role: Optional[str] = None
-        if ADMIN_PASSWORD and hmac.compare_digest(passwd, ADMIN_PASSWORD):
+        if ADMIN_PASSWORD and hmac.compare_digest(passwd_b, ADMIN_PASSWORD.encode("utf-8")):
             role = "admin"
-        elif AUTH_PASSWORD and hmac.compare_digest(passwd, AUTH_PASSWORD):
+        elif AUTH_PASSWORD and hmac.compare_digest(passwd_b, AUTH_PASSWORD.encode("utf-8")):
             role = "user"
 
         if role is None:
@@ -186,7 +195,14 @@ async def cmd_auth(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         preserved_role = existing.get("role")
         preserved_paid = bool(existing.get("is_paid", False))
 
-        role_to_set = preserved_role if (preserved_role and not preserved_enabled) else role
+        if preserved_role and not preserved_enabled:
+            role_to_set = preserved_role
+        elif preserved_role == "admin" and role == "user":
+            # Не понижаем админа молча при повторном /auth с пользовательским паролем.
+            role_to_set = "admin"
+            logger.warning("User %s re-authenticated with user password; admin role preserved", u.id)
+        else:
+            role_to_set = role
 
         meta = dict(existing)
         new_values = {
@@ -218,10 +234,6 @@ async def cmd_auth(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 @require_private
 async def cmd_logout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if is_authorized(update) and not is_enabled(update):
-        await reply_disabled(update)
-        return
-
     uid = get_user_id(update)
     msg = update.effective_message
     if uid is None:

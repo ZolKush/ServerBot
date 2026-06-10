@@ -128,4 +128,7 @@ async def docker_logs_tail(name: str, tail: int) -> str:
             break
     if rc != 0:
         return f"docker logs error: {err.strip() or out.strip() or 'н/д'}"
-    return out if out.strip() else err
+    # docker logs пишет stderr-поток контейнера в stderr — объединяем оба
+    # потока (хронология между ними теряется, но логи не пропадают).
+    parts = [p for p in (out, err) if p.strip()]
+    return "\n".join(parts) if parts else out

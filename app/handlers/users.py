@@ -3,13 +3,15 @@ from datetime import datetime
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
+from telegram.error import BadRequest
 from telegram.ext import ContextTypes, ConversationHandler
 
 from ..config import TZ, logger
-from ..storage import upsert_user_meta
+from ..storage import mutate_user_meta
 from .common import (
     authorized_ids,
     breadcrumbs,
+    clip_html,
     clip_text,
     display_name,
     get_user_id,
@@ -124,6 +126,21 @@ async def users_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ADMIN_PICK
 
+    m_page = re.fullmatch(r"users:page:(\d+)", data)
+    if m_page:
+        active_filter = _get_users_filter(context)
+        try:
+            await q.edit_message_text(
+                users_list_title(active_filter),
+                parse_mode=ParseMode.HTML,
+                reply_markup=users_list_kb(active_filter, page=int(m_page.group(1))),
+            )
+        except BadRequest as e:
+            # Нажатие на номер текущей страницы — сообщение не меняется.
+            if "message is not modified" not in str(e).lower():
+                raise
+        return ADMIN_PICK
+
     m = re.fullmatch(r"users:user:(\d+)", data)
     if m:
         uid = int(m.group(1))
@@ -224,7 +241,7 @@ async def users_all_msg_confirm(update: Update, context: ContextTypes.DEFAULT_TY
         await q.edit_message_text(ui_warn_text("нет получателей для рассылки."))
         return ADMIN_PICK
 
-    payload = f"📩 <b>Сообщение администратора</b>\n\n{html_escape(clip_text(text, limit=3000))}"
+    payload = f"📩 <b>Сообщение администратора</b>\n\n{clip_html(text, limit=3000)}"
     ok, fail = await send_to_many(context, recipients, payload)
     logger.info("Admin user_id=%s broadcast message ok=%s fail=%s recipients=%s", sender, ok, fail, len(recipients))
     context.user_data.pop("users_all_broadcast_text", None)
@@ -287,8 +304,9 @@ async def _action_toggle_apply(update: Update, q, context, uid: int, meta):
             reply_markup=user_card_kb(uid),
         )
         return ADMIN_USER_MENU
-    meta["enabled"] = not bool(meta.get("enabled", True))
-    updated = await upsert_user_meta(uid, meta)
+    updated = await mutate_user_meta(uid, lambda m: {**m, "enabled": not bool(m.get("enabled", True))})
+    if updated is None:
+        return await _back_to_user_list(q, context)
     logger.info(
         "Admin user_id=%s toggled enabled=%s target_uid=%s",
         get_user_id(update),
@@ -316,8 +334,9 @@ async def _action_paid(q, context, uid: int, meta):
 
 
 async def _action_paid_apply(update: Update, q, context, uid: int, meta):
-    meta["is_paid"] = not bool(meta.get("is_paid", False))
-    updated = await upsert_user_meta(uid, meta)
+    updated = await mutate_user_meta(uid, lambda m: {**m, "is_paid": not bool(m.get("is_paid", False))})
+    if updated is None:
+        return await _back_to_user_list(q, context)
     logger.info(
         "Admin user_id=%s toggled is_paid=%s target_uid=%s",
         get_user_id(update),
@@ -432,7 +451,7 @@ async def users_user_msg_text(update: Update, context: ContextTypes.DEFAULT_TYPE
             await msg.reply_text(ui_error_text("пустой текст. Введите сообщение:"))
         return ADMIN_USER_MSG_TEXT
 
-    payload = f"📩 <b>Сообщение от администратора</b>\n\n{html_escape(clip_text(text, limit=3000))}"
+    payload = f"📩 <b>Сообщение от администратора</b>\n\n{clip_html(text, limit=3000)}"
     try:
         await context.bot.send_message(chat_id=uid, text=payload, parse_mode=ParseMode.HTML)
         logger.info("Admin user_id=%s sent direct message target_uid=%s", get_user_id(update), uid)
@@ -477,13 +496,16 @@ async def users_user_nick_text(update: Update, context: ContextTypes.DEFAULT_TYP
             await msg.reply_text(ui_error_text(f"ник слишком длинный. Максимум {MAX_USER_NICK_LEN} символов:"))
         return ADMIN_USER_NICK_TEXT
 
-    meta["nickname"] = nick
-    await upsert_user_meta(uid, meta)
+    updated = await mutate_user_meta(uid, lambda m: {**m, "nickname": nick})
+    if updated is None:
+        if msg:
+            await msg.reply_text(ui_error_text("пользователь не найден."))
+        return ADMIN_PICK
     logger.info("Admin user_id=%s updated nickname target_uid=%s", get_user_id(update), uid)
 
     if msg:
         await msg.reply_text(ui_ok_text("Никнейм сохранён"))
-        await msg.reply_text(format_user_card(meta), parse_mode=ParseMode.HTML, reply_markup=user_card_kb(uid))
+        await msg.reply_text(format_user_card(updated), parse_mode=ParseMode.HTML, reply_markup=user_card_kb(uid))
     return ADMIN_USER_MENU
 
 
@@ -502,20 +524,23 @@ async def users_user_cfg_text(update: Update, context: ContextTypes.DEFAULT_TYPE
             await msg.reply_text(ui_error_text("пустая конфигурация. Вставьте текст одним сообщением."))
         return ADMIN_USER_CFG_TEXT
 
-    meta = get_user_meta(uid)
-    if not meta:
-        if msg:
-            await msg.reply_text(ui_error_text("пользователь не найден (возможно, удалён из списка)."))
-        return ADMIN_PICK
-
     delivery_mode = str(context.user_data.get("subscription_delivery_mode", "send"))
     author_id = get_user_id(update)
     author_name = display_name(update)
-    meta[SUBSCRIPTION_TEXT_KEY] = cfg
-    meta[SUBSCRIPTION_UPDATED_AT_KEY] = datetime.now(TZ).isoformat()
-    meta[SUBSCRIPTION_UPDATED_BY_ID_KEY] = author_id
-    meta[SUBSCRIPTION_UPDATED_BY_NAME_KEY] = author_name
-    updated = await upsert_user_meta(uid, meta)
+
+    def _set_subscription(m: dict) -> dict:
+        m = dict(m)
+        m[SUBSCRIPTION_TEXT_KEY] = cfg
+        m[SUBSCRIPTION_UPDATED_AT_KEY] = datetime.now(TZ).isoformat()
+        m[SUBSCRIPTION_UPDATED_BY_ID_KEY] = author_id
+        m[SUBSCRIPTION_UPDATED_BY_NAME_KEY] = author_name
+        return m
+
+    updated = await mutate_user_meta(uid, _set_subscription)
+    if updated is None:
+        if msg:
+            await msg.reply_text(ui_error_text("пользователь не найден (возможно, удалён из списка)."))
+        return ADMIN_PICK
 
     if delivery_mode == "assign":
         if msg:

@@ -77,6 +77,8 @@ def parse_hhmm(text: str) -> Optional[Tuple[int, int]]:
     if not m:
         return None
     hh, mm = int(m.group(1)), int(m.group(2))
+    if hh == 0 and mm == 0:
+        return None
     if hh > MAX_MAINT_HOURS:
         return None
     if (hh * 60 + mm) > MAX_MAINT_HOURS * 60:

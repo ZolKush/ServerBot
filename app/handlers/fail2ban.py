@@ -25,7 +25,7 @@ from ..services.system_fail2ban import (
     save_json_file,
     tail_text_file_with_sudo_async,
 )
-from .common import breadcrumbs, authorized_ids, clip_text, html_escape, require_admin, send_to_many, ui_error_text, wrap_as_codeblock_html
+from .common import breadcrumbs, authorized_ids, html_escape, require_admin, send_to_many, ui_error_text, wrap_as_codeblock_html
 from .status import build_status_message, get_server_target
 
 
@@ -289,7 +289,7 @@ async def f2b_tail_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         else:
             payload = (
                 f"<b>{html_escape(breadcrumbs('Админ-панель', 'Fail2ban', srv.label, 'Tail'))}</b>\n\n"
-                + wrap_as_codeblock_html(clip_text(tail_txt))
+                + wrap_as_codeblock_html(tail_txt)
             )
     except FileNotFoundError:
         payload = ui_error_text(f"лог-файл не найден: {srv.fail2ban_log_path}")

@@ -11,6 +11,7 @@ from telegram.ext import ContextTypes, ConversationHandler
 from ..config import TZ, logger
 from ..models import Attachment, Ticket, TicketMessage
 from ..storage import (
+    UpdateAborted,
     get_admin_name_by_id,
     get_all_tickets_snapshot,
     get_ticket_copy,
@@ -41,6 +42,8 @@ TICKET_SUBJECT, TICKET_URGENCY, TICKET_TEXT, TICKET_CONFIRM, TICKET_USER_REPLY_T
 MAX_TICKET_SUBJECT_LEN = 160
 MAX_TICKET_TEXT_LEN = 3200
 MAX_TICKET_HISTORY_ITEMS = 6
+MAX_TICKET_HISTORY_CHARS = 2600  # суммарно на историю (лимит Telegram 4096 минус шапка)
+MAX_TICKET_HISTORY_ITEM_CHARS = 900  # на одно сообщение (после HTML-эскейпа)
 MAX_TICKET_MESSAGES_STORED = 100
 ARCHIVE_PAGE_SIZE = 10
 
@@ -178,24 +181,35 @@ async def _forward_ticket_attachment(
         logger.warning("Не удалось переслать вложение тикета chat_id=%s: %s", chat_id, e)
 
 
-def _format_ticket_history(ticket: Dict[str, Any]) -> str:
+def _format_ticket_history(ticket: Dict[str, Any], *, limit: int = MAX_TICKET_HISTORY_CHARS) -> str:
     messages = _ticket_messages(ticket)[-MAX_TICKET_HISTORY_ITEMS:]
     if not messages:
         return "История пуста."
-    parts: list[str] = []
+    blocks: list[str] = []
     for item in messages:
+        parts: list[str] = []
         sender_role = "Админ" if item.get("sender_role") == "admin" else "Пользователь"
         sender_name = str(item.get("sender_name") or sender_role)
         ts = format_dt_human(item.get("ts"))
-        text = clip_text(str(item.get("text") or ""), limit=900)
+        text = str(item.get("text") or "")
         parts.append(f"<b>{html_escape(sender_role)}:</b> {html_escape(sender_name)}")
         parts.append(f"• Время: <code>{html_escape(ts)}</code>")
         if text:
-            parts.append(wrap_as_codeblock_html(text))
+            parts.append(wrap_as_codeblock_html(text, limit=MAX_TICKET_HISTORY_ITEM_CHARS))
         attachment = item.get("attachment")
         if isinstance(attachment, dict):
             parts.append(f"<i>{html_escape(_attachment_label(attachment))}</i>")
-    return "\n".join(parts)
+        blocks.append("\n".join(parts))
+    # Лимит Telegram — 4096 символов на сообщение вместе с шапкой тикета,
+    # поэтому отбрасываем старые сообщения целиком (нельзя резать HTML посередине).
+    dropped = 0
+    while len(blocks) > 1 and sum(len(b) + 1 for b in blocks) > limit:
+        blocks.pop(0)
+        dropped += 1
+    out = "\n".join(blocks)
+    if dropped:
+        out = f"<i>…{dropped} старых сообщений скрыто из-за лимита</i>\n" + out
+    return out
 
 
 def _ticket_user_kb(ticket: Dict[str, Any], uid: int) -> InlineKeyboardMarkup:
@@ -447,20 +461,20 @@ async def _ticket_update(ticket_id: int, mutator) -> Dict[str, Any]:
         raw = tickets.get(str(ticket_id))
         if not isinstance(raw, dict):
             flow_state["error"] = "ticket_not_found"
-            return None
+            raise UpdateAborted()
         try:
             updated = mutator(dict(raw))
         except TicketFlowError as exc:
             flow_state["error"] = str(exc) or "ticket_error"
-            return None
+            raise UpdateAborted() from exc
         tickets[str(ticket_id)] = dict(updated)
         cfg.tickets = tickets
         return dict(updated)
 
-    result = await update_important_data(_apply)
-    if result is None:
-        raise TicketFlowError(flow_state.get("error", "ticket_error"))
-    return result
+    try:
+        return await update_important_data(_apply)
+    except UpdateAborted:
+        raise TicketFlowError(flow_state.get("error", "ticket_error")) from None
 
 
 def _parse_ticket_callback_id(data: Optional[str], action: str) -> int:
@@ -535,14 +549,18 @@ async def ticket_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     open_tickets = get_user_open_tickets(uid)
     if open_tickets:
+        ticket = open_tickets[0]
         msg = update.effective_message
-        warn = ui_warn_text(f"У вас уже есть открытый тикет #{open_tickets[0].get('id')}. Дождитесь его завершения.")
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Меню", callback_data="menu:home")]])
+        text = _format_ticket_for_user(
+            ticket,
+            event_line=ui_warn_text("У вас уже есть открытый тикет. Новый можно создать после его закрытия."),
+        )
+        kb = _ticket_user_kb(ticket, uid)
         if q and msg:
             await q.answer()
-            await q.edit_message_text(warn, reply_markup=kb)
+            await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
         elif msg:
-            await msg.reply_text(warn, reply_markup=kb)
+            await msg.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
         return ConversationHandler.END
     _clear_ticket_ctx(context)
     msg = update.effective_message
@@ -713,10 +731,10 @@ async def ticket_take_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     q = update.callback_query
     if not q:
         return
-    await q.answer()
     ticket_id = _parse_ticket_callback_id(q.data, "take")
     admin_id = get_user_id(update)
     if not ticket_id or admin_id is None:
+        await q.answer()
         return
     admin_name = display_name(update)
 
@@ -750,6 +768,7 @@ async def ticket_take_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await q.answer("Тикет уже закрыт.", show_alert=True)
         return
 
+    await q.answer()
     logger.info(
         "Ticket assigned ticket_id=%s admin_id=%s user_id=%s",
         ticket_id,
@@ -775,7 +794,6 @@ async def ticket_admin_reply_start(update: Update, context: ContextTypes.DEFAULT
     q = update.callback_query
     if not q:
         return ConversationHandler.END
-    await q.answer()
     ticket_id = _parse_ticket_callback_id(q.data, "adminreply")
     admin_id = get_user_id(update)
     ticket = get_ticket_copy(ticket_id) if ticket_id else None
@@ -791,6 +809,7 @@ async def ticket_admin_reply_start(update: Update, context: ContextTypes.DEFAULT
         logger.warning("Ticket admin reply denied ticket_id=%s admin_id=%s reason=not_assignee", ticket_id, admin_id)
         await q.answer("Ответить может только исполнитель тикета.", show_alert=True)
         return ConversationHandler.END
+    await q.answer()
     context.user_data["ticket_reply_ticket_id"] = ticket_id
     context.user_data["ticket_reply_role"] = "admin"
     await q.edit_message_text(
@@ -806,7 +825,6 @@ async def ticket_user_reply_start(update: Update, context: ContextTypes.DEFAULT_
     q = update.callback_query
     if not q:
         return ConversationHandler.END
-    await q.answer()
     ticket_id = _parse_ticket_callback_id(q.data, "userreply")
     uid = get_user_id(update)
     ticket = get_ticket_copy(ticket_id) if ticket_id else None
@@ -824,6 +842,7 @@ async def ticket_user_reply_start(update: Update, context: ContextTypes.DEFAULT_
         )
         await q.answer("Сейчас ответить на этот тикет нельзя.", show_alert=True)
         return ConversationHandler.END
+    await q.answer()
     context.user_data["ticket_reply_ticket_id"] = ticket_id
     context.user_data["ticket_reply_role"] = "user"
     await q.edit_message_text(
@@ -966,10 +985,10 @@ async def ticket_close_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     q = update.callback_query
     if not q:
         return
-    await q.answer()
     ticket_id = _parse_ticket_callback_id(q.data, "close")
     admin_id = get_user_id(update)
     if not ticket_id or admin_id is None:
+        await q.answer()
         return
     admin_name = display_name(update)
     try:
@@ -998,6 +1017,7 @@ async def ticket_close_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await q.answer("Закрыть тикет может только его исполнитель.", show_alert=True)
         return
 
+    await q.answer()
     logger.info(
         "Ticket closed ticket_id=%s admin_id=%s user_id=%s",
         ticket_id,
@@ -1106,16 +1126,18 @@ async def ticket_open_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     q = update.callback_query
     if not q:
         return ConversationHandler.END
-    await q.answer()
     admin_id = get_user_id(update)
     if admin_id is None:
+        await q.answer()
         return ConversationHandler.END
 
     parts = (q.data or "").split(":")
     if len(parts) != 3 or not parts[2].isdigit():
+        await q.answer()
         return ConversationHandler.END
     ticket_id = int(parts[2])
     if not ticket_id:
+        await q.answer()
         return ConversationHandler.END
 
     ticket = get_ticket_copy(ticket_id)
@@ -1123,6 +1145,7 @@ async def ticket_open_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await q.answer("Тикет не найден.", show_alert=True)
         return ConversationHandler.END
 
+    await q.answer()
     _clear_ticket_ctx(context)
     text = _format_ticket_for_admin(ticket, admin_id)
     kb = _ticket_admin_kb(ticket, admin_id)
@@ -1218,13 +1241,14 @@ async def ticket_transfer_init_cb(update: Update, context: ContextTypes.DEFAULT_
     q = update.callback_query
     if not q:
         return ConversationHandler.END
-    await q.answer()
     admin_id = get_user_id(update)
     if admin_id is None:
+        await q.answer()
         return ConversationHandler.END
 
     parts = (q.data or "").split(":")
     if len(parts) != 3 or not parts[2].isdigit():
+        await q.answer()
         return ConversationHandler.END
     ticket_id = int(parts[2])
 
@@ -1244,6 +1268,7 @@ async def ticket_transfer_init_cb(update: Update, context: ContextTypes.DEFAULT_
         await q.answer("Нет других администраторов.", show_alert=True)
         return ConversationHandler.END
 
+    await q.answer()
     rows: list[list[InlineKeyboardButton]] = []
     for aid in other_admins:
         name = get_admin_name_by_id(aid) or str(aid)
@@ -1293,17 +1318,19 @@ async def ticket_transfer_to_cb(update: Update, context: ContextTypes.DEFAULT_TY
     q = update.callback_query
     if not q:
         return ConversationHandler.END
-    await q.answer()
     admin_id = get_user_id(update)
     if admin_id is None:
+        await q.answer()
         return ConversationHandler.END
 
     parts = (q.data or "").split(":")
     if len(parts) != 4 or not parts[2].isdigit() or not parts[3].isdigit():
+        await q.answer()
         return ConversationHandler.END
     ticket_id = int(parts[2])
     new_admin_id = int(parts[3])
     if not ticket_id or not new_admin_id or new_admin_id == admin_id:
+        await q.answer()
         return ConversationHandler.END
 
     new_admin_name = get_admin_name_by_id(new_admin_id)
@@ -1344,6 +1371,7 @@ async def ticket_transfer_to_cb(update: Update, context: ContextTypes.DEFAULT_TY
             await q.answer("Передать можно только свой тикет.", show_alert=True)
         return ConversationHandler.END
 
+    await q.answer()
     logger.info(
         "Ticket transferred ticket_id=%s from_admin=%s to_admin=%s",
         ticket_id, admin_id, new_admin_id,
