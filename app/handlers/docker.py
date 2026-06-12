@@ -23,21 +23,46 @@ def _is_server_container_allowed(server_key: str, name: str) -> bool:
     return bool(is_valid_container_name(name) and name in srv.monitor_containers)
 
 
-def _docker_list_kb(server_key: str) -> InlineKeyboardMarkup:
+def _filtered_containers(server_key: str) -> List[str]:
     srv = get_server_target(server_key)
+    containers = srv.monitor_containers if srv else []
+    return [nm for nm in containers if is_valid_container_name(nm)]
+
+
+def _container_token(server_key: str, name: str) -> str:
+    """Короткий токен контейнера для callback_data.
+
+    Имя контейнера может быть до 64 символов и пробить лимит Telegram
+    в 64 байта на callback_data, поэтому в кнопки идёт индекс (i0, i1, …)
+    в списке monitor_containers.
+    """
+    containers = _filtered_containers(server_key)
+    try:
+        return f"i{containers.index(name)}"
+    except ValueError:
+        return name
+
+
+def _resolve_container_token(server_key: str, token: str) -> Optional[str]:
+    """Принимает индексный токен (i0, i1, …) или легаси-имя из старых клавиатур."""
+    if re.fullmatch(r"i\d{1,3}", token or ""):
+        containers = _filtered_containers(server_key)
+        idx = int(token[1:])
+        return containers[idx] if 0 <= idx < len(containers) else None
+    return token or None
+
+
+def _docker_list_kb(server_key: str) -> InlineKeyboardMarkup:
     rows: List[List[InlineKeyboardButton]] = []
     row: List[InlineKeyboardButton] = []
-    containers = srv.monitor_containers if srv else []
-    for nm in containers:
-        if not is_valid_container_name(nm):
-            continue
-        row.append(InlineKeyboardButton(nm[:32], callback_data=f"docker:show:{server_key}:{nm}"))
+    for idx, nm in enumerate(_filtered_containers(server_key)):
+        row.append(InlineKeyboardButton(nm[:32], callback_data=f"docker:show:{server_key}:i{idx}"))
         if len(row) == 2:
             rows.append(row)
             row = []
     if row:
         rows.append(row)
-    rows.append([InlineKeyboardButton("⬅️ Назад к статусу", callback_data=f"docker:back:{server_key}")])
+    rows.append([InlineKeyboardButton("⬅️ К статусу", callback_data=f"docker:back:{server_key}")])
     rows.append([InlineKeyboardButton("🏠 Меню", callback_data="menu:home")])
     return InlineKeyboardMarkup(rows)
 
@@ -45,11 +70,12 @@ def _docker_list_kb(server_key: str) -> InlineKeyboardMarkup:
 def _docker_item_kb(server_key: str, name: str, tail: int = DOCKER_LOGS_TAIL_MIN) -> InlineKeyboardMarkup:
     tail = int(tail)
     tail = DOCKER_LOGS_TAIL_MIN if tail < DOCKER_LOGS_TAIL_MIN else (DOCKER_LOGS_TAIL_MAX if tail > DOCKER_LOGS_TAIL_MAX else tail)
+    token = _container_token(server_key, name)
     return InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton("🔎 Inspect", callback_data=f"docker:inspect:{server_key}:{name}"),
-                InlineKeyboardButton(f"📜 Logs tail {tail}", callback_data=f"docker:logs:{server_key}:{name}:{tail}"),
+                InlineKeyboardButton("🔎 Inspect", callback_data=f"docker:inspect:{server_key}:{token}"),
+                InlineKeyboardButton(f"📜 Logs tail {tail}", callback_data=f"docker:logs:{server_key}:{token}:{tail}"),
             ],
             [InlineKeyboardButton("⬅️ К списку", callback_data=f"docker:list:{server_key}")],
             [InlineKeyboardButton("⬅️ К статусу", callback_data=f"docker:back:{server_key}")],
@@ -62,7 +88,11 @@ def _parse_server_and_name(data: str, action: str) -> Optional[tuple[str, str]]:
     m = re.fullmatch(rf"docker:{action}:({SERVER_KEY_PATTERN}):([a-zA-Z0-9_.\-]{{1,64}})", data or "")
     if not m:
         return None
-    return m.group(1), m.group(2)
+    server_key, token = m.group(1), m.group(2)
+    name = _resolve_container_token(server_key, token)
+    if not name:
+        return None
+    return server_key, name
 
 
 @require_admin
@@ -126,7 +156,7 @@ async def docker_inspect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     q = update.callback_query
     if not q:
         return
-    await q.answer()
+    await q.answer("Загружаю…")
     parsed = _parse_server_and_name(q.data or "", "inspect")
     if not parsed:
         await q.edit_message_text(ui_error_text("некорректный запрос."))
@@ -155,11 +185,15 @@ async def docker_logs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     q = update.callback_query
     if not q:
         return
-    await q.answer()
+    await q.answer("Загружаю логи…")
     m = re.fullmatch(rf"docker:logs:({SERVER_KEY_PATTERN}):([a-zA-Z0-9_.\-]{{1,64}}):(\d{{1,4}})", q.data or "")
     if not m:
         return
-    server_key, name, tail_s = m.group(1), m.group(2), m.group(3)
+    server_key, token, tail_s = m.group(1), m.group(2), m.group(3)
+    name = _resolve_container_token(server_key, token)
+    if not name:
+        await q.edit_message_text(ui_error_text("контейнер недоступен."), reply_markup=_docker_list_kb(server_key))
+        return
     tail = int(tail_s)
     tail = DOCKER_LOGS_TAIL_MIN if tail < DOCKER_LOGS_TAIL_MIN else (DOCKER_LOGS_TAIL_MAX if tail > DOCKER_LOGS_TAIL_MAX else tail)
 
@@ -177,10 +211,11 @@ async def docker_logs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         log_text = await docker_logs_tail(name, tail)
 
     is_at_max = tail >= DOCKER_LOGS_TAIL_MAX
-    first_row = [InlineKeyboardButton("🔎 Inspect", callback_data=f"docker:inspect:{server_key}:{name}")]
+    token = _container_token(server_key, name)
+    first_row = [InlineKeyboardButton("🔎 Inspect", callback_data=f"docker:inspect:{server_key}:{token}")]
     if not is_at_max:
         next_tail = min(tail + DOCKER_LOGS_TAIL_STEP, DOCKER_LOGS_TAIL_MAX)
-        first_row.append(InlineKeyboardButton("📜 Ещё", callback_data=f"docker:logs:{server_key}:{name}:{next_tail}"))
+        first_row.append(InlineKeyboardButton("📜 Ещё", callback_data=f"docker:logs:{server_key}:{token}:{next_tail}"))
     kb = InlineKeyboardMarkup(
         [
             first_row,

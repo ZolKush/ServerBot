@@ -8,6 +8,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from ..config import SERVERS, TZ, TZ_NAME
 from ..models import Maintenance, ScheduledMaintenance
 from .common import html_escape
+from .ui import SEP, humanize_hhmm, plural_ru  # noqa: F401 — реэкспорт для существующих импортов
 
 MAINT_SCOPE_ALL = "all"
 MAX_MAINT_HOURS = 72
@@ -96,32 +97,12 @@ def parse_clock_range(text: str) -> Optional[Tuple[int, int, int, int]]:
     return sh, sm, eh, em
 
 
-def plural_ru(n: int, one: str, few: str, many: str) -> str:
-    n = abs(n) % 100
-    n1 = n % 10
-    if 11 <= n <= 19:
-        return many
-    if n1 == 1:
-        return one
-    if 2 <= n1 <= 4:
-        return few
-    return many
-
-
-def humanize_hhmm(h: int, m: int) -> str:
-    parts = []
-    if h:
-        parts.append(f"{h} {plural_ru(h, 'час', 'часа', 'часов')}")
-    if m:
-        parts.append(f"{m} {plural_ru(m, 'минута', 'минуты', 'минут')}")
-    return " ".join(parts) if parts else "0 минут"
-
-
 def format_maint(scope: str, urgency: str, hh: int, mm: int, author: str) -> str:
     now = datetime.now(TZ).strftime("%d.%m.%Y %H:%M")
     urgency_label = "срочные" if urgency == "urgent" else "плановые"
     return (
-        "⚠️ <b>Технические работы</b>\n"
+        "🛠 <b>Техработы</b> · ⚠️ начались\n"
+        f"{SEP}\n"
         f"{_scope_line(scope)}\n"
         f"• Тип: <b>{html_escape(urgency_label)}</b>\n"
         f"• Оценка простоя: <b>{html_escape(humanize_hhmm(hh, mm))}</b>\n"
@@ -132,7 +113,8 @@ def format_maint(scope: str, urgency: str, hh: int, mm: int, author: str) -> str
 
 def format_scheduled_maint(scope: str, start_at: datetime, end_at: datetime, author: str) -> str:
     return (
-        "🗓 <b>Запланированы технические работы</b>\n"
+        "🛠 <b>Техработы</b> · 🗓 запланированы\n"
+        f"{SEP}\n"
         f"{_scope_line(scope)}\n"
         f"• Начало: <code>{html_escape(_fmt_dt_short(start_at))}</code> ({html_escape(TZ_NAME)})\n"
         f"• Окончание: <code>{html_escape(_fmt_dt_short(end_at))}</code> ({html_escape(TZ_NAME)})\n"
@@ -256,7 +238,8 @@ def _maint_panel_text(maint: Dict[str, Any]) -> str:
     except Exception:
         end_dt = None
     lines = [
-        "🛠️ <b>Техработы активны</b>",
+        "🛠 <b>Техработы</b> · ⚠️ активны",
+        SEP,
         _scope_line(str(scope)),
         f"• Тип: <b>{html_escape(urgency_label)}</b>",
         f"• Оценка простоя: <b>{html_escape(humanize_hhmm(hh, mm))}</b>",
@@ -281,7 +264,8 @@ def _scheduled_panel_text(scheduled: Dict[str, Any]) -> str:
     except Exception:
         end_dt = None
     lines = [
-        "🗓️ <b>Техработы запланированы</b>",
+        "🛠 <b>Техработы</b> · 🗓 запланированы",
+        SEP,
         _scope_line(str(scope)),
     ]
     if start_dt:
@@ -302,7 +286,8 @@ def _maint_extend_notice(maint: Dict[str, Any], hh: int, mm: int, author: str) -
     end_txt = _fmt_dt_short(end_dt) if end_dt else "-"
     scope = maint.get("scope", MAINT_SCOPE_ALL)
     return (
-        "⏳ <b>Техработы продлены</b>\n"
+        "🛠 <b>Техработы</b> · ⏳ продлены\n"
+        f"{SEP}\n"
         f"{_scope_line(str(scope))}\n"
         f"• Новый ориентир простоя: <b>{html_escape(humanize_hhmm(hh, mm))}</b>\n"
         f"• Окончание: <code>{html_escape(end_txt)}</code> ({html_escape(TZ_NAME)})\n"
@@ -316,7 +301,8 @@ def _maint_end_notice(maint: Dict[str, Any], author: str, ended_at: Optional[dat
         ended_at = datetime.now(TZ)
     scope = maint.get("scope", MAINT_SCOPE_ALL)
     return (
-        "✅ <b>Техработы завершены</b>\n"
+        "🛠 <b>Техработы</b> · ✅ завершены\n"
+        f"{SEP}\n"
         f"{_scope_line(str(scope))}\n"
         f"• Время: <code>{html_escape(_fmt_dt_short(ended_at))}</code> ({html_escape(TZ_NAME)})\n"
         f"• Ответственный: <b>{html_escape(author)}</b>\n\n"
@@ -325,7 +311,7 @@ def _maint_end_notice(maint: Dict[str, Any], author: str, ended_at: Optional[dat
 
 
 def _maint_active_reminder_text(maint: Dict[str, Any]) -> str:
-    return "🛠️ <b>Напоминание: техработы активны</b>\n\n" + _maint_panel_text(maint)
+    return "🔔 <b>Напоминание</b>\n" + _maint_panel_text(maint)
 
 
 def _maint_scheduled_soon_notice(scheduled: Dict[str, Any]) -> str:
@@ -337,7 +323,8 @@ def _maint_scheduled_soon_notice(scheduled: Dict[str, Any]) -> str:
     scope = scheduled.get("scope", MAINT_SCOPE_ALL)
     author = scheduled.get("author_name") or "администратор"
     return (
-        "⏳ <b>Технические работы начнутся через 30 минут</b>\n"
+        "🛠 <b>Техработы</b> · ⏳ начнутся через 30 минут\n"
+        f"{SEP}\n"
         f"{_scope_line(str(scope))}\n"
         f"• Начало: <code>{html_escape(_fmt_dt_short(start_dt) if start_dt else '-')}</code> ({html_escape(TZ_NAME)})\n"
         f"• Окончание: <code>{html_escape(_fmt_dt_short(end_dt) if end_dt else '-')}</code> ({html_escape(TZ_NAME)})\n"
@@ -353,7 +340,8 @@ def _maint_scheduled_start_notice(scheduled: Dict[str, Any]) -> str:
     scope = scheduled.get("scope", MAINT_SCOPE_ALL)
     author = scheduled.get("author_name") or "администратор"
     return (
-        "⚠️ <b>Технические работы начались</b>\n"
+        "🛠 <b>Техработы</b> · ⚠️ начались\n"
+        f"{SEP}\n"
         f"{_scope_line(str(scope))}\n"
         f"• Плановое окончание: <code>{html_escape(_fmt_dt_short(end_dt) if end_dt else '-')}</code> ({html_escape(TZ_NAME)})\n"
         f"• Ответственный: <b>{html_escape(str(author))}</b>"

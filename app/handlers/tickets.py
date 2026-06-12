@@ -22,7 +22,6 @@ from ..storage import (
 )
 from .common import (
     authorized_ids,
-    breadcrumbs,
     clip_text,
     display_name,
     format_dt_human,
@@ -31,18 +30,20 @@ from .common import (
     is_admin,
     require_admin,
     require_auth,
+    safe_edit_or_reply,
     show_main_menu,
     ui_error_text,
     ui_ok_text,
     ui_warn_text,
     wrap_as_codeblock_html,
 )
+from .ui import SEP, pager_row, plural_ru, urgency_emoji, urgency_label
 
 TICKET_SUBJECT, TICKET_URGENCY, TICKET_TEXT, TICKET_CONFIRM, TICKET_USER_REPLY_TEXT, TICKET_ADMIN_REPLY_TEXT = range(6)
 MAX_TICKET_SUBJECT_LEN = 160
 MAX_TICKET_TEXT_LEN = 3200
 MAX_TICKET_HISTORY_ITEMS = 6
-MAX_TICKET_HISTORY_CHARS = 2600  # суммарно на историю (лимит Telegram 4096 минус шапка)
+MAX_TICKET_HISTORY_CHARS = 2500  # суммарно на историю (лимит Telegram 4096 минус шапка)
 MAX_TICKET_HISTORY_ITEM_CHARS = 900  # на одно сообщение (после HTML-эскейпа)
 MAX_TICKET_MESSAGES_STORED = 100
 ARCHIVE_PAGE_SIZE = 10
@@ -238,23 +239,31 @@ def _ticket_admin_kb(ticket: Dict[str, Any], admin_uid: int) -> InlineKeyboardMa
     return InlineKeyboardMarkup(rows)
 
 
-def _format_ticket_for_admin(ticket: Dict[str, Any], admin_uid: int, *, event_line: Optional[str] = None) -> str:
+def _ticket_status_emoji(ticket: Dict[str, Any]) -> str:
+    if str(ticket.get("status", "open")) == "closed":
+        return "✅"
+    return "🟡" if int(ticket.get("assignee_id", 0) or 0) else "🔴"
+
+
+def _ticket_header(ticket: Dict[str, Any], *, title_prefix: str = "Тикет") -> str:
     ticket_no = f"#{ticket.get('id', '-')}"
+    status_label = _ticket_status_label(ticket)
+    return f"🎫 <b>{html_escape(title_prefix)} {html_escape(ticket_no)}</b> · {_ticket_status_emoji(ticket)} {html_escape(status_label)}"
+
+
+def _format_ticket_for_admin(ticket: Dict[str, Any], admin_uid: int, *, event_line: Optional[str] = None) -> str:
     assignee_name = str(ticket.get("assignee_name") or "-")
     user_name = str(ticket.get("user_name") or "пользователь")
     user_username = str(ticket.get("user_username") or "").strip()
     user_id = int(ticket.get("user_id", 0) or 0)
     subject = str(ticket.get("subject") or "-")
-    urgency = str(ticket.get("urgency") or "p3").upper()
-    status_label = _ticket_status_label(ticket)
     created_at = format_dt_human(ticket.get("created_at"))
     lines = [
-        f"<b>{html_escape(breadcrumbs('Тикеты', ticket_no))}</b>",
-        "",
-        f"• Статус: <b>{html_escape(status_label)}</b>",
+        _ticket_header(ticket),
+        SEP,
         f"• Исполнитель: <b>{html_escape(assignee_name)}</b>",
         f"• Пользователь: <b>{html_escape(user_name)}</b> (<code>{html_escape(str(user_id))}</code>)",
-        f"• Срочность: <code>{html_escape(urgency)}</code>",
+        f"• Срочность: {urgency_label(ticket.get('urgency'))}",
         f"• Тема: <code>{html_escape(subject)}</code>",
         f"• Создан: <code>{html_escape(created_at)}</code>",
     ]
@@ -266,29 +275,25 @@ def _format_ticket_for_admin(ticket: Dict[str, Any], admin_uid: int, *, event_li
         lines.extend(["", event_line])
     if _ticket_is_assignee(ticket, admin_uid):
         lines.extend(["", "<b>Доступ:</b> вы исполнитель этого тикета."])
-    lines.extend(["", "<b>История</b>", _format_ticket_history(ticket)])
+    lines.extend([SEP, "🕘 <b>История</b>", _format_ticket_history(ticket)])
     return "\n".join(lines)
 
 
 def _format_ticket_for_user(ticket: Dict[str, Any], *, event_line: Optional[str] = None) -> str:
-    ticket_no = f"#{ticket.get('id', '-')}"
     assignee_name = str(ticket.get("assignee_name") or "ещё не назначен")
     subject = str(ticket.get("subject") or "-")
-    urgency = str(ticket.get("urgency") or "p3").upper()
-    status_label = _ticket_status_label(ticket)
     lines = [
-        f"<b>{html_escape(breadcrumbs('Мой тикет', ticket_no))}</b>",
-        "",
-        f"• Статус: <b>{html_escape(status_label)}</b>",
+        _ticket_header(ticket, title_prefix="Мой тикет"),
+        SEP,
         f"• Исполнитель: <b>{html_escape(assignee_name)}</b>",
-        f"• Срочность: <code>{html_escape(urgency)}</code>",
+        f"• Срочность: {urgency_label(ticket.get('urgency'))}",
         f"• Тема: <code>{html_escape(subject)}</code>",
     ]
     if str(ticket.get("status", "open")) == "closed":
         lines.append(f"• Закрыт: <code>{html_escape(format_dt_human(ticket.get('closed_at')))}</code>")
     if event_line:
         lines.extend(["", event_line])
-    lines.extend(["", "<b>История</b>", _format_ticket_history(ticket)])
+    lines.extend([SEP, "🕘 <b>История</b>", _format_ticket_history(ticket)])
     return "\n".join(lines)
 
 
@@ -487,9 +492,9 @@ def _parse_ticket_callback_id(data: Optional[str], action: str) -> int:
 def ticket_urgency_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("Критично", callback_data="ticket:p1")],
-            [InlineKeyboardButton("Важно", callback_data="ticket:p2")],
-            [InlineKeyboardButton("Обычно", callback_data="ticket:p3")],
+            [InlineKeyboardButton("🔥 Критично", callback_data="ticket:p1")],
+            [InlineKeyboardButton("⚠️ Важно", callback_data="ticket:p2")],
+            [InlineKeyboardButton("📋 Обычно", callback_data="ticket:p3")],
             [InlineKeyboardButton("🏠 Меню", callback_data="menu:home")],
         ]
     )
@@ -515,7 +520,7 @@ def ticket_confirm_kb() -> InlineKeyboardMarkup:
 
 def _ticket_preview_text(context: ContextTypes.DEFAULT_TYPE) -> str:
     subj = context.user_data.get("ticket_subject", "-")
-    urg = str(context.user_data.get("ticket_urgency", "p3")).upper()
+    urg = str(context.user_data.get("ticket_urgency", "p3"))
     text = str(context.user_data.get("ticket_text", ""))
     text_for_preview = clip_text(text, limit=3000)
     attachment = context.user_data.get("ticket_attachment")
@@ -523,14 +528,13 @@ def _ticket_preview_text(context: ContextTypes.DEFAULT_TYPE) -> str:
     if isinstance(attachment, dict):
         attachment_line = f"\n<i>{html_escape(_attachment_label(attachment))}</i>"
     return (
-        f"<b>{html_escape(breadcrumbs('Тикет', 'Проверка'))}</b>\n\n"
-        "<b>Форма тикета</b>\n"
+        f"🎫 <b>Новый тикет — проверка</b>\n{SEP}\n"
         f"• Тема: <code>{html_escape(str(subj))}</code>\n"
-        f"• Срочность: <code>{html_escape(str(urg))}</code>\n\n"
+        f"• Срочность: {urgency_label(urg)}\n\n"
         "Описание:\n"
         + wrap_as_codeblock_html(text_for_preview)
         + attachment_line
-        + "\n\nДействия:"
+        + "\n\nВыберите действие:"
     )
 
 
@@ -813,7 +817,7 @@ async def ticket_admin_reply_start(update: Update, context: ContextTypes.DEFAULT
     context.user_data["ticket_reply_ticket_id"] = ticket_id
     context.user_data["ticket_reply_role"] = "admin"
     await q.edit_message_text(
-        f"<b>{html_escape(breadcrumbs('Тикет', f'#{ticket_id}', 'Ответ пользователю'))}</b>\n\nВведите ответ пользователю:",
+        f"🎫 <b>Тикет #{ticket_id} — ответ</b>\n{SEP}\nВведите ответ пользователю:",
         parse_mode=ParseMode.HTML,
         reply_markup=ticket_input_kb(),
     )
@@ -846,7 +850,7 @@ async def ticket_user_reply_start(update: Update, context: ContextTypes.DEFAULT_
     context.user_data["ticket_reply_ticket_id"] = ticket_id
     context.user_data["ticket_reply_role"] = "user"
     await q.edit_message_text(
-        f"<b>{html_escape(breadcrumbs('Мой тикет', f'#{ticket_id}', 'Ответ администратору'))}</b>\n\nВведите ответ администратору:",
+        f"🎫 <b>Мой тикет #{ticket_id} — ответ</b>\n{SEP}\nВведите ответ администратору:",
         parse_mode=ParseMode.HTML,
         reply_markup=ticket_input_kb(),
     )
@@ -1060,7 +1064,7 @@ async def _show_ticket_dashboard(update: Update, context: ContextTypes.DEFAULT_T
         else:
             others.append(t)
 
-    lines = [f"<b>{html_escape(breadcrumbs('Тикеты', 'Панель'))}</b>", ""]
+    lines = ["🎫 <b>Тикеты — панель</b>", SEP]
     rows: list[list[InlineKeyboardButton]] = []
 
     if unpicked:
@@ -1068,9 +1072,9 @@ async def _show_ticket_dashboard(update: Update, context: ContextTypes.DEFAULT_T
         for t in unpicked:
             tid = int(t.get("id", 0))
             subj = clip_text(str(t.get("subject") or "-"), limit=35)
-            urg = str(t.get("urgency", "p3")).upper()
-            lines.append(f"  • #{tid} [{urg}] {html_escape(subj)}")
-            rows.append([InlineKeyboardButton(f"🔴 #{tid} [{urg}] {subj}", callback_data=f"ticket:open:{tid}")])
+            urg = t.get("urgency", "p3")
+            lines.append(f"  • #{tid} {urgency_emoji(urg)} {html_escape(subj)}")
+            rows.append([InlineKeyboardButton(f"🔴 #{tid} {urgency_emoji(urg)} {subj}", callback_data=f"ticket:open:{tid}")])
     else:
         lines.append("🔴 Тикетов без исполнителя нет.")
 
@@ -1081,9 +1085,9 @@ async def _show_ticket_dashboard(update: Update, context: ContextTypes.DEFAULT_T
         for t in mine:
             tid = int(t.get("id", 0))
             subj = clip_text(str(t.get("subject") or "-"), limit=35)
-            urg = str(t.get("urgency", "p3")).upper()
-            lines.append(f"  • #{tid} [{urg}] {html_escape(subj)}")
-            rows.append([InlineKeyboardButton(f"🟡 #{tid} [{urg}] {subj}", callback_data=f"ticket:open:{tid}")])
+            urg = t.get("urgency", "p3")
+            lines.append(f"  • #{tid} {urgency_emoji(urg)} {html_escape(subj)}")
+            rows.append([InlineKeyboardButton(f"🟡 #{tid} {urgency_emoji(urg)} {subj}", callback_data=f"ticket:open:{tid}")])
     else:
         lines.append("🟡 У вас нет тикетов в работе.")
 
@@ -1103,12 +1107,7 @@ async def _show_ticket_dashboard(update: Update, context: ContextTypes.DEFAULT_T
 
     text = "\n".join(lines)
     kb = InlineKeyboardMarkup(rows)
-    msg = update.effective_message
-    if msg:
-        try:
-            await msg.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
-        except Exception:
-            await msg.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    await safe_edit_or_reply(update.effective_message, text, reply_markup=kb)
     return ConversationHandler.END
 
 
@@ -1149,12 +1148,7 @@ async def ticket_open_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     _clear_ticket_ctx(context)
     text = _format_ticket_for_admin(ticket, admin_id)
     kb = _ticket_admin_kb(ticket, admin_id)
-    msg = update.effective_message
-    if msg:
-        try:
-            await msg.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
-        except Exception:
-            await msg.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    await safe_edit_or_reply(update.effective_message, text, reply_markup=kb)
     return ConversationHandler.END
 
 
@@ -1172,47 +1166,37 @@ async def _show_archive_page(update: Update, context: ContextTypes.DEFAULT_TYPE,
     items = closed[start: start + ARCHIVE_PAGE_SIZE]
 
     lines = [
-        f"<b>{html_escape(breadcrumbs('Тикеты', 'Архив'))}</b>",
-        f"Страница {page + 1}/{total_pages} • всего {total} закрытых тикетов",
-        "",
+        "🗂 <b>Тикеты — архив</b>",
+        f"Страница {page + 1}/{total_pages} · всего {total} {plural_ru(total, 'закрытый тикет', 'закрытых тикета', 'закрытых тикетов')}",
+        SEP,
     ]
     rows: list[list[InlineKeyboardButton]] = []
 
     for t in items:
         tid = int(t.get("id", 0) or 0)
         subj = clip_text(str(t.get("subject") or "-"), limit=35)
-        urg = str(t.get("urgency", "p3")).upper()
+        urg = t.get("urgency", "p3")
         user_name = str(t.get("user_name") or "-")
         closed_by = str(t.get("closed_by_name") or "-")
         closed_at = format_dt_human(t.get("closed_at"))
         lines.append(
-            f"• <b>#{tid}</b> [{urg}] {html_escape(subj)}\n"
+            f"• <b>#{tid}</b> {urgency_emoji(urg)} {html_escape(subj)}\n"
             f"  {html_escape(user_name)} → закрыл {html_escape(closed_by)} | {html_escape(closed_at)}"
         )
-        rows.append([InlineKeyboardButton(f"#{tid} [{urg}] {subj}", callback_data=f"ticket:open:{tid}")])
+        rows.append([InlineKeyboardButton(f"#{tid} {urgency_emoji(urg)} {subj}", callback_data=f"ticket:open:{tid}")])
 
     if not items:
         lines.append("Архив пуст.")
 
-    nav: list[InlineKeyboardButton] = []
-    if page > 0:
-        nav.append(InlineKeyboardButton("◀ Назад", callback_data=f"ticket:archive_page:{page - 1}"))
-    if page < total_pages - 1:
-        nav.append(InlineKeyboardButton("▶ Далее", callback_data=f"ticket:archive_page:{page + 1}"))
-    if nav:
-        rows.append(nav)
+    if total_pages > 1:
+        rows.append(pager_row("ticket:archive_page:", page, total_pages))
 
-    rows.append([InlineKeyboardButton("↩ К панели", callback_data="ticket:list")])
+    rows.append([InlineKeyboardButton("⬅️ К панели", callback_data="ticket:list")])
     rows.append([InlineKeyboardButton("🏠 Меню", callback_data="menu:home")])
 
     text = "\n".join(lines)
     kb = InlineKeyboardMarkup(rows)
-    msg = update.effective_message
-    if msg:
-        try:
-            await msg.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
-        except Exception:
-            await msg.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    await safe_edit_or_reply(update.effective_message, text, reply_markup=kb)
     return ConversationHandler.END
 
 
@@ -1273,19 +1257,14 @@ async def ticket_transfer_init_cb(update: Update, context: ContextTypes.DEFAULT_
     for aid in other_admins:
         name = get_admin_name_by_id(aid) or str(aid)
         rows.append([InlineKeyboardButton(f"👤 {name}", callback_data=f"ticket:transfer_to:{ticket_id}:{aid}")])
-    rows.append([InlineKeyboardButton("↩ Назад", callback_data=f"ticket:open:{ticket_id}")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"ticket:open:{ticket_id}")])
     rows.append([InlineKeyboardButton("🏠 Меню", callback_data="menu:home")])
 
     text = (
-        f"<b>{html_escape(breadcrumbs('Тикет', f'#{ticket_id}', 'Передать'))}</b>\n\n"
+        f"🔄 <b>Тикет #{ticket_id} — передача</b>\n{SEP}\n"
         "Выберите администратора для передачи тикета:"
     )
-    msg = update.effective_message
-    if msg:
-        try:
-            await msg.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(rows))
-        except Exception:
-            await msg.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(rows))
+    await safe_edit_or_reply(update.effective_message, text, reply_markup=InlineKeyboardMarkup(rows))
     return ConversationHandler.END
 
 
@@ -1379,18 +1358,13 @@ async def ticket_transfer_to_cb(update: Update, context: ContextTypes.DEFAULT_TY
 
     await _notify_new_assignee_on_transfer(context, ticket, new_admin_id)
 
-    msg = update.effective_message
-    if msg:
-        try:
-            await msg.edit_text(
-                ui_ok_text(f"Тикет #{ticket_id} передан: {html_escape(new_admin_name)}"),
-                parse_mode=ParseMode.HTML,
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("↩ К панели", callback_data="ticket:list"),
-                ]]),
-            )
-        except Exception:
-            pass
+    await safe_edit_or_reply(
+        update.effective_message,
+        ui_ok_text(f"Тикет #{ticket_id} передан: {html_escape(new_admin_name)}"),
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("⬅️ К панели", callback_data="ticket:list"),
+        ]]),
+    )
 
     await _notify_admins_brief(
         context,

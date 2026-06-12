@@ -265,7 +265,11 @@ def main_menu_inline_kb(update: Update) -> InlineKeyboardMarkup:
 
 def main_menu_text(is_admin_user: bool, text: str = "Меню:") -> str:
     if text == "Меню:":
-        return "👑 <b>Админ-панель</b>\n\nВыберите раздел:" if is_admin_user else "👤 <b>Главное меню</b>\n\nВыберите раздел:"
+        # Локальный импорт: ui импортирует common, обратная зависимость допустима только в рантайме
+        from .ui import SEP
+
+        title = "👑 <b>Админ-панель</b>" if is_admin_user else "👤 <b>Главное меню</b>"
+        return f"{title}\n{SEP}\nВыберите раздел:"
     return text
 
 
@@ -285,6 +289,35 @@ async def show_main_menu(update: Update, text: str = "Меню:") -> None:
     msg = update.effective_message
     if msg:
         await msg.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+
+
+async def safe_edit_or_reply(
+    message: Any,
+    text: str,
+    *,
+    reply_markup: Optional[InlineKeyboardMarkup] = None,
+    parse_mode: str = ParseMode.HTML,
+) -> None:
+    """Редактирует сообщение без дубликатов.
+
+    «message is not modified» — успех (молча выходим); прочие ошибки
+    логируются, после чего текст уходит новым сообщением.
+    """
+    if message is None:
+        return
+    try:
+        await message.edit_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
+        return
+    except BadRequest as e:
+        if "message is not modified" in str(e).lower():
+            return
+        logger.warning("edit_text не удался (%s), отправляю новое сообщение", e)
+    except Exception as e:
+        logger.warning("edit_text не удался (%s), отправляю новое сообщение", e)
+    try:
+        await message.reply_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
+    except Exception as e:
+        logger.error("Не удалось отправить сообщение после неудачного edit_text: %s", e)
 
 
 @require_auth

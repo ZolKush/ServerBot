@@ -4,6 +4,7 @@ from typing import Any, Optional
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
+from telegram.error import BadRequest
 from telegram.ext import ContextTypes, ConversationHandler
 
 from ..config import TZ, logger
@@ -247,8 +248,13 @@ async def maint_duration(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             _clear_maint_ctx(context)
             return ConversationHandler.END
-        except Exception:
-            pass
+        except BadRequest as e:
+            if "message is not modified" in str(e).lower():
+                _clear_maint_ctx(context)
+                return ConversationHandler.END
+            logger.warning("Не удалось обновить панель техработ (%s), отправляю новое сообщение", e)
+        except Exception as e:
+            logger.warning("Не удалось обновить панель техработ (%s), отправляю новое сообщение", e)
 
     if msg:
         await msg.reply_text(panel_text, parse_mode=ParseMode.HTML, reply_markup=_maint_control_kb(str(maint_id)))
@@ -307,8 +313,13 @@ async def maint_schedule_range(update: Update, context: ContextTypes.DEFAULT_TYP
             )
             _clear_maint_ctx(context)
             return ConversationHandler.END
-        except Exception:
-            pass
+        except BadRequest as e:
+            if "message is not modified" in str(e).lower():
+                _clear_maint_ctx(context)
+                return ConversationHandler.END
+            logger.warning("Не удалось обновить панель техработ (%s), отправляю новое сообщение", e)
+        except Exception as e:
+            logger.warning("Не удалось обновить панель техработ (%s), отправляю новое сообщение", e)
 
     if msg:
         await msg.reply_text(panel_text, parse_mode=ParseMode.HTML, reply_markup=_maint_notice_menu_kb())
