@@ -1,5 +1,5 @@
 import re
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any, Optional
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -19,17 +19,23 @@ from ..storage import (
 from .common import authorized_ids, display_name, get_user_id, html_escape, require_admin, send_to_many
 from .maint_helpers import (
     MAINT_SCOPE_ALL,
+    MAINT_WARN_THRESHOLDS_MIN,
     _build_maint_record,
     _build_scheduled_maint_record,
+    _due_thresholds,
+    _initial_notified_thresholds,
     _maint_active_reminder_text,
     _maint_control_kb,
     _maint_end_confirm_kb,
     _maint_end_notice,
     _maint_extend_notice,
     _maint_panel_text,
+    _maint_scheduled_cancel_notice,
     _maint_scheduled_soon_notice,
     _maint_scheduled_start_notice,
     _normalize_scope,
+    _scheduled_cancel_confirm_kb,
+    _scheduled_control_kb,
     _scheduled_panel_text,
     _scheduled_to_active_record,
     _scope_label,
@@ -38,12 +44,21 @@ from .maint_helpers import (
     maint_mode_kb,
     parse_clock_range,
     parse_hhmm,
+    schedule_calendar_kb,
     scope_kb,
     urgency_kb,
     _hhmm_to_minutes,
 )
 
-STATE_MAINT_MODE, STATE_MAINT_SCOPE, STATE_MAINT_URGENCY, STATE_MAINT_DURATION, STATE_MAINT_EXTEND, STATE_MAINT_SCHEDULE_RANGE = range(6)
+(
+    STATE_MAINT_MODE,
+    STATE_MAINT_SCOPE,
+    STATE_MAINT_URGENCY,
+    STATE_MAINT_DURATION,
+    STATE_MAINT_EXTEND,
+    STATE_MAINT_SCHEDULE_RANGE,
+    STATE_MAINT_SCHEDULE_DATE,
+) = range(7)
 
 
 def _maint_notice_menu_kb() -> InlineKeyboardMarkup:
@@ -58,6 +73,7 @@ def _clear_maint_ctx(context: ContextTypes.DEFAULT_TYPE) -> None:
         "maint_panel_chat_id",
         "maint_panel_msg_id",
         "maint_extend_id",
+        "maint_sched_date",
     ):
         context.user_data.pop(key, None)
 
@@ -77,6 +93,21 @@ async def _take_active_maintenance(maint_id: str) -> Optional[dict[str, Any]]:
     if isinstance(taken, dict):
         return taken
     return None
+
+
+async def _take_scheduled_maintenance(sched_id: str) -> Optional[dict[str, Any]]:
+    def _take(cfg):
+        current = getattr(cfg, "scheduled_maintenance", {})
+        if not isinstance(current, dict) or not current.get("id"):
+            return None
+        if str(current.get("id") or "") != str(sched_id):
+            return None
+        prev = dict(current)
+        cfg.scheduled_maintenance = {}
+        return prev
+
+    taken = await update_important_data(_take)
+    return taken if isinstance(taken, dict) else None
 
 
 async def _send_maint_notice_with_admin_copy(
@@ -139,6 +170,15 @@ async def maint_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     scheduled = get_scheduled_maintenance()
     msg = update.effective_message
+    if scheduled and str(scheduled.get("id") or ""):
+        text = _scheduled_panel_text(scheduled)
+        kb = _scheduled_control_kb(str(scheduled["id"]))
+        if q and msg:
+            await q.answer()
+            await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        elif msg:
+            await msg.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        return STATE_MAINT_MODE
     if q and msg:
         await q.answer()
         await q.edit_message_text(_maint_menu_text(scheduled), parse_mode=ParseMode.HTML, reply_markup=maint_mode_kb())
@@ -177,19 +217,77 @@ async def maint_scope(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["maint_panel_msg_id"] = q.message.message_id
     maint_mode = str(context.user_data.get("maint_mode", "announce"))
     if maint_mode == "schedule":
+        today = datetime.now(TZ).date()
         await q.edit_message_text(
-            f"Область: {html_escape(_scope_label(scope))}\n\n"
-            "Введите интервал в формате ЧЧ:ММ - ЧЧ:ММ.\n"
-            "Если время начала уже прошло сегодня, план будет создан на завтра.",
+            f"Область: {html_escape(_scope_label(scope))}\n\nВыберите дату техработ:",
             parse_mode=ParseMode.HTML,
+            reply_markup=schedule_calendar_kb(today.year, today.month, today=today),
         )
-        return STATE_MAINT_SCHEDULE_RANGE
+        return STATE_MAINT_SCHEDULE_DATE
     await q.edit_message_text(
         f"Область: {html_escape(_scope_label(scope))}\n\nВыберите тип работ:",
         parse_mode=ParseMode.HTML,
         reply_markup=urgency_kb(),
     )
     return STATE_MAINT_URGENCY
+
+
+@require_admin
+async def maint_cal_noop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if q:
+        await q.answer()
+    return STATE_MAINT_SCHEDULE_DATE
+
+
+@require_admin
+async def maint_cal_nav(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if not q:
+        return ConversationHandler.END
+    await q.answer()
+    m = re.fullmatch(r"maint:cal:nav:(\d{4})-(\d{2})", q.data or "")
+    if not m:
+        return STATE_MAINT_SCHEDULE_DATE
+    year, month = int(m.group(1)), int(m.group(2))
+    today = datetime.now(TZ).date()
+    # Клампинг: не раньше текущего месяца
+    if (year, month) < (today.year, today.month):
+        year, month = today.year, today.month
+    await q.edit_message_text(
+        "Выберите дату техработ:",
+        reply_markup=schedule_calendar_kb(year, month, today=today),
+    )
+    return STATE_MAINT_SCHEDULE_DATE
+
+
+@require_admin
+async def maint_cal_day(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if not q:
+        return ConversationHandler.END
+    await q.answer()
+    m = re.fullmatch(r"maint:cal:day:(\d{4})-(\d{2})-(\d{2})", q.data or "")
+    if not m:
+        return STATE_MAINT_SCHEDULE_DATE
+    chosen = date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    today = datetime.now(TZ).date()
+    if chosen < today:
+        await q.edit_message_text(
+            "Дата уже прошла. Выберите дату техработ:",
+            reply_markup=schedule_calendar_kb(today.year, today.month, today=today),
+        )
+        return STATE_MAINT_SCHEDULE_DATE
+    context.user_data["maint_sched_date"] = chosen.isoformat()
+    if q.message and q.message.chat:
+        context.user_data["maint_panel_chat_id"] = q.message.chat.id
+        context.user_data["maint_panel_msg_id"] = q.message.message_id
+    await q.edit_message_text(
+        f"Дата: <code>{html_escape(chosen.strftime('%d.%m.%Y'))}</code>\n\n"
+        "Введите интервал в формате ЧЧ:ММ - ЧЧ:ММ (например, 17:00 - 18:00).",
+        parse_mode=ParseMode.HTML,
+    )
+    return STATE_MAINT_SCHEDULE_RANGE
 
 
 @require_admin
@@ -225,6 +323,9 @@ async def maint_duration(update: Update, context: ContextTypes.DEFAULT_TYPE):
     maint = _build_maint_record(scope, urgency, hh, mm, author_id, author)
     maint_id = maint.get("id")
     await set_maintenance_record(maint)
+    if get_scheduled_maintenance():
+        await clear_scheduled_maintenance_record()
+        logger.info("Cleared scheduled maintenance superseded by immediate announce by user_id=%s", author_id)
     logger.info("Maintenance started by user_id=%s scope=%s urgency=%s duration_min=%s", author_id, scope, urgency, _hhmm_to_minutes(hh, mm))
 
     msg_text = format_maint(scope, urgency, hh, mm, author)
@@ -273,11 +374,20 @@ async def maint_schedule_range(update: Update, context: ContextTypes.DEFAULT_TYP
 
     sh, sm, eh, em = parsed
     now = datetime.now(TZ)
-    start_at = now.replace(hour=sh, minute=sm, second=0, microsecond=0)
-    end_at = now.replace(hour=eh, minute=em, second=0, microsecond=0)
+    date_iso = str(context.user_data.get("maint_sched_date") or "")
+    try:
+        chosen = date.fromisoformat(date_iso)
+    except ValueError:
+        chosen = now.date()
+    start_at = now.replace(
+        year=chosen.year, month=chosen.month, day=chosen.day,
+        hour=sh, minute=sm, second=0, microsecond=0,
+    )
+    end_at = start_at.replace(hour=eh, minute=em)
     if start_at <= now:
-        start_at += timedelta(days=1)
-        end_at += timedelta(days=1)
+        if msg:
+            await msg.reply_text("Время начала уже прошло. Выберите более позднее время.")
+        return STATE_MAINT_SCHEDULE_RANGE
     if end_at <= start_at:
         if msg:
             await msg.reply_text("Окончание должно быть позже начала в рамках одного дня, например 17:00 - 18:00.")
@@ -479,6 +589,77 @@ async def maint_cancel_end_cb(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
 
 
+@require_admin
+async def maint_sched_cancel_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if not q:
+        return
+    await q.answer()
+    m = re.fullmatch(r"maint:schedcancel:([0-9a-f]+)", q.data or "")
+    if not m:
+        return
+    sched_id = m.group(1)
+    scheduled = get_scheduled_maintenance()
+    if not scheduled or str(scheduled.get("id") or "") != sched_id:
+        await q.edit_message_text("Запланированные техработы не найдены или уже неактуальны.")
+        return
+    text = _scheduled_panel_text(scheduled) + "\n\n<b>Отменить запланированные техработы?</b>"
+    await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=_scheduled_cancel_confirm_kb(sched_id))
+
+
+@require_admin
+async def maint_sched_cancel_back_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if not q:
+        return
+    await q.answer()
+    m = re.fullmatch(r"maint:schedcancelback:([0-9a-f]+)", q.data or "")
+    if not m:
+        return
+    sched_id = m.group(1)
+    scheduled = get_scheduled_maintenance()
+    if not scheduled or str(scheduled.get("id") or "") != sched_id:
+        await q.edit_message_text("Запланированные техработы не найдены или уже неактуальны.")
+        return
+    await q.edit_message_text(
+        _scheduled_panel_text(scheduled),
+        parse_mode=ParseMode.HTML,
+        reply_markup=_scheduled_control_kb(sched_id),
+    )
+
+
+@require_admin
+async def maint_sched_cancel_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if not q:
+        return
+    await q.answer()
+    m = re.fullmatch(r"maint:schedcancelconfirm:([0-9a-f]+)", q.data or "")
+    if not m:
+        return
+    sched_id = m.group(1)
+    scheduled = await _take_scheduled_maintenance(sched_id)
+    if not scheduled:
+        await q.edit_message_text("Запланированные техработы не найдены или уже неактуальны.")
+        return
+
+    logger.info("Scheduled maintenance cancelled by user_id=%s sched_id=%s", get_user_id(update), sched_id)
+    notified = scheduled.get("notified_thresholds")
+    already_warned = isinstance(notified, list) and len(notified) > 0 or bool(scheduled.get("notified_before"))
+    if already_warned:
+        notice = _maint_scheduled_cancel_notice(scheduled)
+        author_id = scheduled.get("author_id")
+        (users_ok, users_fail), (admins_ok, admins_fail) = await _send_maint_notice_with_admin_copy(
+            context, author_id=author_id if isinstance(author_id, int) else None, text=notice
+        )
+        await q.edit_message_text(
+            "✅ Запланированные техработы отменены, пользователи уведомлены.\n\n"
+            + _maint_delivery_status(users_ok, users_fail, admins_ok, admins_fail)
+        )
+    else:
+        await q.edit_message_text("✅ Запланированные техработы отменены.")
+
+
 async def maint_restart_notify(context: ContextTypes.DEFAULT_TYPE) -> None:
     maint = get_active_maintenance()
     if not maint:
@@ -532,23 +713,36 @@ async def maint_schedule_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
             )
         return
 
-    if now >= (start_at - timedelta(minutes=30)) and now < start_at and not bool(scheduled.get("notified_before", False)):
-        # Сначала фиксируем отметку, потом рассылаем — иначе сбой записи
-        # приведёт к повторной рассылке на каждом тике.
-        def _mark_before(cfg):
+    notified_raw = scheduled.get("notified_thresholds")
+    if isinstance(notified_raw, list):
+        notified = [int(x) for x in notified_raw if isinstance(x, int)]
+    elif scheduled.get("notified_before"):
+        notified = list(MAINT_WARN_THRESHOLDS_MIN)
+    else:
+        notified = _initial_notified_thresholds(int((start_at - now).total_seconds() // 60))
+
+    remaining_min = int((start_at - now).total_seconds() // 60)
+    due = _due_thresholds(notified, remaining_min)
+    if due and now < start_at:
+        updated_notified = sorted(set(notified) | set(due))
+
+        def _mark_thresholds(cfg):
             cur = dict(getattr(cfg, "scheduled_maintenance", {}) or {})
             if str(cur.get("id") or "") != str(scheduled.get("id") or ""):
                 return None
-            cur["notified_before"] = True
+            cur["notified_thresholds"] = updated_notified
+            cur.pop("notified_before", None)
             cur["updated_at"] = now.isoformat()
             cfg.scheduled_maintenance = cur
             return cur
 
-        marked = await update_important_data(_mark_before)
+        marked = await update_important_data(_mark_thresholds)
         if marked:
-            notice = _maint_scheduled_soon_notice(scheduled)
+            notice = _maint_scheduled_soon_notice(scheduled, remaining_min)
             author_id = scheduled.get("author_id")
-            await _send_maint_notice_with_admin_copy(context, author_id=author_id if isinstance(author_id, int) else None, text=notice)
+            await _send_maint_notice_with_admin_copy(
+                context, author_id=author_id if isinstance(author_id, int) else None, text=notice
+            )
         scheduled = get_scheduled_maintenance() or scheduled
 
     if now >= start_at and not bool(scheduled.get("notified_start", False)):

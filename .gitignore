@@ -21,6 +21,8 @@ __pycache__/
 app/__main__.py
 app/requirements-dev.txt
 pyproject.toml
+tests/
+docs/
 
 # Claude Code local settings
 **/settings.local.json

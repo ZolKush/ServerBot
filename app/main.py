@@ -55,7 +55,11 @@ from app.handlers.maint import (
     STATE_MAINT_DURATION,
     STATE_MAINT_EXTEND,
     STATE_MAINT_SCHEDULE_RANGE,
+    STATE_MAINT_SCHEDULE_DATE,
     STATE_MAINT_URGENCY,
+    maint_cal_day,
+    maint_cal_nav,
+    maint_cal_noop,
     maint_cancel_end_cb,
     maint_duration,
     maint_end_cb,
@@ -66,6 +70,9 @@ from app.handlers.maint import (
     maint_restart_notify,
     maint_schedule_range,
     maint_schedule_tick,
+    maint_sched_cancel_cb,
+    maint_sched_cancel_back_cb,
+    maint_sched_cancel_confirm_cb,
     maint_scope,
     maint_start,
     maint_urgency,
@@ -237,6 +244,11 @@ def build_app() -> Application:
             STATE_MAINT_DURATION: [MessageHandler(PRIVATE_TEXT, maint_duration)],
             STATE_MAINT_EXTEND: [MessageHandler(PRIVATE_TEXT, maint_extend_duration)],
             STATE_MAINT_SCHEDULE_RANGE: [MessageHandler(PRIVATE_TEXT, maint_schedule_range)],
+            STATE_MAINT_SCHEDULE_DATE: [
+                CallbackQueryHandler(maint_cal_nav, pattern=r"^maint:cal:nav:\d{4}-\d{2}$"),
+                CallbackQueryHandler(maint_cal_day, pattern=r"^maint:cal:day:\d{4}-\d{2}-\d{2}$"),
+                CallbackQueryHandler(maint_cal_noop, pattern=r"^maint:cal:noop$"),
+            ],
         },
         fallbacks=[
             CommandHandler("cancel", cancel),
@@ -249,6 +261,9 @@ def build_app() -> Application:
     app.add_handler(CallbackQueryHandler(maint_end_confirm_cb, pattern=r"^maint:endconfirm:[0-9a-f]+$"))
     app.add_handler(CallbackQueryHandler(maint_cancel_end_cb, pattern=r"^maint:cancelend:[0-9a-f]+$"))
     app.add_handler(CallbackQueryHandler(maint_end_cb, pattern=r"^maint:end:[0-9a-f]+$"))
+    app.add_handler(CallbackQueryHandler(maint_sched_cancel_confirm_cb, pattern=r"^maint:schedcancelconfirm:[0-9a-f]+$"))
+    app.add_handler(CallbackQueryHandler(maint_sched_cancel_back_cb, pattern=r"^maint:schedcancelback:[0-9a-f]+$"))
+    app.add_handler(CallbackQueryHandler(maint_sched_cancel_cb, pattern=r"^maint:schedcancel:[0-9a-f]+$"))
 
     _ticket_persistent_eps = [
         CallbackQueryHandler(ticket_list_cb, pattern=r"^ticket:list$"),
@@ -434,7 +449,12 @@ def build_app() -> Application:
     else:
         logger.warning("JobQueue недоступен: для ежедневной выжимки установите python-telegram-bot[job-queue].")
 
-    app.add_handler(MessageHandler(PRIVATE_TEXT, fallback_text), group=10)
+    # Fallback должен жить в группе 0 ПОСЛЕ всех разговоров: если активный
+    # ConversationHandler уже обработал сообщение, первый сработавший обработчик
+    # группы останавливает остальные в этой же группе, и fallback молчит.
+    # В отдельной группе (group=10) он срабатывал бы всегда — даже на ввод
+    # текста тикета или времени техработ.
+    app.add_handler(MessageHandler(PRIVATE_TEXT, fallback_text))
     app.add_error_handler(on_error)
     return app
 

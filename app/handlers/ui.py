@@ -153,3 +153,25 @@ def humanize_hhmm(h: int, m: int) -> str:
     if m:
         parts.append(f"{m} {plural_ru(m, 'минута', 'минуты', 'минут')}")
     return " ".join(parts) if parts else "0 минут"
+
+
+def humanize_until(minutes: int) -> str:
+    """Человекочитаемый остаток времени до события (до двух единиц).
+
+    Примеры: «19 минут», «11 часов 40 минут», «12 часов», «3 суток»,
+    «1 сутки 1 час». Отрицательные значения трактуются как 0.
+    """
+    total = max(0, int(minutes))
+    days, rem = divmod(total, 1440)
+    hours, mins = divmod(rem, 60)
+    if days:
+        parts = [f"{days} {plural_ru(days, 'сутки', 'суток', 'суток')}"]
+        if hours:
+            parts.append(f"{hours} {plural_ru(hours, 'час', 'часа', 'часов')}")
+        return " ".join(parts)
+    if hours:
+        parts = [f"{hours} {plural_ru(hours, 'час', 'часа', 'часов')}"]
+        if mins:
+            parts.append(f"{mins} {plural_ru(mins, 'минута', 'минуты', 'минут')}")
+        return " ".join(parts)
+    return f"{mins} {plural_ru(mins, 'минута', 'минуты', 'минут')}"
