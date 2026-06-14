@@ -111,7 +111,11 @@ async def ssh_run_shell(target: str, command: str, timeout: int) -> Tuple[int, s
         args.extend(["-o", f"UserKnownHostsFile={SSH_KNOWN_HOSTS_FILE}"])
     if ssh_port is not None:
         args.extend(["-p", str(ssh_port)])
-    args.extend([ssh_host, "sh", "-c", wrapped])
+    # ssh склеивает аргументы пробелами без quoting, поэтому команду для
+    # удалённого sh -c нужно экранировать одной строкой — иначе её разберёт
+    # логин-шелл пользователя (и сломается, если это не POSIX-шелл).
+    args.append(ssh_host)
+    args.append("sh -c " + shlex.quote(wrapped))
     rc, out, err = await run_exec(args, timeout=max(timeout + 2, 5))
     return rc, _extract_wrapped_stdout(out), err
 
@@ -294,24 +298,22 @@ async def remote_docker_inspect_summary(ssh_target: str, name: str) -> str:
 async def remote_docker_logs_tail(ssh_target: str, name: str, tail: int) -> str:
     rc, out, err = 127, "", "docker logs unavailable"
     for docker_bin in [x for x in [DOCKER_BIN, "/usr/bin/docker", "docker"] if x]:
-        rc, out, err = await ssh_run_exec(
-            ssh_target,
-            [docker_bin, "logs", "--tail", str(int(tail)), name],
-            timeout=SUBPROC_MEDIUM_TIMEOUT,
-        )
+        # docker logs пишет stderr-поток контейнера в stderr — объединяем,
+        # иначе часть логов теряется.
+        base = " ".join(shlex.quote(str(a)) for a in [docker_bin, "logs", "--tail", str(int(tail)), name])
+        rc, out, err = await ssh_run_shell(ssh_target, base + " 2>&1", timeout=SUBPROC_MEDIUM_TIMEOUT)
         if rc == 0:
             break
         if SUDO_BIN:
-            rc, out, err = await ssh_run_exec(
-                ssh_target,
-                [SUDO_BIN, "-n", docker_bin, "logs", "--tail", str(int(tail)), name],
-                timeout=SUBPROC_MEDIUM_TIMEOUT,
+            base_sudo = " ".join(
+                shlex.quote(str(a)) for a in [SUDO_BIN, "-n", docker_bin, "logs", "--tail", str(int(tail)), name]
             )
+            rc, out, err = await ssh_run_shell(ssh_target, base_sudo + " 2>&1", timeout=SUBPROC_MEDIUM_TIMEOUT)
             if rc == 0:
                 break
     if rc != 0:
         return f"docker logs error: {err.strip() or out.strip() or 'н/д'}"
-    return out if out.strip() else err
+    return out
 
 
 async def remote_tail_text_file(ssh_target: str, path: str, n_lines: int) -> str:

@@ -35,7 +35,7 @@ from ..storage import (
     set_daily_node_status_cache,
     set_dns_status_cache,
 )
-from .common import breadcrumbs, html_escape, is_admin, now_str, require_admin, require_auth, ui_error_text, ui_info_text
+from .common import html_escape, is_admin, now_str, require_admin, require_auth, ui_error_text, ui_info_text
 from .status_format import format_status_message, format_ufw_message
 from .status_models import DockerContainerView, StatusSnapshot
 
@@ -329,7 +329,7 @@ async def _build_dns_status_payload_live(server: ServerTarget) -> Dict[str, obje
             elif expected_ip and expected_ip not in merged:
                 bad += 1
                 details.append(
-                    f"• <code>{html_escape(dom)}</code>: ❌ ожидался <code>{html_escape(expected_ip)}</code>, "
+                    f"• <code>{html_escape(dom)}</code>: 🔴 ожидался <code>{html_escape(expected_ip)}</code>, "
                     f"получено <code>{html_escape(', '.join(merged))}</code>"
                 )
             else:
@@ -346,7 +346,7 @@ async def _build_dns_status_payload_live(server: ServerTarget) -> Dict[str, obje
             elif expected_ip and expected_ip not in ips:
                 bad += 1
                 details.append(
-                    f"• <code>{html_escape(dom)}</code>: ❌ ожидался <code>{html_escape(expected_ip)}</code>, "
+                    f"• <code>{html_escape(dom)}</code>: 🔴 ожидался <code>{html_escape(expected_ip)}</code>, "
                     f"получено <code>{html_escape(', '.join(ips))}</code>"
                 )
             else:
@@ -754,7 +754,7 @@ async def status_ssh_refresh_confirm_cb(update: Update, context: ContextTypes.DE
     note = (
         ui_info_text("Disk/UFW обновлены через SSH.")
         if payload.get("ok")
-        else ui_error_text(f"SSH ошибка: {payload.get('error', 'н/д')}")
+        else ui_error_text(f"SSH ошибка: {html_escape(str(payload.get('error', 'н/д')))}")
     )
     await q.edit_message_text(text + "\n\n" + note, parse_mode=ParseMode.HTML, reply_markup=markup)
 
@@ -792,7 +792,7 @@ def _format_ssh_diag_report(server: ServerTarget, payload: Dict[str, object]) ->
     lines.append(f"⏰ Время: <code>{html_escape(now_str())}</code>")
     if not payload.get("ok"):
         lines.append("")
-        lines.append(ui_error_text(f"SSH ошибка: {payload.get('error', 'н/д')}"))
+        lines.append(ui_error_text(f"SSH ошибка: {html_escape(str(payload.get('error', 'н/д')))}"))
         return "\n".join(lines)
     up = str(payload.get("uptime") or "н/д")
     mem = str(payload.get("memory") or "н/д")

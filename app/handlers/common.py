@@ -6,7 +6,7 @@ import random
 from dataclasses import dataclass, field
 from functools import wraps
 from datetime import datetime
-from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatType, ParseMode
@@ -58,15 +58,31 @@ def breadcrumbs(*parts: str) -> str:
     return " > ".join(items)
 
 
-def wrap_as_codeblock_html(text: str) -> str:
-    return f"<pre><code>{html_escape(text or '')}</code></pre>"
-
-
 def clip_text(s: str, limit: int = 3300) -> str:
     if s is None:
         return ""
     s = str(s)
     return s if len(s) <= limit else (s[:limit] + "\n…(truncated)…")
+
+
+def clip_html(s: str, limit: int = 3300) -> str:
+    """Экранирует HTML и обрезает по длине уже экранированного текста.
+
+    Лимиты Telegram считаются по итоговому тексту, поэтому клип до эскейпа
+    (& -> &amp; и т.п.) может превысить 4096 символов.
+    """
+    escaped = html_escape("" if s is None else str(s))
+    if len(escaped) <= limit:
+        return escaped
+    cut = escaped[:limit]
+    amp = cut.rfind("&")
+    if amp != -1 and ";" not in cut[amp:]:
+        cut = cut[:amp]
+    return cut + "\n…(truncated)…"
+
+
+def wrap_as_codeblock_html(text: str, limit: int = 3300) -> str:
+    return f"<pre><code>{clip_html(text, limit)}</code></pre>"
 
 
 def now_str() -> str:
@@ -249,7 +265,11 @@ def main_menu_inline_kb(update: Update) -> InlineKeyboardMarkup:
 
 def main_menu_text(is_admin_user: bool, text: str = "Меню:") -> str:
     if text == "Меню:":
-        return "👑 <b>Админ-панель</b>\n\nВыберите раздел:" if is_admin_user else "👤 <b>Главное меню</b>\n\nВыберите раздел:"
+        # Локальный импорт: ui импортирует common, обратная зависимость допустима только в рантайме
+        from .ui import SEP
+
+        title = "👑 <b>Админ-панель</b>" if is_admin_user else "👤 <b>Главное меню</b>"
+        return f"{title}\n{SEP}\nВыберите раздел:"
     return text
 
 
@@ -269,6 +289,35 @@ async def show_main_menu(update: Update, text: str = "Меню:") -> None:
     msg = update.effective_message
     if msg:
         await msg.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+
+
+async def safe_edit_or_reply(
+    message: Any,
+    text: str,
+    *,
+    reply_markup: Optional[InlineKeyboardMarkup] = None,
+    parse_mode: str = ParseMode.HTML,
+) -> None:
+    """Редактирует сообщение без дубликатов.
+
+    «message is not modified» — успех (молча выходим); прочие ошибки
+    логируются, после чего текст уходит новым сообщением.
+    """
+    if message is None:
+        return
+    try:
+        await message.edit_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
+        return
+    except BadRequest as e:
+        if "message is not modified" in str(e).lower():
+            return
+        logger.warning("edit_text не удался (%s), отправляю новое сообщение", e)
+    except Exception as e:
+        logger.warning("edit_text не удался (%s), отправляю новое сообщение", e)
+    try:
+        await message.reply_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
+    except Exception as e:
+        logger.error("Не удалось отправить сообщение после неудачного edit_text: %s", e)
 
 
 @require_auth

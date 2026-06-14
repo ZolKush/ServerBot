@@ -57,8 +57,9 @@ async def send_subscription_payload(
         raise ValueError("subscription is empty")
 
     intro = title or _subscription_intro(meta)
-    if len(cfg) <= _INLINE_SUBSCRIPTION_LIMIT:
-        payload = intro + "\n\n" + wrap_as_codeblock_html(cfg)
+    # Лимит Telegram считается по экранированному тексту (& -> &amp; и т.п.).
+    if len(html_escape(cfg)) <= _INLINE_SUBSCRIPTION_LIMIT:
+        payload = intro + "\n\n" + wrap_as_codeblock_html(cfg, limit=_INLINE_SUBSCRIPTION_LIMIT)
         await context.bot.send_message(chat_id=chat_id, text=payload, parse_mode=ParseMode.HTML)
         return
 

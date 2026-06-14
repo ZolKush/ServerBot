@@ -1,5 +1,6 @@
+import calendar as _calendar
 import re
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
@@ -8,9 +9,35 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from ..config import SERVERS, TZ, TZ_NAME
 from ..models import Maintenance, ScheduledMaintenance
 from .common import html_escape
+from .ui import SEP, humanize_hhmm, humanize_until, plural_ru  # noqa: F401 — реэкспорт для существующих импортов
 
 MAINT_SCOPE_ALL = "all"
 MAX_MAINT_HOURS = 72
+
+# Пороги предупреждений о запланированных техработах (минуты до старта):
+# 3 суток, 12 часов, 30 минут.
+MAINT_WARN_THRESHOLDS_MIN = (4320, 720, 30)
+
+
+def _initial_notified_thresholds(remaining_min: int) -> list[int]:
+    """Какие пороги считать уже «отправленными» при создании плана.
+
+    Взводим (НЕ помечаем отправленными) пороги, чей момент предупреждения ещё
+    в будущем (remaining > T). Если в будущем не осталось ни одного порога, но
+    старт ещё впереди (план ближе 30 минут) — взводим самый малый порог, чтобы
+    ушло ровно одно динамичное предупреждение.
+    """
+    thresholds = set(MAINT_WARN_THRESHOLDS_MIN)
+    armed = {t for t in thresholds if remaining_min > t}
+    if not armed and remaining_min > 0:
+        armed = {min(thresholds)}
+    return sorted(thresholds - armed)
+
+
+def _due_thresholds(notified: list[int], remaining_min: int) -> list[int]:
+    """Пороги, которые наступили (remaining <= T) и ещё не были отправлены."""
+    sent = set(notified)
+    return [t for t in MAINT_WARN_THRESHOLDS_MIN if t not in sent and remaining_min <= t]
 
 
 def _server_items() -> List[Tuple[str, str]]:
@@ -72,11 +99,73 @@ def maint_mode_kb() -> InlineKeyboardMarkup:
     )
 
 
+CAL_NOOP = "maint:cal:noop"
+
+_RU_MONTHS = [
+    "", "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+    "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь",
+]
+_RU_WEEKDAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+
+
+def _calendar_grid(
+    year: int, month: int, today: date, horizon: date
+) -> List[List[Tuple[str, str]]]:
+    """Сетка месяца: список недель, каждая — 7 ячеек (подпись, callback_data).
+
+    Дни не из текущего месяца, прошедшие дни и дни за горизонтом — некликабельны
+    (callback = CAL_NOOP). Кликабельные дни дают callback maint:cal:day:YYYY-MM-DD.
+    """
+    cal = _calendar.Calendar(firstweekday=0)  # неделя с понедельника
+    weeks: List[List[Tuple[str, str]]] = []
+    for week in cal.monthdatescalendar(year, month):
+        row: List[Tuple[str, str]] = []
+        for d in week:
+            if d.month != month:
+                row.append((" ", CAL_NOOP))
+            elif d < today or d > horizon:
+                row.append((f"·{d.day}", CAL_NOOP))
+            else:
+                row.append((str(d.day), f"maint:cal:day:{d.isoformat()}"))
+        weeks.append(row)
+    return weeks
+
+
+def schedule_calendar_kb(
+    year: int, month: int, *, today: date, horizon_days: int = 365
+) -> InlineKeyboardMarkup:
+    horizon = today + timedelta(days=horizon_days)
+    rows: List[List[InlineKeyboardButton]] = [
+        [InlineKeyboardButton(f"{_RU_MONTHS[month]} {year}", callback_data=CAL_NOOP)],
+        [InlineKeyboardButton(wd, callback_data=CAL_NOOP) for wd in _RU_WEEKDAYS],
+    ]
+    for week in _calendar_grid(year, month, today, horizon):
+        rows.append([InlineKeyboardButton(label, callback_data=cb) for label, cb in week])
+
+    prev_ok = (year, month) > (today.year, today.month)
+    next_first = date(year + (1 if month == 12 else 0), 1 if month == 12 else month + 1, 1)
+    next_ok = next_first <= horizon
+    nav: List[InlineKeyboardButton] = []
+    if prev_ok:
+        py, pm = (year - 1, 12) if month == 1 else (year, month - 1)
+        nav.append(InlineKeyboardButton("◀", callback_data=f"maint:cal:nav:{py:04d}-{pm:02d}"))
+    if next_ok:
+        nav.append(
+            InlineKeyboardButton("▶", callback_data=f"maint:cal:nav:{next_first.year:04d}-{next_first.month:02d}")
+        )
+    if nav:
+        rows.append(nav)
+    rows.append([InlineKeyboardButton("🏠 Меню", callback_data="menu:home")])
+    return InlineKeyboardMarkup(rows)
+
+
 def parse_hhmm(text: str) -> Optional[Tuple[int, int]]:
     m = re.fullmatch(r"\s*(\d{1,3})\s*:\s*([0-5]\d)\s*", text or "")
     if not m:
         return None
     hh, mm = int(m.group(1)), int(m.group(2))
+    if hh == 0 and mm == 0:
+        return None
     if hh > MAX_MAINT_HOURS:
         return None
     if (hh * 60 + mm) > MAX_MAINT_HOURS * 60:
@@ -94,32 +183,12 @@ def parse_clock_range(text: str) -> Optional[Tuple[int, int, int, int]]:
     return sh, sm, eh, em
 
 
-def plural_ru(n: int, one: str, few: str, many: str) -> str:
-    n = abs(n) % 100
-    n1 = n % 10
-    if 11 <= n <= 19:
-        return many
-    if n1 == 1:
-        return one
-    if 2 <= n1 <= 4:
-        return few
-    return many
-
-
-def humanize_hhmm(h: int, m: int) -> str:
-    parts = []
-    if h:
-        parts.append(f"{h} {plural_ru(h, 'час', 'часа', 'часов')}")
-    if m:
-        parts.append(f"{m} {plural_ru(m, 'минута', 'минуты', 'минут')}")
-    return " ".join(parts) if parts else "0 минут"
-
-
 def format_maint(scope: str, urgency: str, hh: int, mm: int, author: str) -> str:
     now = datetime.now(TZ).strftime("%d.%m.%Y %H:%M")
     urgency_label = "срочные" if urgency == "urgent" else "плановые"
     return (
-        "⚠️ <b>Технические работы</b>\n"
+        "🛠 <b>Техработы</b> · ⚠️ начались\n"
+        f"{SEP}\n"
         f"{_scope_line(scope)}\n"
         f"• Тип: <b>{html_escape(urgency_label)}</b>\n"
         f"• Оценка простоя: <b>{html_escape(humanize_hhmm(hh, mm))}</b>\n"
@@ -130,7 +199,8 @@ def format_maint(scope: str, urgency: str, hh: int, mm: int, author: str) -> str
 
 def format_scheduled_maint(scope: str, start_at: datetime, end_at: datetime, author: str) -> str:
     return (
-        "🗓 <b>Запланированы технические работы</b>\n"
+        "🛠 <b>Техработы</b> · 🗓 запланированы\n"
+        f"{SEP}\n"
         f"{_scope_line(scope)}\n"
         f"• Начало: <code>{html_escape(_fmt_dt_short(start_at))}</code> ({html_escape(TZ_NAME)})\n"
         f"• Окончание: <code>{html_escape(_fmt_dt_short(end_at))}</code> ({html_escape(TZ_NAME)})\n"
@@ -180,6 +250,7 @@ def _build_scheduled_maint_record(
 ) -> ScheduledMaintenance:
     duration_min = max(1, int((end_at - start_at).total_seconds() // 60))
     now = datetime.now(TZ)
+    remaining_min = int((start_at - now).total_seconds() // 60)
     record: ScheduledMaintenance = {
         "id": uuid4().hex,
         "scope": _normalize_scope(scope),
@@ -191,7 +262,7 @@ def _build_scheduled_maint_record(
         "author_name": author_name,
         "created_at": now.isoformat(),
         "updated_at": now.isoformat(),
-        "notified_before": False,
+        "notified_thresholds": _initial_notified_thresholds(remaining_min),
         "notified_start": False,
     }
     return record
@@ -238,6 +309,26 @@ def _maint_end_confirm_kb(maint_id: str) -> InlineKeyboardMarkup:
     )
 
 
+def _scheduled_control_kb(scheduled_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("🚨 Объявить техработы сейчас", callback_data="maint:mode:announce")],
+            [InlineKeyboardButton("❌ Отменить план", callback_data=f"maint:schedcancel:{scheduled_id}")],
+            [InlineKeyboardButton("🏠 Меню", callback_data="menu:home")],
+        ]
+    )
+
+
+def _scheduled_cancel_confirm_kb(scheduled_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("✅ Подтвердить отмену", callback_data=f"maint:schedcancelconfirm:{scheduled_id}")],
+            [InlineKeyboardButton("⬅️ Назад", callback_data=f"maint:schedcancelback:{scheduled_id}")],
+            [InlineKeyboardButton("🏠 Меню", callback_data="menu:home")],
+        ]
+    )
+
+
 def _maint_panel_text(maint: Dict[str, Any]) -> str:
     urgency_label = "срочные" if maint.get("urgency") == "urgent" else "плановые"
     duration_min = int(maint.get("duration_min", 0) or 0)
@@ -254,7 +345,8 @@ def _maint_panel_text(maint: Dict[str, Any]) -> str:
     except Exception:
         end_dt = None
     lines = [
-        "🛠️ <b>Техработы активны</b>",
+        "🛠 <b>Техработы</b> · ⚠️ активны",
+        SEP,
         _scope_line(str(scope)),
         f"• Тип: <b>{html_escape(urgency_label)}</b>",
         f"• Оценка простоя: <b>{html_escape(humanize_hhmm(hh, mm))}</b>",
@@ -279,14 +371,15 @@ def _scheduled_panel_text(scheduled: Dict[str, Any]) -> str:
     except Exception:
         end_dt = None
     lines = [
-        "🗓️ <b>Техработы запланированы</b>",
+        "🛠 <b>Техработы</b> · 🗓 запланированы",
+        SEP,
         _scope_line(str(scope)),
     ]
     if start_dt:
         lines.append(f"• Начало: <code>{html_escape(_fmt_dt_short(start_dt))}</code> ({html_escape(TZ_NAME)})")
     if end_dt:
         lines.append(f"• Окончание: <code>{html_escape(_fmt_dt_short(end_dt))}</code> ({html_escape(TZ_NAME)})")
-    lines.append("• Уведомления уйдут за 30 минут и в момент начала.")
+    lines.append("• Уведомления уйдут за 3 суток, 12 часов и 30 минут до начала, а также в момент старта.")
     return "\n".join(lines)
 
 
@@ -300,7 +393,8 @@ def _maint_extend_notice(maint: Dict[str, Any], hh: int, mm: int, author: str) -
     end_txt = _fmt_dt_short(end_dt) if end_dt else "-"
     scope = maint.get("scope", MAINT_SCOPE_ALL)
     return (
-        "⏳ <b>Техработы продлены</b>\n"
+        "🛠 <b>Техработы</b> · ⏳ продлены\n"
+        f"{SEP}\n"
         f"{_scope_line(str(scope))}\n"
         f"• Новый ориентир простоя: <b>{html_escape(humanize_hhmm(hh, mm))}</b>\n"
         f"• Окончание: <code>{html_escape(end_txt)}</code> ({html_escape(TZ_NAME)})\n"
@@ -314,7 +408,8 @@ def _maint_end_notice(maint: Dict[str, Any], author: str, ended_at: Optional[dat
         ended_at = datetime.now(TZ)
     scope = maint.get("scope", MAINT_SCOPE_ALL)
     return (
-        "✅ <b>Техработы завершены</b>\n"
+        "🛠 <b>Техработы</b> · ✅ завершены\n"
+        f"{SEP}\n"
         f"{_scope_line(str(scope))}\n"
         f"• Время: <code>{html_escape(_fmt_dt_short(ended_at))}</code> ({html_escape(TZ_NAME)})\n"
         f"• Ответственный: <b>{html_escape(author)}</b>\n\n"
@@ -323,10 +418,10 @@ def _maint_end_notice(maint: Dict[str, Any], author: str, ended_at: Optional[dat
 
 
 def _maint_active_reminder_text(maint: Dict[str, Any]) -> str:
-    return "🛠️ <b>Напоминание: техработы активны</b>\n\n" + _maint_panel_text(maint)
+    return "🔔 <b>Напоминание</b>\n" + _maint_panel_text(maint)
 
 
-def _maint_scheduled_soon_notice(scheduled: Dict[str, Any]) -> str:
+def _maint_scheduled_soon_notice(scheduled: Dict[str, Any], remaining_min: int) -> str:
     try:
         start_dt = datetime.fromisoformat(str(scheduled.get("scheduled_start") or ""))
         end_dt = datetime.fromisoformat(str(scheduled.get("scheduled_end") or ""))
@@ -335,11 +430,27 @@ def _maint_scheduled_soon_notice(scheduled: Dict[str, Any]) -> str:
     scope = scheduled.get("scope", MAINT_SCOPE_ALL)
     author = scheduled.get("author_name") or "администратор"
     return (
-        "⏳ <b>Технические работы начнутся через 30 минут</b>\n"
+        f"🛠 <b>Техработы</b> · ⏳ начнутся через {html_escape(humanize_until(remaining_min))}\n"
+        f"{SEP}\n"
         f"{_scope_line(str(scope))}\n"
         f"• Начало: <code>{html_escape(_fmt_dt_short(start_dt) if start_dt else '-')}</code> ({html_escape(TZ_NAME)})\n"
         f"• Окончание: <code>{html_escape(_fmt_dt_short(end_dt) if end_dt else '-')}</code> ({html_escape(TZ_NAME)})\n"
         f"• Ответственный: <b>{html_escape(str(author))}</b>"
+    )
+
+
+def _maint_scheduled_cancel_notice(scheduled: Dict[str, Any]) -> str:
+    try:
+        start_dt = datetime.fromisoformat(str(scheduled.get("scheduled_start") or ""))
+    except Exception:
+        start_dt = None
+    scope = scheduled.get("scope", MAINT_SCOPE_ALL)
+    return (
+        "🛠 <b>Техработы</b> · ❌ отменены\n"
+        f"{SEP}\n"
+        f"{_scope_line(str(scope))}\n"
+        f"• Планировались на: <code>{html_escape(_fmt_dt_short(start_dt) if start_dt else '-')}</code> ({html_escape(TZ_NAME)})\n\n"
+        "Ранее анонсированные работы проводиться не будут."
     )
 
 
@@ -351,7 +462,8 @@ def _maint_scheduled_start_notice(scheduled: Dict[str, Any]) -> str:
     scope = scheduled.get("scope", MAINT_SCOPE_ALL)
     author = scheduled.get("author_name") or "администратор"
     return (
-        "⚠️ <b>Технические работы начались</b>\n"
+        "🛠 <b>Техработы</b> · ⚠️ начались\n"
+        f"{SEP}\n"
         f"{_scope_line(str(scope))}\n"
         f"• Плановое окончание: <code>{html_escape(_fmt_dt_short(end_dt) if end_dt else '-')}</code> ({html_escape(TZ_NAME)})\n"
         f"• Ответственный: <b>{html_escape(str(author))}</b>"

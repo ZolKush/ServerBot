@@ -290,7 +290,7 @@ class AppSettings(BaseSettings):
     DNS_DAILY_REFRESH_AT: str = "03:05"
     DNS_STARTUP_REFRESH_DELAY_SEC: int = 5
     MAINT_RESTART_NOTIFY_DELAY_SEC: int = 2
-    MAINT_RESTART_REMINDER_INTERVAL_SEC: int = 600
+    MAINT_RESTART_REMINDER_INTERVAL_SEC: int = 1800
 
     SUBPROC_SHORT_TIMEOUT: int = 3
     SUBPROC_MEDIUM_TIMEOUT: int = 8
@@ -510,6 +510,25 @@ class AppSettings(BaseSettings):
         iv = int(v)
         if iv < 1 or iv > 3600:
             raise ValueError("timeout/count out of range")
+        return iv
+
+    @field_validator(
+        "AUTH_FAIL_WINDOW_SEC",
+        "AUTH_MAX_FAILS_IN_WINDOW",
+        "AUTH_LOCKOUT_SEC",
+        "AUTH_PRUNE_INTERVAL_SEC",
+        "ERROR_NOTIFY_INTERVAL_SEC",
+        "MAINT_RESTART_REMINDER_INTERVAL_SEC",
+        "BROADCAST_MAX_CONCURRENCY",
+        "BROADCAST_MAX_ATTEMPTS",
+        "FAIL2BAN_DIGEST_TAIL_LINES",
+        "FAIL2BAN_DIGEST_MAX_BYTES",
+    )
+    @classmethod
+    def _positive_int(cls, v: int, info: ValidationInfo) -> int:
+        iv = int(v)
+        if iv < 1:
+            raise ValueError(f"{info.field_name} must be >= 1")
         return iv
 
     @field_validator("LOCAL_SERVER_CODE", "REMOTE_SERVER_CODE", mode="before")

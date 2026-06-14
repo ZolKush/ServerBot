@@ -47,7 +47,8 @@ class NodeMetrics:
 @dataclass
 class MetricsSnapshot:
     nodes: Dict[str, NodeMetrics] = field(default_factory=dict)
-    fetched_at: datetime = field(default_factory=lambda: datetime.now(TZ))
+    # Время последнего УСПЕШНОГО получения метрик; None — успехов ещё не было.
+    fetched_at: Optional[datetime] = None
     error: str = ""
 
     @property
@@ -76,12 +77,34 @@ _HOT_METRIC_NAMES = {
 }
 
 
+def _unescape_label_value(raw: str) -> str:
+    # Prometheus экранирует в значениях лейблов только \\, \" и \n.
+    # unicode_escape здесь нельзя: он ломает многобайтные UTF-8 символы (эмодзи).
+    out: List[str] = []
+    i = 0
+    while i < len(raw):
+        ch = raw[i]
+        if ch == "\\" and i + 1 < len(raw):
+            nxt = raw[i + 1]
+            if nxt == "n":
+                out.append("\n")
+                i += 2
+                continue
+            if nxt in ('"', "\\"):
+                out.append(nxt)
+                i += 2
+                continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def _parse_labels(raw: str) -> Dict[str, str]:
     if not raw:
         return {}
     out: Dict[str, str] = {}
     for m in _LABEL_RE.finditer(raw):
-        out[m.group(1)] = m.group(2).encode("utf-8").decode("unicode_escape", errors="ignore")
+        out[m.group(1)] = _unescape_label_value(m.group(2))
     return out
 
 
@@ -191,21 +214,25 @@ async def _fetch_metrics_text() -> str:
         return resp.text
 
 
+_LAST_SUCCESS_AT: Optional[datetime] = None
+
+
 async def _do_fetch_and_build_snapshot() -> MetricsSnapshot:
+    global _LAST_SUCCESS_AT
     try:
         text = await _fetch_metrics_text()
     except httpx.HTTPStatusError as e:
         msg = f"HTTP {e.response.status_code}"
         logger.warning("RemnaWave metrics: %s for %s", msg, REMNAWAVE_METRICS_URL)
-        return MetricsSnapshot(error=msg)
+        return MetricsSnapshot(error=msg, fetched_at=_LAST_SUCCESS_AT)
     except (httpx.HTTPError, OSError) as e:
         msg = f"{e.__class__.__name__}: {str(e).strip() or 'connection error'}"
         logger.warning("RemnaWave metrics fetch failed: %s", msg)
-        return MetricsSnapshot(error=msg)
+        return MetricsSnapshot(error=msg, fetched_at=_LAST_SUCCESS_AT)
     except Exception as e:
         msg = f"{e.__class__.__name__}: {str(e).strip() or 'unknown error'}"
         logger.exception("RemnaWave metrics: unexpected error")
-        return MetricsSnapshot(error=msg)
+        return MetricsSnapshot(error=msg, fetched_at=_LAST_SUCCESS_AT)
 
     try:
         grouped = parse_prometheus_text(text)
@@ -213,13 +240,14 @@ async def _do_fetch_and_build_snapshot() -> MetricsSnapshot:
     except Exception as e:
         msg = f"parse error: {e}"
         logger.exception("RemnaWave metrics parse failed")
-        return MetricsSnapshot(error=msg)
+        return MetricsSnapshot(error=msg, fetched_at=_LAST_SUCCESS_AT)
 
     if REMNAWAVE_HIDDEN_UUIDS:
         hidden = {u for u in REMNAWAVE_HIDDEN_UUIDS if u}
         nodes = {k: v for k, v in nodes.items() if k not in hidden}
 
-    return MetricsSnapshot(nodes=nodes)
+    _LAST_SUCCESS_AT = datetime.now(TZ)
+    return MetricsSnapshot(nodes=nodes, fetched_at=_LAST_SUCCESS_AT)
 
 
 async def get_metrics_snapshot(*, force_refresh: bool = False) -> MetricsSnapshot:

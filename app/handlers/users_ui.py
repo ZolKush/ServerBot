@@ -3,8 +3,11 @@ from typing import Any, Dict, List, Tuple
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from ..storage import authorized_users_snapshot
-from .common import breadcrumbs, display_name_from_meta, format_dt_human, get_user_meta, html_escape
+from .common import display_name_from_meta, format_dt_human, get_user_meta, html_escape
 from .subscription import SUBSCRIPTION_TEXT_KEY
+from .ui import SEP, pager_row
+
+USERS_PAGE_SIZE = 30  # кнопок на страницу: лимит Telegram — 100 кнопок на клавиатуру
 
 USER_FILTER_ALL = "all"
 USER_FILTER_ACTIVE = "active"
@@ -27,7 +30,7 @@ def users_filter_label(filter_key: str) -> str:
 
 def users_list_title(filter_key: str) -> str:
     return (
-        f"<b>{html_escape(breadcrumbs('Админ-панель', 'Пользователи'))}</b>\n\n"
+        f"👥 <b>Пользователи</b>\n{SEP}\n"
         f"Фильтр: <b>{html_escape(users_filter_label(filter_key))}</b>\n"
         "Выберите пользователя:"
     )
@@ -60,7 +63,7 @@ def _passes_filter(meta: Dict[str, Any], filter_key: str) -> bool:
     return True
 
 
-def users_list_kb(active_filter: str = USER_FILTER_ALL) -> InlineKeyboardMarkup:
+def users_list_kb(active_filter: str = USER_FILTER_ALL, page: int = 0) -> InlineKeyboardMarkup:
     if active_filter not in USER_FILTERS:
         active_filter = USER_FILTER_ALL
 
@@ -84,8 +87,12 @@ def users_list_kb(active_filter: str = USER_FILTER_ALL) -> InlineKeyboardMarkup:
 
     items.sort(key=lambda x: (0 if x[0] == "admin" else 1, x[3], x[4]))
 
+    total_pages = max(1, (len(items) + USERS_PAGE_SIZE - 1) // USERS_PAGE_SIZE)
+    page = max(0, min(int(page), total_pages - 1))
+    page_items = items[page * USERS_PAGE_SIZE: (page + 1) * USERS_PAGE_SIZE]
+
     row: List[InlineKeyboardButton] = []
-    for role, enabled, is_paid, _, uid, name in items:
+    for role, enabled, is_paid, _, uid, name in page_items:
         prefix = ""
         if not enabled:
             prefix += "⛔ "
@@ -100,6 +107,8 @@ def users_list_kb(active_filter: str = USER_FILTER_ALL) -> InlineKeyboardMarkup:
             row = []
     if row:
         buttons.append(row)
+    if total_pages > 1:
+        buttons.append(pager_row("users:page:", page, total_pages))
     buttons.append([InlineKeyboardButton("🏠 Меню", callback_data="menu:home")])
     return InlineKeyboardMarkup(buttons)
 
@@ -176,22 +185,29 @@ def format_user_card(meta: Dict[str, Any]) -> str:
     uname = meta.get("username")
     nm = " ".join([x for x in [meta.get("first_name"), meta.get("last_name")] if x]) or "-"
     auth_at = meta.get("auth_at") or "-"
-    status = "активен" if meta.get("enabled", True) else "отключен"
+    enabled = bool(meta.get("enabled", True))
+    status = "активен" if enabled else "отключен"
+    status_dot = "🟢" if enabled else "🔴"
     has_subscription = bool(str(meta.get(SUBSCRIPTION_TEXT_KEY, "") or "").strip())
     subscription_updated_at = meta.get("subscription_updated_at") or "-"
     auth_at_human = format_dt_human(auth_at)
     subscription_updated_at_human = format_dt_human(subscription_updated_at)
+    name = display_name_from_meta(meta)
     return (
-        f"<b>{html_escape(breadcrumbs('Админ-панель', 'Пользователи', str(uid)))}</b>\n\n"
-        "Карточка пользователя\n"
-        f"• ID: <code>{html_escape(str(uid))}</code>\n"
+        f"👤 <b>{html_escape(name)}</b> · {status_dot} {html_escape(status)}\n"
+        f"ID: <code>{html_escape(str(uid))}</code>\n"
+        f"{SEP}\n"
+        "🔐 <b>Доступ</b>\n"
         f"• Роль: <b>{html_escape(str(role))}</b>\n"
-        f"• Статус: <b>{html_escape(status)}</b>\n"
-        f"• Оплата: <b>{'оплачена' if bool(meta.get('is_paid', False)) else 'не оплачена'}</b>\n"
+        f"• Оплата: <b>{'⭐ оплачена' if bool(meta.get('is_paid', False)) else 'не оплачена'}</b>\n"
+        f"• Авторизация: <code>{html_escape(auth_at_human)}</code>\n"
+        f"{SEP}\n"
+        "📦 <b>Подписка</b>\n"
         f"• Конфиг: <b>{'назначен' if has_subscription else 'не назначен'}</b>\n"
         f"• Обновлён: <code>{html_escape(subscription_updated_at_human)}</code>\n"
+        f"{SEP}\n"
+        "📇 <b>Профиль</b>\n"
         f"• Ник: <b>{html_escape(str(nick))}</b>\n"
         f"• Username: <b>{html_escape(('@' + uname) if uname else '-')}</b>\n"
-        f"• Имя: <b>{html_escape(str(nm))}</b>\n"
-        f"• Авторизация: <code>{html_escape(auth_at_human)}</code>"
+        f"• Имя: <b>{html_escape(str(nm))}</b>"
     )

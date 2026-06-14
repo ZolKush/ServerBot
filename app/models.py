@@ -73,7 +73,7 @@ class ScheduledMaintenance(TypedDict, total=False):
     author_name: str
     created_at: str
     updated_at: str
-    notified_before: bool
+    notified_thresholds: List[int]
     notified_start: bool
 
 
@@ -136,7 +136,7 @@ class ScheduledMaintenanceKeys:
     AUTHOR_NAME = "author_name"
     CREATED_AT = "created_at"
     UPDATED_AT = "updated_at"
-    NOTIFIED_BEFORE = "notified_before"
+    NOTIFIED_THRESHOLDS = "notified_thresholds"
     NOTIFIED_START = "notified_start"
 
 

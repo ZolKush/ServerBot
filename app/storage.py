@@ -2,7 +2,9 @@ import asyncio
 import copy
 import json
 import os
+import shutil
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, TypeVar
 
@@ -13,6 +15,10 @@ from .config import IMPORTANT_DATA_PATH, LEGACY_CONFIG_PATH, USER_DATA_PATH, log
 T = TypeVar("T")
 USER_DATA_SCHEMA_VERSION = 1
 IMPORTANT_DATA_SCHEMA_VERSION = 1
+
+
+class UpdateAborted(Exception):
+    """Прерывает update_*_data без записи на диск; не считается ошибкой хранилища."""
 
 
 def _normalize_bool(value: Any, truthy: set[str]) -> bool:
@@ -26,10 +32,21 @@ async def _write_json_atomic(path: str, data: Dict[str, Any]) -> None:
     await asyncio.to_thread(p.parent.mkdir, parents=True, exist_ok=True)
     payload = json.dumps(data, ensure_ascii=False, indent=2)
     tmp = p.with_suffix(p.suffix + ".tmp")
+    await asyncio.to_thread(_create_private_file, tmp)
     async with aiofiles.open(tmp, "w", encoding="utf-8") as f:
         await f.write(payload)
     await asyncio.to_thread(tmp.replace, p)
     await asyncio.to_thread(_tighten_file_permissions, p)
+
+
+def _create_private_file(path: Path) -> None:
+    if os.name == "nt":
+        return
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
+        os.close(fd)
+    except Exception:
+        pass
 
 
 def _tighten_file_permissions(path: Path) -> None:
@@ -39,6 +56,30 @@ def _tighten_file_permissions(path: Path) -> None:
         path.chmod(0o600)
     except Exception:
         pass
+
+
+def _load_raw_dict(path: str) -> Optional[Dict[str, Any]]:
+    """None — файла нет; ValueError/JSONDecodeError — файл есть, но повреждён."""
+    p = Path(path)
+    if not p.exists():
+        return None
+    raw = json.loads(p.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError("ожидался JSON-объект")
+    return raw
+
+
+def _backup_corrupt_file(path: str) -> None:
+    try:
+        p = Path(path)
+        if not p.exists():
+            return
+        suffix = datetime.now().strftime("%Y%m%d-%H%M%S")
+        backup = p.with_name(f"{p.name}.corrupt-{suffix}")
+        shutil.copy2(p, backup)
+        logger.error("Повреждённый файл скопирован в %s", backup)
+    except Exception:
+        logger.exception("Не удалось сделать резервную копию повреждённого файла %s", path)
 
 
 @dataclass
@@ -123,6 +164,7 @@ class UserData:
                     return data
             except Exception as e:
                 logger.error("Не удалось прочитать %s: %s", pth, e)
+                _backup_corrupt_file(pth)
         return cls()
 
     def save(self, path: str) -> None:
@@ -209,6 +251,7 @@ class ImportantData:
                     return data
             except Exception as e:
                 logger.error("Не удалось прочитать %s: %s", pth, e)
+                _backup_corrupt_file(pth)
         return cls()
 
     def save(self, path: str) -> None:
@@ -289,12 +332,28 @@ _refresh_important_snapshot()
 
 
 async def _reload_user_data_from_disk() -> None:
-    latest = await asyncio.to_thread(UserData.load, USER_DATA_PATH, None)
+    # Если файл отсутствует или повреждён — НЕ затираем данные в памяти:
+    # текущее состояние будет сохранено на диск следующей записью.
+    try:
+        raw = await asyncio.to_thread(_load_raw_dict, USER_DATA_PATH)
+    except Exception as e:
+        logger.error("user_data повреждён, оставляем данные в памяти: %s", e)
+        return
+    if raw is None:
+        return
+    latest = UserData._migrate(raw)
     USER_DATA.authorized_users = copy.deepcopy(latest.authorized_users)
 
 
 async def _reload_important_data_from_disk() -> None:
-    latest = await asyncio.to_thread(ImportantData.load, IMPORTANT_DATA_PATH, None)
+    try:
+        raw = await asyncio.to_thread(_load_raw_dict, IMPORTANT_DATA_PATH)
+    except Exception as e:
+        logger.error("important_data повреждён, оставляем данные в памяти: %s", e)
+        return
+    if raw is None:
+        return
+    latest = ImportantData._migrate(raw)
     IMPORTANT_DATA.tickets_seq = int(latest.tickets_seq or 0)
     IMPORTANT_DATA.tickets = copy.deepcopy(latest.tickets)
     IMPORTANT_DATA.maintenance = copy.deepcopy(latest.maintenance)
@@ -310,6 +369,9 @@ async def update_user_data(update_fn: Callable[[UserData], T]) -> T:
         try:
             result = update_fn(USER_DATA)
             await USER_DATA.save_async(USER_DATA_PATH)
+        except UpdateAborted:
+            USER_DATA.authorized_users = prev_authorized_users
+            raise
         except Exception:
             USER_DATA.authorized_users = prev_authorized_users
             logger.exception("Не удалось обновить user_data")
@@ -330,6 +392,14 @@ async def update_important_data(update_fn: Callable[[ImportantData], T]) -> T:
         try:
             result = update_fn(IMPORTANT_DATA)
             await IMPORTANT_DATA.save_async(IMPORTANT_DATA_PATH)
+        except UpdateAborted:
+            IMPORTANT_DATA.tickets_seq = prev_tickets_seq
+            IMPORTANT_DATA.tickets = prev_tickets
+            IMPORTANT_DATA.maintenance = prev_maintenance
+            IMPORTANT_DATA.scheduled_maintenance = prev_scheduled_maintenance
+            IMPORTANT_DATA.dns_status = prev_dns_status
+            IMPORTANT_DATA.daily_node_status = prev_daily_node_status
+            raise
         except Exception:
             IMPORTANT_DATA.tickets_seq = prev_tickets_seq
             IMPORTANT_DATA.tickets = prev_tickets
@@ -406,6 +476,25 @@ async def upsert_user_meta(uid: int, meta: Dict[str, Any]) -> Dict[str, Any]:
     return await update_user_data(lambda cfg: _set_user_meta(cfg, uid, meta))
 
 
+async def mutate_user_meta(
+    uid: int, mutate_fn: Callable[[Dict[str, Any]], Dict[str, Any]]
+) -> Optional[Dict[str, Any]]:
+    """Атомарно изменяет запись пользователя: mutate_fn получает актуальную копию
+    meta под локом (защита от last-write-wins при параллельных правках).
+    Возвращает обновлённую запись или None, если пользователь не найден."""
+
+    def _apply(cfg: UserData) -> Dict[str, Any]:
+        cur = cfg.authorized_users.get(str(uid))
+        if not isinstance(cur, dict):
+            raise UpdateAborted()
+        return _set_user_meta(cfg, uid, mutate_fn(dict(cur)))
+
+    try:
+        return await update_user_data(_apply)
+    except UpdateAborted:
+        return None
+
+
 async def remove_user_meta(uid: int) -> Optional[Dict[str, Any]]:
     return await update_user_data(lambda cfg: _remove_user(cfg, uid))
 
@@ -448,6 +537,27 @@ def get_user_open_tickets(uid: int) -> list:
         dict(t) for t in tickets.values()
         if isinstance(t, dict) and int(t.get("user_id", 0) or 0) == uid and str(t.get("status", "open")) != "closed"
     ]
+
+
+def get_all_tickets_snapshot() -> Dict[str, Dict[str, Any]]:
+    tickets = IMPORTANT_DATA_SNAPSHOT.get("tickets")
+    if not isinstance(tickets, dict):
+        return {}
+    return {k: dict(v) for k, v in tickets.items() if isinstance(v, dict)}
+
+
+def get_admin_name_by_id(admin_id: int) -> Optional[str]:
+    meta = USER_DATA_SNAPSHOT.get(str(admin_id))
+    if not isinstance(meta, dict) or meta.get("role") != "admin":
+        return None
+    nick = (meta.get("nickname") or "").strip()
+    if nick:
+        return nick
+    uname = meta.get("username")
+    if uname:
+        return f"@{uname}"
+    nm = " ".join(x for x in [meta.get("first_name"), meta.get("last_name")] if x)
+    return nm.strip() or str(admin_id)
 
 
 def get_dns_status_cache(server_key: str) -> Optional[Dict[str, Any]]:

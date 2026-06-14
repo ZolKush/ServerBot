@@ -1,4 +1,3 @@
-import re
 import sys
 import time
 import warnings
@@ -56,7 +55,11 @@ from app.handlers.maint import (
     STATE_MAINT_DURATION,
     STATE_MAINT_EXTEND,
     STATE_MAINT_SCHEDULE_RANGE,
+    STATE_MAINT_SCHEDULE_DATE,
     STATE_MAINT_URGENCY,
+    maint_cal_day,
+    maint_cal_nav,
+    maint_cal_noop,
     maint_cancel_end_cb,
     maint_duration,
     maint_end_cb,
@@ -67,6 +70,9 @@ from app.handlers.maint import (
     maint_restart_notify,
     maint_schedule_range,
     maint_schedule_tick,
+    maint_sched_cancel_cb,
+    maint_sched_cancel_back_cb,
+    maint_sched_cancel_confirm_cb,
     maint_scope,
     maint_start,
     maint_urgency,
@@ -95,12 +101,18 @@ from app.handlers.tickets import (
     TICKET_USER_REPLY_TEXT,
     ticket_admin_reply_start,
     ticket_admin_reply_text,
+    ticket_archive_cb,
+    ticket_archive_page_cb,
     ticket_close_cb,
     ticket_confirm,
+    ticket_list_cb,
+    ticket_open_cb,
     ticket_start,
     ticket_subject,
     ticket_take_cb,
     ticket_text,
+    ticket_transfer_init_cb,
+    ticket_transfer_to_cb,
     ticket_urgency,
     ticket_user_reply_start,
     ticket_user_reply_text,
@@ -190,11 +202,15 @@ async def on_error(update: object, context) -> None:
 
 
 async def fallback_text(update, context) -> None:
-    if not is_authorized(update) or not is_enabled(update):
-        return
     msg = update.effective_message
-    if msg:
-        await msg.reply_text("Не понимаю команду. Используйте /menu для меню или /help для подсказок.")
+    if not msg:
+        return
+    if not is_authorized(update):
+        await msg.reply_text("Доступ ограничен. Авторизуйтесь командой: /auth пароль")
+        return
+    if not is_enabled(update):
+        return
+    await msg.reply_text("Не понимаю команду. Используйте /menu для меню или /help для подсказок.")
 
 
 def build_app() -> Application:
@@ -228,6 +244,11 @@ def build_app() -> Application:
             STATE_MAINT_DURATION: [MessageHandler(PRIVATE_TEXT, maint_duration)],
             STATE_MAINT_EXTEND: [MessageHandler(PRIVATE_TEXT, maint_extend_duration)],
             STATE_MAINT_SCHEDULE_RANGE: [MessageHandler(PRIVATE_TEXT, maint_schedule_range)],
+            STATE_MAINT_SCHEDULE_DATE: [
+                CallbackQueryHandler(maint_cal_nav, pattern=r"^maint:cal:nav:\d{4}-\d{2}$"),
+                CallbackQueryHandler(maint_cal_day, pattern=r"^maint:cal:day:\d{4}-\d{2}-\d{2}$"),
+                CallbackQueryHandler(maint_cal_noop, pattern=r"^maint:cal:noop$"),
+            ],
         },
         fallbacks=[
             CommandHandler("cancel", cancel),
@@ -240,13 +261,25 @@ def build_app() -> Application:
     app.add_handler(CallbackQueryHandler(maint_end_confirm_cb, pattern=r"^maint:endconfirm:[0-9a-f]+$"))
     app.add_handler(CallbackQueryHandler(maint_cancel_end_cb, pattern=r"^maint:cancelend:[0-9a-f]+$"))
     app.add_handler(CallbackQueryHandler(maint_end_cb, pattern=r"^maint:end:[0-9a-f]+$"))
+    app.add_handler(CallbackQueryHandler(maint_sched_cancel_confirm_cb, pattern=r"^maint:schedcancelconfirm:[0-9a-f]+$"))
+    app.add_handler(CallbackQueryHandler(maint_sched_cancel_back_cb, pattern=r"^maint:schedcancelback:[0-9a-f]+$"))
+    app.add_handler(CallbackQueryHandler(maint_sched_cancel_cb, pattern=r"^maint:schedcancel:[0-9a-f]+$"))
 
+    _ticket_persistent_eps = [
+        CallbackQueryHandler(ticket_list_cb, pattern=r"^ticket:list$"),
+        CallbackQueryHandler(ticket_open_cb, pattern=r"^ticket:open:\d+$"),
+        CallbackQueryHandler(ticket_archive_cb, pattern=r"^ticket:archive$"),
+        CallbackQueryHandler(ticket_archive_page_cb, pattern=r"^ticket:archive_page:\d+$"),
+        CallbackQueryHandler(ticket_transfer_init_cb, pattern=r"^ticket:transfer_init:\d+$"),
+        CallbackQueryHandler(ticket_transfer_to_cb, pattern=r"^ticket:transfer_to:\d+:\d+$"),
+    ]
     ticket_conv = ConversationHandler(
         entry_points=[
             CommandHandler("ticket", ticket_start),
             CallbackQueryHandler(ticket_start, pattern=r"^menu:ticket$"),
             CallbackQueryHandler(ticket_admin_reply_start, pattern=r"^ticket:adminreply:\d+$"),
             CallbackQueryHandler(ticket_user_reply_start, pattern=r"^ticket:userreply:\d+$"),
+            *_ticket_persistent_eps,
         ],
         states={
             TICKET_SUBJECT: [MessageHandler(PRIVATE_TEXT, ticket_subject)],
@@ -259,6 +292,7 @@ def build_app() -> Application:
         fallbacks=[
             CommandHandler("cancel", cancel),
             CallbackQueryHandler(cancel_to_menu_cb, pattern=r"^menu:home$"),
+            *_ticket_persistent_eps,
         ],
         name="ticket_flow",
         persistent=True,
@@ -274,7 +308,7 @@ def build_app() -> Application:
         ],
         states={
             ADMIN_PICK: [
-                CallbackQueryHandler(users_pick, pattern=r"^users:(all|main|back|filter:(all|active|disabled|unpaid|admins)|user:\d+)$"),
+                CallbackQueryHandler(users_pick, pattern=r"^users:(all|main|back|filter:(all|active|disabled|unpaid|admins)|user:\d+|page:\d+)$"),
             ],
             ADMIN_ALL_MENU: [
                 CallbackQueryHandler(users_all_menu, pattern=r"^users:(allmsg|back)$"),
@@ -355,7 +389,7 @@ def build_app() -> Application:
         CallbackQueryHandler(docker_inspect, pattern=rf"^docker:inspect:{SERVER_KEY_PATTERN}:[a-zA-Z0-9_.\-]{{1,64}}$")
     )
     app.add_handler(
-        CallbackQueryHandler(docker_logs, pattern=rf"^docker:logs:{SERVER_KEY_PATTERN}:[a-zA-Z0-9_.\-]{{1,64}}:\d{{1,3}}$")
+        CallbackQueryHandler(docker_logs, pattern=rf"^docker:logs:{SERVER_KEY_PATTERN}:[a-zA-Z0-9_.\-]{{1,64}}:\d{{1,4}}$")
     )
 
     app.add_handler(CommandHandler("fail2ban", fail2ban_menu))
@@ -415,7 +449,12 @@ def build_app() -> Application:
     else:
         logger.warning("JobQueue недоступен: для ежедневной выжимки установите python-telegram-bot[job-queue].")
 
-    app.add_handler(MessageHandler(PRIVATE_TEXT, fallback_text), group=10)
+    # Fallback должен жить в группе 0 ПОСЛЕ всех разговоров: если активный
+    # ConversationHandler уже обработал сообщение, первый сработавший обработчик
+    # группы останавливает остальные в этой же группе, и fallback молчит.
+    # В отдельной группе (group=10) он срабатывал бы всегда — даже на ввод
+    # текста тикета или времени техработ.
+    app.add_handler(MessageHandler(PRIVATE_TEXT, fallback_text))
     app.add_error_handler(on_error)
     return app
 
