@@ -3,7 +3,6 @@ import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
 
 import httpx
 
@@ -22,14 +21,14 @@ from ..config import (
 @dataclass(frozen=True)
 class NodeMetrics:
     uuid: str
-    status: Optional[int]
-    online_users: Optional[int]
-    uptime_s: Optional[float]
-    mem_total: Optional[int]
-    mem_free: Optional[int]
-    cpu_count: Optional[int]
-    network_rx_per_sec: Optional[float]
-    network_tx_per_sec: Optional[float]
+    status: int | None
+    online_users: int | None
+    uptime_s: float | None
+    mem_total: int | None
+    mem_free: int | None
+    cpu_count: int | None
+    network_rx_per_sec: float | None
+    network_tx_per_sec: float | None
     node_name: str = ""
     country_emoji: str = ""
 
@@ -38,7 +37,7 @@ class NodeMetrics:
         return self.status == 1
 
     @property
-    def mem_used(self) -> Optional[int]:
+    def mem_used(self) -> int | None:
         if self.mem_total is None or self.mem_free is None:
             return None
         return max(self.mem_total - self.mem_free, 0)
@@ -46,16 +45,16 @@ class NodeMetrics:
 
 @dataclass
 class MetricsSnapshot:
-    nodes: Dict[str, NodeMetrics] = field(default_factory=dict)
+    nodes: dict[str, NodeMetrics] = field(default_factory=dict)
     # Время последнего УСПЕШНОГО получения метрик; None — успехов ещё не было.
-    fetched_at: Optional[datetime] = None
+    fetched_at: datetime | None = None
     error: str = ""
 
     @property
     def ok(self) -> bool:
         return not self.error
 
-    def get(self, uuid: str) -> Optional[NodeMetrics]:
+    def get(self, uuid: str) -> NodeMetrics | None:
         if not uuid:
             return None
         return self.nodes.get(uuid)
@@ -80,7 +79,7 @@ _HOT_METRIC_NAMES = {
 def _unescape_label_value(raw: str) -> str:
     # Prometheus экранирует в значениях лейблов только \\, \" и \n.
     # unicode_escape здесь нельзя: он ломает многобайтные UTF-8 символы (эмодзи).
-    out: List[str] = []
+    out: list[str] = []
     i = 0
     while i < len(raw):
         ch = raw[i]
@@ -99,16 +98,16 @@ def _unescape_label_value(raw: str) -> str:
     return "".join(out)
 
 
-def _parse_labels(raw: str) -> Dict[str, str]:
+def _parse_labels(raw: str) -> dict[str, str]:
     if not raw:
         return {}
-    out: Dict[str, str] = {}
+    out: dict[str, str] = {}
     for m in _LABEL_RE.finditer(raw):
         out[m.group(1)] = _unescape_label_value(m.group(2))
     return out
 
 
-def _parse_value(raw: str) -> Optional[float]:
+def _parse_value(raw: str) -> float | None:
     s = (raw or "").strip()
     if not s:
         return None
@@ -118,12 +117,12 @@ def _parse_value(raw: str) -> Optional[float]:
         return None
 
 
-def parse_prometheus_text(text: str) -> Dict[str, Dict[str, Tuple[Dict[str, str], float]]]:
+def parse_prometheus_text(text: str) -> dict[str, dict[str, tuple[dict[str, str], float]]]:
     """
     Парсит текст /metrics. Возвращает:
     { metric_name: { uuid: (labels, value) } } для интересующих нас метрик.
     """
-    grouped: Dict[str, Dict[str, Tuple[Dict[str, str], float]]] = {}
+    grouped: dict[str, dict[str, tuple[dict[str, str], float]]] = {}
     for line in (text or "").splitlines():
         if not line or line.startswith("#"):
             continue
@@ -144,18 +143,18 @@ def parse_prometheus_text(text: str) -> Dict[str, Dict[str, Tuple[Dict[str, str]
     return grouped
 
 
-def _build_snapshot(grouped: Dict[str, Dict[str, Tuple[Dict[str, str], float]]]) -> Dict[str, NodeMetrics]:
+def _build_snapshot(grouped: dict[str, dict[str, tuple[dict[str, str], float]]]) -> dict[str, NodeMetrics]:
     uuids: set[str] = set()
     for per_metric in grouped.values():
         uuids.update(per_metric.keys())
 
-    nodes: Dict[str, NodeMetrics] = {}
+    nodes: dict[str, NodeMetrics] = {}
 
-    def _int(metric_name: str, uuid: str) -> Optional[int]:
+    def _int(metric_name: str, uuid: str) -> int | None:
         rec = grouped.get(metric_name, {}).get(uuid)
         return int(rec[1]) if rec else None
 
-    def _float(metric_name: str, uuid: str) -> Optional[float]:
+    def _float(metric_name: str, uuid: str) -> float | None:
         rec = grouped.get(metric_name, {}).get(uuid)
         return float(rec[1]) if rec else None
 
@@ -181,9 +180,9 @@ def _build_snapshot(grouped: Dict[str, Dict[str, Tuple[Dict[str, str], float]]])
     return nodes
 
 
-_CACHE_LOCK: Optional[asyncio.Lock] = None
-_FETCH_LOCK: Optional[asyncio.Lock] = None
-_CACHED_SNAPSHOT: Optional[MetricsSnapshot] = None
+_CACHE_LOCK: asyncio.Lock | None = None
+_FETCH_LOCK: asyncio.Lock | None = None
+_CACHED_SNAPSHOT: MetricsSnapshot | None = None
 _CACHED_AT_MONOTONIC: float = 0.0
 
 
@@ -214,7 +213,7 @@ async def _fetch_metrics_text() -> str:
         return resp.text
 
 
-_LAST_SUCCESS_AT: Optional[datetime] = None
+_LAST_SUCCESS_AT: datetime | None = None
 
 
 async def _do_fetch_and_build_snapshot() -> MetricsSnapshot:
@@ -280,14 +279,14 @@ async def get_metrics_snapshot(*, force_refresh: bool = False) -> MetricsSnapsho
         return snap
 
 
-def format_uptime_seconds(seconds: Optional[float]) -> str:
+def format_uptime_seconds(seconds: float | None) -> str:
     if seconds is None:
         return "н/д"
     s = int(seconds)
     days, rem = divmod(s, 86400)
     hours, rem = divmod(rem, 3600)
     minutes = rem // 60
-    parts: List[str] = []
+    parts: list[str] = []
     if days:
         parts.append(f"{days} д")
     if hours:
@@ -297,7 +296,7 @@ def format_uptime_seconds(seconds: Optional[float]) -> str:
     return " ".join(parts)
 
 
-def format_memory_bytes(used: Optional[int], total: Optional[int]) -> str:
+def format_memory_bytes(used: int | None, total: int | None) -> str:
     if used is None or total is None or total <= 0:
         return "н/д"
     used_mib = int(round(used / (1024 * 1024)))

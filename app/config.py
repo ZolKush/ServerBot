@@ -70,11 +70,11 @@ from .settings import (
     SUBPROC_MEDIUM_TIMEOUT,
     SUBPROC_SHORT_TIMEOUT,
     SUDO_BIN,
-    ServerTarget,
     TZ,
     TZ_NAME,
     UFW_BIN,
     USER_DATA_PATH,
+    ServerTarget,
 )
 
 configure_logging(level=LOG_LEVEL, use_json=LOG_JSON, force=True)

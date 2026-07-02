@@ -3,10 +3,11 @@ from __future__ import annotations
 import asyncio
 import html
 import random
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from functools import wraps
 from datetime import datetime
-from typing import Any, Callable, Dict, Iterable, List, Optional, Set
+from functools import wraps
+from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatType, ParseMode
@@ -94,7 +95,7 @@ def format_dt_human(value: Any, *, empty: str = "-", tz_label: str = "по МС�
     if not raw:
         return empty
 
-    dt: Optional[datetime] = None
+    dt: datetime | None = None
     try:
         dt = datetime.fromisoformat(raw)
     except Exception:
@@ -119,12 +120,12 @@ def is_private(update: Update) -> bool:
     return bool(update.effective_chat and update.effective_chat.type == ChatType.PRIVATE)
 
 
-def get_user_id(update: Update) -> Optional[int]:
+def get_user_id(update: Update) -> int | None:
     u = update.effective_user
     return int(u.id) if u else None
 
 
-def get_user_meta(uid: int) -> Optional[Dict[str, Any]]:
+def get_user_meta(uid: int) -> dict[str, Any] | None:
     return get_user_meta_copy(uid)
 
 
@@ -194,7 +195,7 @@ def require_admin(func: Callable[..., Any]) -> Callable[..., Any]:
     return wrapper
 
 
-async def _ensure_access(update: Update, role: Optional[str]) -> bool:
+async def _ensure_access(update: Update, role: str | None) -> bool:
     if not is_private(update):
         return False
     if not is_authorized(update):
@@ -211,7 +212,7 @@ async def _ensure_access(update: Update, role: Optional[str]) -> bool:
     return True
 
 
-def display_name_from_meta(meta: Optional[Dict[str, Any]]) -> str:
+def display_name_from_meta(meta: dict[str, Any] | None) -> str:
     if not meta:
         return "пользователь"
     nick = (meta.get("nickname") or "").strip()
@@ -241,7 +242,7 @@ def display_name(update: Update) -> str:
 
 
 def main_menu_inline_kb_for_admin(is_admin_user: bool) -> InlineKeyboardMarkup:
-    rows: List[List[InlineKeyboardButton]] = [
+    rows: list[list[InlineKeyboardButton]] = [
         [
             InlineKeyboardButton(MENU_STATUS, callback_data="menu:status"),
             InlineKeyboardButton(MENU_SUBSCRIPTION, callback_data="menu:subscription"),
@@ -295,7 +296,7 @@ async def safe_edit_or_reply(
     message: Any,
     text: str,
     *,
-    reply_markup: Optional[InlineKeyboardMarkup] = None,
+    reply_markup: InlineKeyboardMarkup | None = None,
     parse_mode: str = ParseMode.HTML,
 ) -> None:
     """Редактирует сообщение без дубликатов.
@@ -326,10 +327,13 @@ async def menu_home_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 def _clear_transient_user_context(context: ContextTypes.DEFAULT_TYPE) -> None:
+    ud = context.user_data
+    if ud is None:
+        return
     transient_keys = {"selected_uid", "subscription_delivery_mode", "users_all_broadcast_text"}
-    for key in tuple(context.user_data.keys()):
+    for key in tuple(ud.keys()):
         if key.startswith("ticket_") or key.startswith("maint_") or key in transient_keys:
-            context.user_data.pop(key, None)
+            ud.pop(key, None)
 
 
 @require_auth
@@ -350,7 +354,7 @@ class SendErrorInfo:
 class SendManyReport:
     ok: int = 0
     fail: int = 0
-    errors: List[SendErrorInfo] = field(default_factory=list)
+    errors: list[SendErrorInfo] = field(default_factory=list)
 
     def __iter__(self):
         yield self.ok
@@ -370,9 +374,9 @@ async def send_to_many(
     user_ids: Iterable[int],
     text: str,
     *,
-    reply_markup: Optional[InlineKeyboardMarkup] = None,
-    max_concurrency: Optional[int] = None,
-    max_attempts: Optional[int] = None,
+    reply_markup: InlineKeyboardMarkup | None = None,
+    max_concurrency: int | None = None,
+    max_attempts: int | None = None,
 ) -> SendManyReport:
     if max_concurrency is None:
         max_concurrency = BROADCAST_MAX_CONCURRENCY
@@ -387,8 +391,8 @@ async def send_to_many(
     for uid in ids:
         queue.put_nowait(uid)
 
-    async def _send_one(uid: int) -> tuple[bool, Optional[SendErrorInfo]]:
-        last_exc: Optional[Exception] = None
+    async def _send_one(uid: int) -> tuple[bool, SendErrorInfo | None]:
+        last_exc: Exception | None = None
         for attempt in range(1, max(1, max_attempts) + 1):
             try:
                 await context.bot.send_message(
@@ -440,9 +444,9 @@ async def send_to_many(
     return report
 
 
-def authorized_ids(role_filter: Optional[str] = None, exclude: Optional[Set[int]] = None) -> List[int]:
+def authorized_ids(role_filter: str | None = None, exclude: set[int] | None = None) -> list[int]:
     exclude = exclude or set()
-    ids: List[int] = []
+    ids: list[int] = []
     for k, meta in authorized_users_snapshot().items():
         try:
             uid = int(meta.get("user_id", k))

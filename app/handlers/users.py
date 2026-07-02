@@ -34,8 +34,8 @@ from .subscription import (
 )
 from .users_constants import (
     ADMIN_ALL_MENU,
-    ADMIN_ALL_MSG_TEXT,
     ADMIN_ALL_MSG_CONFIRM,
+    ADMIN_ALL_MSG_TEXT,
     ADMIN_PICK,
     ADMIN_USER_CFG_TEXT,
     ADMIN_USER_MENU,
@@ -44,8 +44,8 @@ from .users_constants import (
     MAX_USER_NICK_LEN,
 )
 from .users_ui import (
-    USER_FILTERS,
     USER_FILTER_ALL,
+    USER_FILTERS,
     confirm_paid_kb,
     confirm_toggle_kb,
     format_user_card,

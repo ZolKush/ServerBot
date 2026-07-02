@@ -1,5 +1,4 @@
 import re
-from typing import List, Optional
 
 from .common import html_escape
 from .status_models import StatusSnapshot
@@ -21,7 +20,7 @@ def _normalize_disk_display(raw: str) -> str:
     return s or "н/д"
 
 
-def _memory_percent(raw: str) -> Optional[int]:
+def _memory_percent(raw: str) -> int | None:
     m = re.match(r"\s*([\d.,]+)\s*/\s*([\d.,]+)", raw or "")
     if not m:
         return None
@@ -33,10 +32,10 @@ def _memory_percent(raw: str) -> Optional[int]:
     return used_total_percent(used, total)
 
 
-def _fmt_ufw_list(items: List[str]) -> List[str]:
+def _fmt_ufw_list(items: list[str]) -> list[str]:
     if not items:
         return ["<code>  —</code>"]
-    out: List[str] = []
+    out: list[str] = []
     for item in items:
         out.append(f"<code>  • {html_escape(item)}</code>")
     return out
@@ -64,7 +63,7 @@ def _dns_chip(snapshot: StatusSnapshot) -> str:
     return f"🌐 DNS {emoji} {ok}/{total}"
 
 
-def _dns_detail_line(snapshot: StatusSnapshot) -> Optional[str]:
+def _dns_detail_line(snapshot: StatusSnapshot) -> str | None:
     total = int(snapshot.dns_total_domains or 0)
     ok = int(snapshot.dns_ok_domains or 0)
     bad = int(snapshot.dns_bad_domains or 0)
@@ -97,10 +96,10 @@ def _summary_chips_line(snapshot: StatusSnapshot) -> str:
     return f"{_dns_chip(snapshot)}   {ufw}   {_docker_chip(snapshot)}"
 
 
-def _dns_error_block(snapshot: StatusSnapshot) -> List[str]:
+def _dns_error_block(snapshot: StatusSnapshot) -> list[str]:
     if not snapshot.dns_error_details:
         return []
-    lines: List[str] = ["", section("DNS — проблемы", "🌐")]
+    lines: list[str] = ["", section("DNS — проблемы", "🌐")]
     details = list(snapshot.dns_error_details)
     lines.extend(details[:MAX_DNS_DETAIL_LINES])
     hidden = len(details) - MAX_DNS_DETAIL_LINES
@@ -117,7 +116,7 @@ def _suffix_updated(text: str) -> str:
 
 
 def _format_offline_message(snapshot: StatusSnapshot) -> str:
-    lines: List[str] = []
+    lines: list[str] = []
     lines.append(header(snapshot.server_flag or "🖥", snapshot.server_label, "🔴 офлайн"))
     lines.append(SEP)
     if snapshot.metrics_error:
@@ -146,7 +145,7 @@ def format_status_message(snapshot: StatusSnapshot) -> str:
     if snapshot.source_mode == "mixed" and snapshot.node_online is True:
         status_text = "🟢 онлайн"
 
-    lines: List[str] = []
+    lines: list[str] = []
     lines.append(header(snapshot.server_flag or "🖥", snapshot.server_label, status_text))
     lines.append(SEP)
     lines.append(section("Ресурсы", "📊"))
@@ -195,7 +194,7 @@ def format_status_message(snapshot: StatusSnapshot) -> str:
 
 
 def format_ufw_message(snapshot: StatusSnapshot) -> str:
-    lines: List[str] = []
+    lines: list[str] = []
     state_text = (snapshot.ufw_state or "н/д").upper()
     lines.append(
         f"🛡 <b>UFW — {html_escape(snapshot.server_label)}</b> · {_ufw_emoji(snapshot.ufw_state)} {html_escape(state_text)}"

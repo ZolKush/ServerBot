@@ -1,12 +1,14 @@
 import asyncio
+import contextlib
 import copy
 import json
 import os
 import shutil
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, TypeVar
+from typing import Any, TypeVar
 
 import aiofiles
 
@@ -27,7 +29,7 @@ def _normalize_bool(value: Any, truthy: set[str]) -> bool:
     return bool(value)
 
 
-async def _write_json_atomic(path: str, data: Dict[str, Any]) -> None:
+async def _write_json_atomic(path: str, data: dict[str, Any]) -> None:
     p = Path(path)
     await asyncio.to_thread(p.parent.mkdir, parents=True, exist_ok=True)
     payload = json.dumps(data, ensure_ascii=False, indent=2)
@@ -52,13 +54,11 @@ def _create_private_file(path: Path) -> None:
 def _tighten_file_permissions(path: Path) -> None:
     if os.name == "nt":
         return
-    try:
+    with contextlib.suppress(Exception):
         path.chmod(0o600)
-    except Exception:
-        pass
 
 
-def _load_raw_dict(path: str) -> Optional[Dict[str, Any]]:
+def _load_raw_dict(path: str) -> dict[str, Any] | None:
     """None — файла нет; ValueError/JSONDecodeError — файл есть, но повреждён."""
     p = Path(path)
     if not p.exists():
@@ -84,15 +84,15 @@ def _backup_corrupt_file(path: str) -> None:
 
 @dataclass
 class UserData:
-    authorized_users: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    authorized_users: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     @staticmethod
-    def _normalize_user(meta: Dict[str, Any]) -> Dict[str, Any]:
+    def _normalize_user(meta: dict[str, Any]) -> dict[str, Any]:
         meta = dict(meta or {})
 
         uid_raw = meta.get("user_id")
         try:
-            uid = int(uid_raw)
+            uid = int(uid_raw) if uid_raw is not None else None
         except Exception:
             uid = None
 
@@ -115,8 +115,8 @@ class UserData:
         return meta
 
     @staticmethod
-    def _migrate(raw: Dict[str, Any]) -> "UserData":
-        authorized_users: Dict[str, Dict[str, Any]] = {}
+    def _migrate(raw: dict[str, Any]) -> "UserData":
+        authorized_users: dict[str, dict[str, Any]] = {}
 
         if isinstance(raw.get("authorized_users"), dict):
             for k, meta in raw["authorized_users"].items():
@@ -138,14 +138,14 @@ class UserData:
         return UserData(authorized_users=authorized_users)
 
     @staticmethod
-    def _needs_rewrite(raw: Dict[str, Any]) -> bool:
+    def _needs_rewrite(raw: dict[str, Any]) -> bool:
         if raw.get("schema_version") != USER_DATA_SCHEMA_VERSION:
             return True
         allowed_keys = {"schema_version", "authorized_users"}
-        return any(k not in allowed_keys for k in raw.keys())
+        return any(k not in allowed_keys for k in raw)
 
     @classmethod
-    def load(cls, path: str, legacy_path: Optional[str] = None) -> "UserData":
+    def load(cls, path: str, legacy_path: str | None = None) -> "UserData":
         for pth in [path, legacy_path]:
             if not pth:
                 continue
@@ -157,10 +157,8 @@ class UserData:
                 if isinstance(raw, dict):
                     data = cls._migrate(raw)
                     if pth != path or cls._needs_rewrite(raw):
-                        try:
+                        with contextlib.suppress(Exception):
                             data.save(path)
-                        except Exception:
-                            pass
                     return data
             except Exception as e:
                 logger.error("Не удалось прочитать %s: %s", pth, e)
@@ -183,14 +181,14 @@ class UserData:
 @dataclass
 class ImportantData:
     tickets_seq: int = 0
-    tickets: Dict[str, Any] = field(default_factory=dict)
-    maintenance: Dict[str, Any] = field(default_factory=dict)
-    scheduled_maintenance: Dict[str, Any] = field(default_factory=dict)
-    dns_status: Dict[str, Any] = field(default_factory=dict)
-    daily_node_status: Dict[str, Any] = field(default_factory=dict)
+    tickets: dict[str, Any] = field(default_factory=dict)
+    maintenance: dict[str, Any] = field(default_factory=dict)
+    scheduled_maintenance: dict[str, Any] = field(default_factory=dict)
+    dns_status: dict[str, Any] = field(default_factory=dict)
+    daily_node_status: dict[str, Any] = field(default_factory=dict)
 
     @staticmethod
-    def _migrate(raw: Dict[str, Any]) -> "ImportantData":
+    def _migrate(raw: dict[str, Any]) -> "ImportantData":
         tickets_seq = int(raw.get("tickets_seq", 0) or 0)
         tickets = raw.get("tickets", {})
         if not isinstance(tickets, dict):
@@ -217,7 +215,7 @@ class ImportantData:
         )
 
     @staticmethod
-    def _needs_rewrite(raw: Dict[str, Any]) -> bool:
+    def _needs_rewrite(raw: dict[str, Any]) -> bool:
         if raw.get("schema_version") != IMPORTANT_DATA_SCHEMA_VERSION:
             return True
         allowed_keys = {
@@ -229,10 +227,10 @@ class ImportantData:
             "dns_status",
             "daily_node_status",
         }
-        return any(k not in allowed_keys for k in raw.keys())
+        return any(k not in allowed_keys for k in raw)
 
     @classmethod
-    def load(cls, path: str, legacy_path: Optional[str] = None) -> "ImportantData":
+    def load(cls, path: str, legacy_path: str | None = None) -> "ImportantData":
         for pth in [path, legacy_path]:
             if not pth:
                 continue
@@ -244,10 +242,8 @@ class ImportantData:
                 if isinstance(raw, dict):
                     data = cls._migrate(raw)
                     if pth != path or cls._needs_rewrite(raw):
-                        try:
+                        with contextlib.suppress(Exception):
                             data.save(path)
-                        except Exception:
-                            pass
                     return data
             except Exception as e:
                 logger.error("Не удалось прочитать %s: %s", pth, e)
@@ -288,10 +284,10 @@ class ImportantData:
 
 USER_DATA = UserData.load(USER_DATA_PATH, legacy_path=LEGACY_CONFIG_PATH)
 IMPORTANT_DATA = ImportantData.load(IMPORTANT_DATA_PATH, legacy_path=LEGACY_CONFIG_PATH)
-_USER_DATA_LOCK: Optional[asyncio.Lock] = None
-_IMPORTANT_DATA_LOCK: Optional[asyncio.Lock] = None
-USER_DATA_SNAPSHOT: Dict[str, Dict[str, Any]] = {}
-IMPORTANT_DATA_SNAPSHOT: Dict[str, Any] = {}
+_USER_DATA_LOCK: asyncio.Lock | None = None
+_IMPORTANT_DATA_LOCK: asyncio.Lock | None = None
+USER_DATA_SNAPSHOT: dict[str, dict[str, Any]] = {}
+IMPORTANT_DATA_SNAPSHOT: dict[str, Any] = {}
 
 
 def _get_user_data_lock() -> asyncio.Lock:
@@ -413,18 +409,18 @@ async def update_important_data(update_fn: Callable[[ImportantData], T]) -> T:
     return result
 
 
-def _set_user_meta(cfg: UserData, uid: int, meta: Dict[str, Any]) -> Dict[str, Any]:
+def _set_user_meta(cfg: UserData, uid: int, meta: dict[str, Any]) -> dict[str, Any]:
     normalized = UserData._normalize_user(meta)
     normalized["user_id"] = int(uid)
     cfg.authorized_users[str(uid)] = normalized
     return normalized
 
 
-def _remove_user(cfg: UserData, uid: int) -> Optional[Dict[str, Any]]:
+def _remove_user(cfg: UserData, uid: int) -> dict[str, Any] | None:
     return cfg.authorized_users.pop(str(uid), None)
 
 
-def _set_maintenance(cfg: ImportantData, payload: Dict[str, Any]) -> Dict[str, Any]:
+def _set_maintenance(cfg: ImportantData, payload: dict[str, Any]) -> dict[str, Any]:
     cfg.maintenance = payload
     return payload
 
@@ -433,7 +429,7 @@ def _clear_maintenance(cfg: ImportantData) -> None:
     cfg.maintenance = {}
 
 
-def _set_scheduled_maintenance(cfg: ImportantData, payload: Dict[str, Any]) -> Dict[str, Any]:
+def _set_scheduled_maintenance(cfg: ImportantData, payload: dict[str, Any]) -> dict[str, Any]:
     cfg.scheduled_maintenance = payload
     return payload
 
@@ -442,48 +438,48 @@ def _clear_scheduled_maintenance(cfg: ImportantData) -> None:
     cfg.scheduled_maintenance = {}
 
 
-def _set_dns_status(cfg: ImportantData, server_key: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+def _set_dns_status(cfg: ImportantData, server_key: str, payload: dict[str, Any]) -> dict[str, Any]:
     cur = dict(getattr(cfg, "dns_status", {}) or {})
     cur[str(server_key)] = dict(payload or {})
     cfg.dns_status = cur
     return dict(cur[str(server_key)])
 
 
-def _set_daily_node_status(cfg: ImportantData, server_key: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+def _set_daily_node_status(cfg: ImportantData, server_key: str, payload: dict[str, Any]) -> dict[str, Any]:
     cur = dict(getattr(cfg, "daily_node_status", {}) or {})
     cur[str(server_key)] = dict(payload or {})
     cfg.daily_node_status = cur
     return dict(cur[str(server_key)])
 
 
-def _set_ticket(cfg: ImportantData, ticket_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
+def _set_ticket(cfg: ImportantData, ticket_id: int, payload: dict[str, Any]) -> dict[str, Any]:
     cur = dict(getattr(cfg, "tickets", {}) or {})
     cur[str(ticket_id)] = dict(payload or {})
     cfg.tickets = cur
     return dict(cur[str(ticket_id)])
 
 
-def get_user_meta_copy(uid: int) -> Optional[Dict[str, Any]]:
+def get_user_meta_copy(uid: int) -> dict[str, Any] | None:
     meta = USER_DATA_SNAPSHOT.get(str(uid))
     return dict(meta) if isinstance(meta, dict) else None
 
 
-def authorized_users_snapshot() -> Dict[str, Dict[str, Any]]:
+def authorized_users_snapshot() -> dict[str, dict[str, Any]]:
     return {k: dict(v) for k, v in USER_DATA_SNAPSHOT.items()}
 
 
-async def upsert_user_meta(uid: int, meta: Dict[str, Any]) -> Dict[str, Any]:
+async def upsert_user_meta(uid: int, meta: dict[str, Any]) -> dict[str, Any]:
     return await update_user_data(lambda cfg: _set_user_meta(cfg, uid, meta))
 
 
 async def mutate_user_meta(
-    uid: int, mutate_fn: Callable[[Dict[str, Any]], Dict[str, Any]]
-) -> Optional[Dict[str, Any]]:
+    uid: int, mutate_fn: Callable[[dict[str, Any]], dict[str, Any]]
+) -> dict[str, Any] | None:
     """Атомарно изменяет запись пользователя: mutate_fn получает актуальную копию
     meta под локом (защита от last-write-wins при параллельных правках).
     Возвращает обновлённую запись или None, если пользователь не найден."""
 
-    def _apply(cfg: UserData) -> Dict[str, Any]:
+    def _apply(cfg: UserData) -> dict[str, Any]:
         cur = cfg.authorized_users.get(str(uid))
         if not isinstance(cur, dict):
             raise UpdateAborted()
@@ -495,11 +491,11 @@ async def mutate_user_meta(
         return None
 
 
-async def remove_user_meta(uid: int) -> Optional[Dict[str, Any]]:
+async def remove_user_meta(uid: int) -> dict[str, Any] | None:
     return await update_user_data(lambda cfg: _remove_user(cfg, uid))
 
 
-async def set_maintenance_record(payload: Dict[str, Any]) -> Dict[str, Any]:
+async def set_maintenance_record(payload: dict[str, Any]) -> dict[str, Any]:
     return await update_important_data(lambda cfg: _set_maintenance(cfg, payload))
 
 
@@ -507,21 +503,21 @@ async def clear_maintenance_record() -> None:
     await update_important_data(lambda cfg: _clear_maintenance(cfg))
 
 
-def get_active_maintenance() -> Optional[Dict[str, Any]]:
+def get_active_maintenance() -> dict[str, Any] | None:
     m = IMPORTANT_DATA_SNAPSHOT.get("maintenance")
     if isinstance(m, dict) and m.get("active"):
         return dict(m)
     return None
 
 
-def get_scheduled_maintenance() -> Optional[Dict[str, Any]]:
+def get_scheduled_maintenance() -> dict[str, Any] | None:
     m = IMPORTANT_DATA_SNAPSHOT.get("scheduled_maintenance")
     if isinstance(m, dict) and m.get("id"):
         return dict(m)
     return None
 
 
-def get_ticket_copy(ticket_id: int) -> Optional[Dict[str, Any]]:
+def get_ticket_copy(ticket_id: int) -> dict[str, Any] | None:
     tickets = IMPORTANT_DATA_SNAPSHOT.get("tickets")
     if not isinstance(tickets, dict):
         return None
@@ -539,14 +535,14 @@ def get_user_open_tickets(uid: int) -> list:
     ]
 
 
-def get_all_tickets_snapshot() -> Dict[str, Dict[str, Any]]:
+def get_all_tickets_snapshot() -> dict[str, dict[str, Any]]:
     tickets = IMPORTANT_DATA_SNAPSHOT.get("tickets")
     if not isinstance(tickets, dict):
         return {}
     return {k: dict(v) for k, v in tickets.items() if isinstance(v, dict)}
 
 
-def get_admin_name_by_id(admin_id: int) -> Optional[str]:
+def get_admin_name_by_id(admin_id: int) -> str | None:
     meta = USER_DATA_SNAPSHOT.get(str(admin_id))
     if not isinstance(meta, dict) or meta.get("role") != "admin":
         return None
@@ -560,7 +556,7 @@ def get_admin_name_by_id(admin_id: int) -> Optional[str]:
     return nm.strip() or str(admin_id)
 
 
-def get_dns_status_cache(server_key: str) -> Optional[Dict[str, Any]]:
+def get_dns_status_cache(server_key: str) -> dict[str, Any] | None:
     dns = IMPORTANT_DATA_SNAPSHOT.get("dns_status")
     if not isinstance(dns, dict):
         return None
@@ -568,11 +564,11 @@ def get_dns_status_cache(server_key: str) -> Optional[Dict[str, Any]]:
     return dict(item) if isinstance(item, dict) else None
 
 
-async def set_dns_status_cache(server_key: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+async def set_dns_status_cache(server_key: str, payload: dict[str, Any]) -> dict[str, Any]:
     return await update_important_data(lambda cfg: _set_dns_status(cfg, server_key, payload))
 
 
-def get_daily_node_status_cache(server_key: str) -> Optional[Dict[str, Any]]:
+def get_daily_node_status_cache(server_key: str) -> dict[str, Any] | None:
     daily = IMPORTANT_DATA_SNAPSHOT.get("daily_node_status")
     if not isinstance(daily, dict):
         return None
@@ -580,11 +576,11 @@ def get_daily_node_status_cache(server_key: str) -> Optional[Dict[str, Any]]:
     return dict(item) if isinstance(item, dict) else None
 
 
-async def set_daily_node_status_cache(server_key: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+async def set_daily_node_status_cache(server_key: str, payload: dict[str, Any]) -> dict[str, Any]:
     return await update_important_data(lambda cfg: _set_daily_node_status(cfg, server_key, payload))
 
 
-async def set_scheduled_maintenance_record(payload: Dict[str, Any]) -> Dict[str, Any]:
+async def set_scheduled_maintenance_record(payload: dict[str, Any]) -> dict[str, Any]:
     return await update_important_data(lambda cfg: _set_scheduled_maintenance(cfg, payload))
 
 
@@ -600,5 +596,5 @@ async def next_ticket_seq() -> int:
     return await update_important_data(_next_ticket)
 
 
-async def set_ticket_record(ticket_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
+async def set_ticket_record(ticket_id: int, payload: dict[str, Any]) -> dict[str, Any]:
     return await update_important_data(lambda cfg: _set_ticket(cfg, ticket_id, payload))

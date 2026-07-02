@@ -4,7 +4,7 @@ import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
 from dotenv import dotenv_values
@@ -40,7 +40,7 @@ _COUNTRY_NAMES = {
 }
 
 
-def split_env_list(raw: Any, *, dedupe: bool = True) -> List[str]:
+def split_env_list(raw: Any, *, dedupe: bool = True) -> list[str]:
     if raw is None:
         return []
     if isinstance(raw, str):
@@ -58,18 +58,18 @@ def split_env_list(raw: Any, *, dedupe: bool = True) -> List[str]:
         items = [str(x).strip() for x in raw]
     else:
         items = [p.strip() for p in str(raw).split(",")]
-    out: List[str] = []
+    out: list[str] = []
     for item in items:
         if item and (not dedupe or item not in out):
             out.append(item)
     return out
 
 
-def split_env_groups(raw: Any) -> List[List[str]]:
+def split_env_groups(raw: Any) -> list[list[str]]:
     if raw is None:
         return []
     if isinstance(raw, list):
-        groups: List[List[str]] = []
+        groups: list[list[str]] = []
         for item in raw:
             group = split_env_list(item)
             if group:
@@ -124,13 +124,13 @@ def normalize_server_key(value: str, fallback: str) -> str:
     return (raw or "srv")[:12]
 
 
-def _nth_or_default(items: List[str], index: int, default: str = "") -> str:
+def _nth_or_default(items: list[str], index: int, default: str = "") -> str:
     if index < len(items):
         return items[index]
     return default
 
 
-def _domains_for_index(groups: List[List[str]], index: int, total: int, fallback: Optional[List[str]] = None) -> List[str]:
+def _domains_for_index(groups: list[list[str]], index: int, total: int, fallback: list[str] | None = None) -> list[str]:
     if not groups:
         return list(fallback or [])
     if len(groups) == total:
@@ -143,7 +143,7 @@ def _domains_for_index(groups: List[List[str]], index: int, total: int, fallback
     return list(groups[index]) if index < len(groups) else list(fallback or [])
 
 
-def _group_for_index(groups: List[List[str]], index: int, fallback: Optional[List[str]] = None) -> List[str]:
+def _group_for_index(groups: list[list[str]], index: int, fallback: list[str] | None = None) -> list[str]:
     if not groups:
         return list(fallback or [])
     return list(groups[index]) if index < len(groups) else list(fallback or [])
@@ -186,12 +186,12 @@ class SecretSettings(BaseModel):
         return self
 
 
-def _load_env_file_values(path: Path) -> Dict[str, str]:
+def _load_env_file_values(path: Path) -> dict[str, str]:
     if not path.exists():
         return {}
     if not path.is_file():
         raise RuntimeError(f"Путь к env-файлу не является файлом: {path}")
-    out: Dict[str, str] = {}
+    out: dict[str, str] = {}
     try:
         raw = dotenv_values(path)
     except Exception as e:
@@ -206,17 +206,17 @@ def _load_env_file_values(path: Path) -> Dict[str, str]:
 
 
 def _extract_missing_fields(exc: ValidationError) -> str:
-    missing = []
+    missing: list[str] = []
     for err in exc.errors():
-        loc = err.get("loc") or []
+        loc = err.get("loc") or ()
         if loc:
             missing.append(str(loc[0]))
     return ", ".join(sorted(set(missing))) if missing else str(exc)
 
 
 def load_required_secrets(path: Path, *, fallback_path: Path | None = None) -> SecretSettings:
-    merged: Dict[str, str] = {}
-    checked_sources: List[str] = []
+    merged: dict[str, str] = {}
+    checked_sources: list[str] = []
 
     if fallback_path:
         checked_sources.append(str(fallback_path))
@@ -277,10 +277,10 @@ class AppSettings(BaseSettings):
     IMPORTANT_DATA_PATH: str = str(ROOT_DIR / "data" / "important_data.json")
     CONFIG_PATH: str = str(ROOT_DIR / "data" / "config.json")
 
-    MONITOR_CONTAINERS: List[str] = Field(default_factory=list)
+    MONITOR_CONTAINERS: list[str] = Field(default_factory=list)
     EXPECTED_A_IP: str = ""
-    CHECK_A_DOMAINS: List[str] = Field(default_factory=list)
-    DNS_RESOLVERS: List[str] = Field(default_factory=lambda: ["1.1.1.1", "8.8.8.8", "77.88.8.8"])
+    CHECK_A_DOMAINS: list[str] = Field(default_factory=list)
+    DNS_RESOLVERS: list[str] = Field(default_factory=lambda: ["1.1.1.1", "8.8.8.8", "77.88.8.8"])
 
     FAIL2BAN_LOG_PATH: str = "/var/log/fail2ban.log"
     FAIL2BAN_STATE_PATH: str = ""
@@ -317,17 +317,17 @@ class AppSettings(BaseSettings):
     REMOTE_SERVER_FLAG: str = ""
     REMOTE_SERVER_SSH_TARGET: str = ""
     REMOTE_SERVER_EXPECTED_A_IP: str = ""
-    REMOTE_SERVER_CHECK_A_DOMAINS: List[str] = Field(default_factory=list)
+    REMOTE_SERVER_CHECK_A_DOMAINS: list[str] = Field(default_factory=list)
     REMOTE_SERVER_FAIL2BAN_LOG_PATH: str = "/var/log/fail2ban.log"
-    REMOTE_SERVER_MONITOR_CONTAINERS: List[str] = Field(default_factory=list)
+    REMOTE_SERVER_MONITOR_CONTAINERS: list[str] = Field(default_factory=list)
 
-    REMOTE_SERVER_FLAGS: List[str] = Field(default_factory=list)
-    REMOTE_SERVER_SSH_TARGETS: List[str] = Field(default_factory=list)
-    REMOTE_SERVER_EXPECTED_A_IPS: List[str] = Field(default_factory=list)
-    REMOTE_SERVER_DOMAINS: List[List[str]] = Field(default_factory=list)
-    REMOTE_SERVER_MONITOR_CONTAINERS_BY_SERVER: List[List[str]] = Field(default_factory=list)
-    REMOTE_SERVER_CODES: List[str] = Field(default_factory=list)
-    REMOTE_SERVER_LABELS: List[str] = Field(default_factory=list)
+    REMOTE_SERVER_FLAGS: list[str] = Field(default_factory=list)
+    REMOTE_SERVER_SSH_TARGETS: list[str] = Field(default_factory=list)
+    REMOTE_SERVER_EXPECTED_A_IPS: list[str] = Field(default_factory=list)
+    REMOTE_SERVER_DOMAINS: list[list[str]] = Field(default_factory=list)
+    REMOTE_SERVER_MONITOR_CONTAINERS_BY_SERVER: list[list[str]] = Field(default_factory=list)
+    REMOTE_SERVER_CODES: list[str] = Field(default_factory=list)
+    REMOTE_SERVER_LABELS: list[str] = Field(default_factory=list)
 
     BOT_MODE: Literal["ssh", "mixed"] = "ssh"
     REMNAWAVE_METRICS_URL: str = ""
@@ -335,9 +335,9 @@ class AppSettings(BaseSettings):
     REMNAWAVE_METRICS_PASS: str = ""
     REMNAWAVE_METRICS_TIMEOUT_SEC: int = 3
     REMNAWAVE_METRICS_CACHE_TTL_SEC: int = 8
-    REMNAWAVE_HIDDEN_UUIDS: List[str] = Field(default_factory=list)
+    REMNAWAVE_HIDDEN_UUIDS: list[str] = Field(default_factory=list)
     LOCAL_SERVER_REMNAWAVE_UUID: str = ""
-    REMOTE_SERVER_REMNAWAVE_UUIDS: List[str] = Field(default_factory=list)
+    REMOTE_SERVER_REMNAWAVE_UUIDS: list[str] = Field(default_factory=list)
     DAILY_NODE_STATUS_REFRESH_AT: str = "12:00"
 
     @field_validator(
@@ -355,7 +355,7 @@ class AppSettings(BaseSettings):
         mode="before",
     )
     @classmethod
-    def _parse_list(cls, v: Any, info: ValidationInfo) -> List[str]:
+    def _parse_list(cls, v: Any, info: ValidationInfo) -> list[str]:
         ordered_fields = {
             "REMOTE_SERVER_FLAGS",
             "REMOTE_SERVER_SSH_TARGETS",
@@ -367,7 +367,7 @@ class AppSettings(BaseSettings):
 
     @field_validator("REMOTE_SERVER_REMNAWAVE_UUIDS", mode="before")
     @classmethod
-    def _parse_uuid_list_keep_empty(cls, v: Any) -> List[str]:
+    def _parse_uuid_list_keep_empty(cls, v: Any) -> list[str]:
         if v is None:
             return []
         if isinstance(v, list):
@@ -436,13 +436,13 @@ class AppSettings(BaseSettings):
 
     @field_validator("REMOTE_SERVER_DOMAINS", "REMOTE_SERVER_MONITOR_CONTAINERS_BY_SERVER", mode="before")
     @classmethod
-    def _parse_domain_groups(cls, v: Any) -> List[List[str]]:
+    def _parse_domain_groups(cls, v: Any) -> list[list[str]]:
         return split_env_groups(v)
 
     @field_validator("MONITOR_CONTAINERS", "REMOTE_SERVER_MONITOR_CONTAINERS", mode="after")
     @classmethod
-    def _filter_container_names(cls, v: List[str]) -> List[str]:
-        valid: List[str] = []
+    def _filter_container_names(cls, v: list[str]) -> list[str]:
+        valid: list[str] = []
         for name in v:
             nm = (name or "").strip()
             if not nm:
@@ -455,10 +455,10 @@ class AppSettings(BaseSettings):
 
     @field_validator("REMOTE_SERVER_MONITOR_CONTAINERS_BY_SERVER", mode="after")
     @classmethod
-    def _filter_container_groups(cls, v: List[List[str]]) -> List[List[str]]:
-        out: List[List[str]] = []
+    def _filter_container_groups(cls, v: list[list[str]]) -> list[list[str]]:
+        out: list[list[str]] = []
         for group in v:
-            valid: List[str] = []
+            valid: list[str] = []
             for name in group:
                 nm = (name or "").strip()
                 if not nm:
@@ -548,7 +548,7 @@ class AppSettings(BaseSettings):
 
     @field_validator("REMOTE_SERVER_SSH_TARGETS", mode="after")
     @classmethod
-    def _normalize_ssh_targets(cls, v: List[str]) -> List[str]:
+    def _normalize_ssh_targets(cls, v: list[str]) -> list[str]:
         return [_validate_ssh_target(x) for x in v if str(x or "").strip()]
 
     @model_validator(mode="after")
@@ -612,8 +612,8 @@ class ServerTarget:
     flag: str
     mode: Literal["local", "ssh"]
     expected_a_ip: str
-    check_a_domains: List[str]
-    monitor_containers: List[str]
+    check_a_domains: list[str]
+    monitor_containers: list[str]
     fail2ban_log_path: str
     ssh_target: str = ""
     remnawave_uuid: str = ""
@@ -708,9 +708,9 @@ SUBPROC_MEDIUM_TIMEOUT = SETTINGS.SUBPROC_MEDIUM_TIMEOUT
 SSH_STRICT_HOST_KEY_CHECKING = (SETTINGS.SSH_STRICT_HOST_KEY_CHECKING or "").strip() or "accept-new"
 SSH_KNOWN_HOSTS_FILE = (SETTINGS.SSH_KNOWN_HOSTS_FILE or "").strip()
 
-def _build_servers() -> Dict[str, ServerTarget]:
+def _build_servers() -> dict[str, ServerTarget]:
     local_flag = LOCAL_SERVER_FLAG or LOCAL_SERVER_CODE.upper()
-    servers: Dict[str, ServerTarget] = {}
+    servers: dict[str, ServerTarget] = {}
     servers[LOCAL_SERVER_CODE] = ServerTarget(
         key=LOCAL_SERVER_CODE,
         label=LOCAL_SERVER_LABEL or country_label(local_flag, "Main"),
@@ -741,8 +741,8 @@ def _build_servers() -> Dict[str, ServerTarget]:
     domain_groups = list(REMOTE_SERVER_DOMAINS) or old_domains
     container_groups = list(REMOTE_SERVER_MONITOR_CONTAINERS_BY_SERVER)
 
-    flag_counts: Dict[str, int] = {}
-    key_counts: Dict[str, int] = {}
+    flag_counts: dict[str, int] = {}
+    key_counts: dict[str, int] = {}
     for idx, target in enumerate(targets):
         flag_code = _nth_or_default(flags, idx, "").strip().upper()
         fallback_code = flag_code.lower() if flag_code else f"srv{idx + 1}"
@@ -780,4 +780,4 @@ def _build_servers() -> Dict[str, ServerTarget]:
     return servers
 
 
-SERVERS: Dict[str, ServerTarget] = _build_servers()
+SERVERS: dict[str, ServerTarget] = _build_servers()

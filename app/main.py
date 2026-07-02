@@ -1,7 +1,9 @@
+import contextlib
 import sys
 import time
 import warnings
-from datetime import datetime, time as dtime
+from datetime import datetime
+from datetime import time as dtime
 from pathlib import Path
 
 if __package__ in (None, ""):
@@ -10,7 +12,6 @@ if __package__ in (None, ""):
         sys.path.insert(0, str(_PROJECT_ROOT))
 
 from telegram.constants import ParseMode
-from telegram.warnings import PTBUserWarning
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -21,6 +22,7 @@ from telegram.ext import (
     PicklePersistence,
     filters,
 )
+from telegram.warnings import PTBUserWarning
 
 from app.config import (
     AUTH_PRUNE_INTERVAL_SEC,
@@ -39,7 +41,15 @@ from app.config import (
     logger,
 )
 from app.handlers.auth import auth_prune_task, cmd_auth, cmd_help, cmd_logout, cmd_start
-from app.handlers.common import authorized_ids, cancel, cancel_to_menu_cb, html_escape, is_authorized, is_enabled, menu_home_cb
+from app.handlers.common import (
+    authorized_ids,
+    cancel,
+    cancel_to_menu_cb,
+    html_escape,
+    is_authorized,
+    is_enabled,
+    menu_home_cb,
+)
 from app.handlers.docker import docker_back_to_status, docker_inspect, docker_list_menu, docker_logs, docker_show
 from app.handlers.fail2ban import (
     f2b_back_cb,
@@ -50,12 +60,12 @@ from app.handlers.fail2ban import (
     fail2ban_menu,
 )
 from app.handlers.maint import (
-    STATE_MAINT_MODE,
-    STATE_MAINT_SCOPE,
     STATE_MAINT_DURATION,
     STATE_MAINT_EXTEND,
-    STATE_MAINT_SCHEDULE_RANGE,
+    STATE_MAINT_MODE,
     STATE_MAINT_SCHEDULE_DATE,
+    STATE_MAINT_SCHEDULE_RANGE,
+    STATE_MAINT_SCOPE,
     STATE_MAINT_URGENCY,
     maint_cal_day,
     maint_cal_nav,
@@ -68,21 +78,20 @@ from app.handlers.maint import (
     maint_extend_duration,
     maint_mode,
     maint_restart_notify,
+    maint_sched_cancel_back_cb,
+    maint_sched_cancel_cb,
+    maint_sched_cancel_confirm_cb,
     maint_schedule_range,
     maint_schedule_tick,
-    maint_sched_cancel_cb,
-    maint_sched_cancel_back_cb,
-    maint_sched_cancel_confirm_cb,
     maint_scope,
     maint_start,
     maint_urgency,
 )
-from app.handlers.subscription import subscription_show
 from app.handlers.status import (
     cmd_health,
     daily_node_status_refresh,
-    dns_daily_refresh,
     dns_back_cb,
+    dns_daily_refresh,
     status_dns_refresh_cb,
     status_pick_cb,
     status_show_cb,
@@ -92,6 +101,7 @@ from app.handlers.status import (
     status_ssh_refresh_confirm_cb,
     status_ufw_cb,
 )
+from app.handlers.subscription import subscription_show
 from app.handlers.tickets import (
     TICKET_ADMIN_REPLY_TEXT,
     TICKET_CONFIRM,
@@ -119,8 +129,8 @@ from app.handlers.tickets import (
 )
 from app.handlers.users import (
     ADMIN_ALL_MENU,
-    ADMIN_ALL_MSG_TEXT,
     ADMIN_ALL_MSG_CONFIRM,
+    ADMIN_ALL_MSG_TEXT,
     ADMIN_PICK,
     ADMIN_USER_CFG_TEXT,
     ADMIN_USER_MENU,
@@ -193,10 +203,8 @@ async def on_error(update: object, context) -> None:
             f"<code>{html_escape(str(context.error))[:500]}</code>"
         )
         for aid in admins:
-            try:
+            with contextlib.suppress(Exception):
                 await context.bot.send_message(chat_id=aid, text=err_text, parse_mode=ParseMode.HTML)
-            except Exception:
-                pass
     except Exception:
         logger.exception("Не удалось уведомить админов об ошибке")
 

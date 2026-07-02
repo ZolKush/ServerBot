@@ -2,10 +2,11 @@ import asyncio
 import json
 import os
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any
 
 import aiofiles
 
@@ -27,7 +28,7 @@ F2B_IP_RE = re.compile(
 )
 
 
-def _f2b_parse_time(ts: str) -> Optional[datetime]:
+def _f2b_parse_time(ts: str) -> datetime | None:
     ts = (ts or "").strip()
     if not ts:
         return None
@@ -40,12 +41,12 @@ def _f2b_parse_time(ts: str) -> Optional[datetime]:
     return None
 
 
-async def load_json_file(path: str) -> Dict[str, Any]:
+async def load_json_file(path: str) -> dict[str, Any]:
     p = Path(path)
     if not p.exists():
         return {}
     try:
-        async with aiofiles.open(p, "r", encoding="utf-8") as f:
+        async with aiofiles.open(p, encoding="utf-8") as f:
             raw = await f.read()
         data = json.loads(raw)
         return data if isinstance(data, dict) else {}
@@ -53,7 +54,7 @@ async def load_json_file(path: str) -> Dict[str, Any]:
         return {}
 
 
-async def save_json_file(path: str, data: Dict[str, Any]) -> None:
+async def save_json_file(path: str, data: dict[str, Any]) -> None:
     try:
         p = Path(path)
         await asyncio.to_thread(p.parent.mkdir, parents=True, exist_ok=True)
@@ -101,11 +102,11 @@ async def tail_text_file_with_sudo_async(path: str, n_lines: int, max_bytes: int
             return out
         err_text = (err or out or "").strip().lower()
         if "no such file" in err_text or "cannot open" in err_text or "cannot access" in err_text:
-            raise FileNotFoundError(path)
-        raise PermissionError(path)
+            raise FileNotFoundError(path) from None
+        raise PermissionError(path) from None
 
 
-async def fail2ban_stat_with_sudo_async(path: str) -> Optional[Tuple[int, datetime]]:
+async def fail2ban_stat_with_sudo_async(path: str) -> tuple[int, datetime] | None:
     p = Path(path)
     try:
         st = await asyncio.to_thread(p.stat)
@@ -139,12 +140,12 @@ class Fail2banEvent:
     ts: datetime
     jail: str
     action: str
-    ip: Optional[str]
+    ip: str | None
     raw: str
 
 
-def parse_fail2ban_events(lines_in: Iterable[str]) -> List[Fail2banEvent]:
-    out: List[Fail2banEvent] = []
+def parse_fail2ban_events(lines_in: Iterable[str]) -> list[Fail2banEvent]:
+    out: list[Fail2banEvent] = []
     for raw in lines_in:
         m = F2B_LINE_RE.match(raw or "")
         if not m:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
-from typing import Any, Dict, Optional, Tuple
+from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
 from telegram.constants import ParseMode
@@ -102,11 +102,11 @@ def _append_ticket_message(
     ticket: Ticket,
     *,
     sender_role: str,
-    sender_id: Optional[int],
+    sender_id: int | None,
     sender_name: str,
     text: str,
     kind: str,
-    attachment: Optional[Attachment] = None,
+    attachment: Attachment | None = None,
 ) -> Ticket:
     updated: Ticket = dict(ticket)  # type: ignore[assignment]
     messages = _ticket_messages(updated)
@@ -128,11 +128,11 @@ def _append_ticket_message(
     return updated
 
 
-def _extract_message_payload(msg: Optional[Message]) -> Tuple[str, Optional[Dict[str, Any]]]:
+def _extract_message_payload(msg: Message | None) -> tuple[str, dict[str, Any] | None]:
     if msg is None:
         return "", None
     text = (msg.text or msg.caption or "").strip()
-    attachment: Optional[Dict[str, Any]] = None
+    attachment: dict[str, Any] | None = None
     if msg.photo:
         photo = msg.photo[-1]
         attachment = {
@@ -152,7 +152,7 @@ def _extract_message_payload(msg: Optional[Message]) -> Tuple[str, Optional[Dict
     return text, attachment
 
 
-def _attachment_label(attachment: Dict[str, Any]) -> str:
+def _attachment_label(attachment: dict[str, Any]) -> str:
     a_type = str(attachment.get("type") or "")
     if a_type == "photo":
         return "📎 Фото"
@@ -165,7 +165,7 @@ def _attachment_label(attachment: Dict[str, Any]) -> str:
 async def _forward_ticket_attachment(
     context: ContextTypes.DEFAULT_TYPE,
     chat_id: int,
-    attachment: Optional[Dict[str, Any]],
+    attachment: dict[str, Any] | None,
 ) -> None:
     if not attachment:
         return
@@ -182,7 +182,7 @@ async def _forward_ticket_attachment(
         logger.warning("Не удалось переслать вложение тикета chat_id=%s: %s", chat_id, e)
 
 
-def _format_ticket_history(ticket: Dict[str, Any], *, limit: int = MAX_TICKET_HISTORY_CHARS) -> str:
+def _format_ticket_history(ticket: dict[str, Any], *, limit: int = MAX_TICKET_HISTORY_CHARS) -> str:
     messages = _ticket_messages(ticket)[-MAX_TICKET_HISTORY_ITEMS:]
     if not messages:
         return "История пуста."
@@ -213,7 +213,7 @@ def _format_ticket_history(ticket: Dict[str, Any], *, limit: int = MAX_TICKET_HI
     return out
 
 
-def _ticket_user_kb(ticket: Dict[str, Any], uid: int) -> InlineKeyboardMarkup:
+def _ticket_user_kb(ticket: dict[str, Any], uid: int) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     ticket_id = int(ticket.get("id", 0) or 0)
     if ticket_id and _ticket_can_user_reply(ticket, uid):
@@ -222,7 +222,7 @@ def _ticket_user_kb(ticket: Dict[str, Any], uid: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
-def _ticket_admin_kb(ticket: Dict[str, Any], admin_uid: int) -> InlineKeyboardMarkup:
+def _ticket_admin_kb(ticket: dict[str, Any], admin_uid: int) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     ticket_id = int(ticket.get("id", 0) or 0)
     status = str(ticket.get("status", "open"))
@@ -239,19 +239,19 @@ def _ticket_admin_kb(ticket: Dict[str, Any], admin_uid: int) -> InlineKeyboardMa
     return InlineKeyboardMarkup(rows)
 
 
-def _ticket_status_emoji(ticket: Dict[str, Any]) -> str:
+def _ticket_status_emoji(ticket: dict[str, Any]) -> str:
     if str(ticket.get("status", "open")) == "closed":
         return "✅"
     return "🟡" if int(ticket.get("assignee_id", 0) or 0) else "🔴"
 
 
-def _ticket_header(ticket: Dict[str, Any], *, title_prefix: str = "Тикет") -> str:
+def _ticket_header(ticket: dict[str, Any], *, title_prefix: str = "Тикет") -> str:
     ticket_no = f"#{ticket.get('id', '-')}"
     status_label = _ticket_status_label(ticket)
     return f"🎫 <b>{html_escape(title_prefix)} {html_escape(ticket_no)}</b> · {_ticket_status_emoji(ticket)} {html_escape(status_label)}"
 
 
-def _format_ticket_for_admin(ticket: Dict[str, Any], admin_uid: int, *, event_line: Optional[str] = None) -> str:
+def _format_ticket_for_admin(ticket: dict[str, Any], admin_uid: int, *, event_line: str | None = None) -> str:
     assignee_name = str(ticket.get("assignee_name") or "-")
     user_name = str(ticket.get("user_name") or "пользователь")
     user_username = str(ticket.get("user_username") or "").strip()
@@ -279,7 +279,7 @@ def _format_ticket_for_admin(ticket: Dict[str, Any], admin_uid: int, *, event_li
     return "\n".join(lines)
 
 
-def _format_ticket_for_user(ticket: Dict[str, Any], *, event_line: Optional[str] = None) -> str:
+def _format_ticket_for_user(ticket: dict[str, Any], *, event_line: str | None = None) -> str:
     assignee_name = str(ticket.get("assignee_name") or "ещё не назначен")
     subject = str(ticket.get("subject") or "-")
     lines = [
@@ -302,14 +302,14 @@ def _build_ticket_record(
     *,
     user_id: int,
     user_name: str,
-    user_username: Optional[str],
+    user_username: str | None,
     subject: str,
     urgency: str,
     text: str,
-    attachment: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+    attachment: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     now = _now_iso()
-    initial_message: Dict[str, Any] = {
+    initial_message: dict[str, Any] = {
         "ts": now,
         "sender_role": "user",
         "sender_id": user_id,
@@ -339,7 +339,7 @@ def _build_ticket_record(
     }
 
 
-def _last_attachment(ticket: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def _last_attachment(ticket: dict[str, Any]) -> dict[str, Any] | None:
     messages = _ticket_messages(ticket)
     if not messages:
         return None
@@ -350,10 +350,10 @@ def _last_attachment(ticket: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 async def _notify_admins_full(
     context: ContextTypes.DEFAULT_TYPE,
-    ticket: Dict[str, Any],
+    ticket: dict[str, Any],
     *,
-    exclude: Optional[set[int]] = None,
-    event_line: Optional[str] = None,
+    exclude: set[int] | None = None,
+    event_line: str | None = None,
 ) -> None:
     """Полное уведомление всем (или всем кроме exclude): текст тикета + кнопки + вложение."""
     exclude = exclude or set()
@@ -389,7 +389,7 @@ async def _notify_admins_brief(
     ticket_id: int,
     text: str,
     *,
-    exclude: Optional[set[int]] = None,
+    exclude: set[int] | None = None,
 ) -> None:
     """Краткое текстовое уведомление без деталей тикета и кнопок."""
     exclude = exclude or set()
@@ -412,9 +412,9 @@ async def _notify_admins_brief(
 
 async def _notify_assignee_full(
     context: ContextTypes.DEFAULT_TYPE,
-    ticket: Dict[str, Any],
+    ticket: dict[str, Any],
     *,
-    event_line: Optional[str] = None,
+    event_line: str | None = None,
 ) -> None:
     """Полное уведомление только исполнителю тикета."""
     assignee_id = int(ticket.get("assignee_id", 0) or 0)
@@ -440,7 +440,7 @@ async def _notify_assignee_full(
         )
 
 
-async def _notify_user(context: ContextTypes.DEFAULT_TYPE, ticket: Dict[str, Any], *, event_line: Optional[str] = None) -> None:
+async def _notify_user(context: ContextTypes.DEFAULT_TYPE, ticket: dict[str, Any], *, event_line: str | None = None) -> None:
     uid = int(ticket.get("user_id", 0) or 0)
     if not uid:
         return
@@ -458,8 +458,8 @@ async def _notify_user(context: ContextTypes.DEFAULT_TYPE, ticket: Dict[str, Any
         logger.warning("Не удалось отправить ticket update пользователю %s ticket_id=%s: %s", uid, ticket.get("id"), e)
 
 
-async def _ticket_update(ticket_id: int, mutator) -> Dict[str, Any]:
-    flow_state: Dict[str, str] = {}
+async def _ticket_update(ticket_id: int, mutator) -> dict[str, Any]:
+    flow_state: dict[str, str] = {}
 
     def _apply(cfg):
         tickets = dict(getattr(cfg, "tickets", {}) or {})
@@ -482,7 +482,7 @@ async def _ticket_update(ticket_id: int, mutator) -> Dict[str, Any]:
         raise TicketFlowError(flow_state.get("error", "ticket_error")) from None
 
 
-def _parse_ticket_callback_id(data: Optional[str], action: str) -> int:
+def _parse_ticket_callback_id(data: str | None, action: str) -> int:
     parts = (data or "").split(":")
     if len(parts) != 3 or parts[0] != "ticket" or parts[1] != action or not parts[2].isdigit():
         return 0
@@ -743,7 +743,7 @@ async def ticket_take_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     admin_name = display_name(update)
 
     try:
-        def _assign(ticket: Dict[str, Any]) -> Dict[str, Any]:
+        def _assign(ticket: dict[str, Any]) -> dict[str, Any]:
             if str(ticket.get("status", "open")) == "closed":
                 raise TicketFlowError("ticket_closed")
             assignee_id = int(ticket.get("assignee_id", 0) or 0)
@@ -878,7 +878,7 @@ async def ticket_admin_reply_text(update: Update, context: ContextTypes.DEFAULT_
 
     admin_name = display_name(update)
     try:
-        def _reply(ticket: Dict[str, Any]) -> Dict[str, Any]:
+        def _reply(ticket: dict[str, Any]) -> dict[str, Any]:
             if str(ticket.get("status", "open")) == "closed":
                 raise TicketFlowError("ticket_closed")
             if not _ticket_is_assignee(ticket, admin_id):
@@ -943,7 +943,7 @@ async def ticket_user_reply_text(update: Update, context: ContextTypes.DEFAULT_T
 
     user_name = display_name(update)
     try:
-        def _reply(ticket: Dict[str, Any]) -> Dict[str, Any]:
+        def _reply(ticket: dict[str, Any]) -> dict[str, Any]:
             if not _ticket_can_user_reply(ticket, uid):
                 raise TicketFlowError("user_reply_not_allowed")
             updated = _append_ticket_message(
@@ -996,7 +996,7 @@ async def ticket_close_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     admin_name = display_name(update)
     try:
-        def _close(ticket: Dict[str, Any]) -> Dict[str, Any]:
+        def _close(ticket: dict[str, Any]) -> dict[str, Any]:
             if str(ticket.get("status", "open")) == "closed":
                 raise TicketFlowError("ticket_closed")
             if not _ticket_is_assignee(ticket, admin_id):
@@ -1048,9 +1048,9 @@ async def _show_ticket_dashboard(update: Update, context: ContextTypes.DEFAULT_T
         return ConversationHandler.END
 
     all_tickets = list(get_all_tickets_snapshot().values())
-    unpicked: list[Dict[str, Any]] = []
-    mine: list[Dict[str, Any]] = []
-    others: list[Dict[str, Any]] = []
+    unpicked: list[dict[str, Any]] = []
+    mine: list[dict[str, Any]] = []
+    others: list[dict[str, Any]] = []
 
     for t in sorted(all_tickets, key=lambda x: int(x.get("id", 0))):
         status = str(t.get("status", "open"))
@@ -1270,7 +1270,7 @@ async def ticket_transfer_init_cb(update: Update, context: ContextTypes.DEFAULT_
 
 async def _notify_new_assignee_on_transfer(
     context: ContextTypes.DEFAULT_TYPE,
-    ticket: Dict[str, Any],
+    ticket: dict[str, Any],
     new_admin_id: int,
 ) -> None:
     try:
@@ -1320,7 +1320,7 @@ async def ticket_transfer_to_cb(update: Update, context: ContextTypes.DEFAULT_TY
     admin_name = display_name(update)
 
     try:
-        def _transfer(ticket: Dict[str, Any]) -> Dict[str, Any]:
+        def _transfer(ticket: dict[str, Any]) -> dict[str, Any]:
             if str(ticket.get("status", "open")) == "closed":
                 raise TicketFlowError("ticket_closed")
             if not _ticket_is_assignee(ticket, admin_id):

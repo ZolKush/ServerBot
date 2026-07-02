@@ -1,7 +1,7 @@
 import asyncio
 import re
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple, cast
+from typing import cast
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
@@ -12,8 +12,8 @@ from ..config import (
     DNS_RESOLVERS,
     SERVER_KEY_PATTERN,
     SERVERS,
-    ServerTarget,
     TZ,
+    ServerTarget,
     logger,
 )
 from ..services.docker_service import docker_containers
@@ -40,7 +40,7 @@ from .status_format import format_status_message, format_ufw_message
 from .status_models import DockerContainerView, StatusSnapshot
 
 
-def _server_keys() -> List[str]:
+def _server_keys() -> list[str]:
     return list(SERVERS.keys())
 
 
@@ -49,17 +49,17 @@ def _first_server_key() -> str:
     return keys[0] if keys else "local"
 
 
-def _default_server_target() -> Optional[ServerTarget]:
+def _default_server_target() -> ServerTarget | None:
     return SERVERS.get(_first_server_key())
 
 
-def get_server_target(server_key: Optional[str]) -> Optional[ServerTarget]:
+def get_server_target(server_key: str | None) -> ServerTarget | None:
     key = (server_key or "").strip().lower()
     return SERVERS.get(key) if key else None
 
 
 def _status_pick_kb() -> InlineKeyboardMarkup:
-    rows: List[List[InlineKeyboardButton]] = []
+    rows: list[list[InlineKeyboardButton]] = []
     for key in _server_keys():
         srv = SERVERS[key]
         rows.append([InlineKeyboardButton(f"{_server_flag(srv)} {srv.label}", callback_data=f"status:show:{srv.key}")])
@@ -86,7 +86,7 @@ def _status_actions_kb(
     show_ssh_diag: bool = False,
     show_ssh_refresh: bool = False,
 ) -> InlineKeyboardMarkup:
-    rows: List[List[InlineKeyboardButton]] = []
+    rows: list[list[InlineKeyboardButton]] = []
     rows.append([InlineKeyboardButton("🔄 Обновить", callback_data=f"status:show:{server_key}")])
     rows.append([InlineKeyboardButton("🌐 Обновить DNS статус", callback_data=f"status:dnsrefresh:{server_key}")])
     if admin_mode:
@@ -115,17 +115,17 @@ def _confirm_kb(server_key: str, action: str) -> InlineKeyboardMarkup:
     )
 
 
-def _resolve_server_key_from_callback(data: str, prefix: str) -> Optional[str]:
+def _resolve_server_key_from_callback(data: str, prefix: str) -> str | None:
     m = re.fullmatch(prefix + rf":({SERVER_KEY_PATTERN})", data or "")
     return m.group(1) if m else None
 
 
-def _parse_status_ufw_callback(data: str) -> Optional[str]:
+def _parse_status_ufw_callback(data: str) -> str | None:
     m = re.fullmatch(rf"status:ufw:({SERVER_KEY_PATTERN})", data or "")
     return m.group(1) if m else None
 
 
-def _parse_status_dnsrefresh_callback(data: str) -> Optional[str]:
+def _parse_status_dnsrefresh_callback(data: str) -> str | None:
     m = re.fullmatch(rf"status:dnsrefresh:({SERVER_KEY_PATTERN})", data or "")
     return m.group(1) if m else None
 
@@ -272,7 +272,7 @@ async def _build_status_payload_local(admin_mode: bool, server: ServerTarget):
     if isinstance(ufw_data, Exception):
         ufw_data = ("н/д", [], [], []) if admin_mode else "н/д"
     if admin_mode:
-        ufw_s, allow, deny, reject = cast(Tuple[str, List[str], List[str], List[str]], ufw_data)
+        ufw_s, allow, deny, reject = cast(tuple[str, list[str], list[str], list[str]], ufw_data)
     else:
         ufw_s = str(ufw_data)
         allow, deny, reject = [], [], []
@@ -295,7 +295,7 @@ async def _build_status_payload_remote(admin_mode: bool, server: ServerTarget):
         )
 
 
-async def _build_dns_status_payload_live(server: ServerTarget) -> Dict[str, object]:
+async def _build_dns_status_payload_live(server: ServerTarget) -> dict[str, object]:
     domains = list(server.check_a_domains)
     if not domains:
         return {
@@ -309,7 +309,7 @@ async def _build_dns_status_payload_live(server: ServerTarget) -> Dict[str, obje
         }
     expected_ip = (server.expected_a_ip or "").strip()
     ok = bad = unknown = 0
-    details: List[str] = []
+    details: list[str] = []
     custom_resolvers_supported = dns_supports_custom_resolver()
     if custom_resolvers_supported and DNS_RESOLVERS:
         for dom in domains:
@@ -318,7 +318,7 @@ async def _build_dns_status_payload_live(server: ServerTarget) -> Dict[str, obje
                 return_exceptions=True,
             )
             ip_lists = [r for r in results if isinstance(r, list)]
-            merged: List[str] = []
+            merged: list[str] = []
             for ips in ip_lists:
                 for ip in ips:
                     if ip not in merged:
@@ -362,7 +362,7 @@ async def _build_dns_status_payload_live(server: ServerTarget) -> Dict[str, obje
     }
 
 
-def _dns_payload_from_cache_or_empty(server: ServerTarget) -> Dict[str, object]:
+def _dns_payload_from_cache_or_empty(server: ServerTarget) -> dict[str, object]:
     raw = get_dns_status_cache(server.key) or {}
     details = raw.get("details", [])
     if not isinstance(details, list):
@@ -407,7 +407,7 @@ def _format_iso_short(value: object) -> str:
     return dt.strftime("%d.%m %H:%M")
 
 
-def _daily_cache_for(server: ServerTarget) -> Tuple[str, str, str, List[str], List[str], List[str], str, str]:
+def _daily_cache_for(server: ServerTarget) -> tuple[str, str, str, list[str], list[str], list[str], str, str]:
     """
     Возвращает (disk_raw, ufw_state, ufw_updated_text, allow, deny, reject, disk_updated_text, raw_updated_iso).
     Если кэша нет — возвращаем 'н/д' и пустые списки.
@@ -422,7 +422,7 @@ def _daily_cache_for(server: ServerTarget) -> Tuple[str, str, str, List[str], Li
     return disk, ufw_state, updated_text, allow, deny, reject, updated_text, str(raw.get("updated_at") or "")
 
 
-async def _ssh_collect_disk_ufw(server: ServerTarget, *, admin_mode: bool) -> Dict[str, object]:
+async def _ssh_collect_disk_ufw(server: ServerTarget, *, admin_mode: bool) -> dict[str, object]:
     """
     Собирает disk/UFW с конкретной ноды по SSH. Используется и в дневном джобе,
     и в админской ручной кнопке.
@@ -467,7 +467,7 @@ async def _ssh_collect_disk_ufw(server: ServerTarget, *, admin_mode: bool) -> Di
         disk = "н/д"
     if isinstance(ufw_data, Exception):
         ufw_data = ("н/д", [], [], [])
-    ufw_s, allow, deny, reject = cast(Tuple[str, List[str], List[str], List[str]], ufw_data)
+    ufw_s, allow, deny, reject = cast(tuple[str, list[str], list[str], list[str]], ufw_data)
     return {
         "ok": True,
         "disk_raw": str(disk),
@@ -485,7 +485,7 @@ async def _build_status_snapshot_mixed(
 ) -> StatusSnapshot:
     admin_mode = is_admin(update)
     snap = await get_metrics_snapshot()
-    node: Optional[NodeMetrics] = snap.get(server.remnawave_uuid)
+    node: NodeMetrics | None = snap.get(server.remnawave_uuid)
 
     dns_payload = _dns_payload_from_cache_or_empty(server)
     dns_ok = int(dns_payload.get("ok", 0) or 0)
@@ -623,7 +623,7 @@ async def _build_status_snapshot(update: Update, server: ServerTarget) -> Status
     )
 
 
-async def _build_status_snapshot_and_server(update: Update, server_key: Optional[str]) -> Tuple[Optional[StatusSnapshot], Optional[ServerTarget]]:
+async def _build_status_snapshot_and_server(update: Update, server_key: str | None) -> tuple[StatusSnapshot | None, ServerTarget | None]:
     server = get_server_target(server_key) if server_key else _default_server_target()
     if not server:
         return None, None
@@ -650,8 +650,8 @@ async def dns_daily_refresh(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def build_status_message(
     update: Update,
-    server_key: Optional[str] = None,
-) -> Tuple[str, Optional[InlineKeyboardMarkup]]:
+    server_key: str | None = None,
+) -> tuple[str, InlineKeyboardMarkup | None]:
     server = get_server_target(server_key) if server_key else _default_server_target()
     if not server:
         if not SERVERS:
@@ -786,8 +786,8 @@ async def status_ssh_diag_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=_confirm_kb(server.key, "sshdiag"))
 
 
-def _format_ssh_diag_report(server: ServerTarget, payload: Dict[str, object]) -> str:
-    lines: List[str] = []
+def _format_ssh_diag_report(server: ServerTarget, payload: dict[str, object]) -> str:
+    lines: list[str] = []
     lines.append(f"<b>SSH-диагностика — {html_escape(server.label)}</b>")
     lines.append(f"⏰ Время: <code>{html_escape(now_str())}</code>")
     if not payload.get("ok"):
@@ -804,7 +804,7 @@ def _format_ssh_diag_report(server: ServerTarget, payload: Dict[str, object]) ->
     lines.append(f"🧠 RAM: <b>{html_escape(mem)}</b>")
     lines.append(f"💾 Disk: <b>{html_escape(disk)}</b>")
     lines.append(f"🛡️ UFW: <b>{html_escape(ufw_s)}</b>")
-    cont_items: List[Tuple[str, bool, str]] = []
+    cont_items: list[tuple[str, bool, str]] = []
     if isinstance(cont_raw, list):
         for item in cont_raw:
             if isinstance(item, (list, tuple)) and len(item) >= 3:
@@ -822,7 +822,7 @@ def _format_ssh_diag_report(server: ServerTarget, payload: Dict[str, object]) ->
     return "\n".join(lines)
 
 
-async def _ssh_full_diag(server: ServerTarget) -> Dict[str, object]:
+async def _ssh_full_diag(server: ServerTarget) -> dict[str, object]:
     if server.mode == "ssh":
         try:
             up, mem, disk, cont, ufw_s, allow, deny, reject = await remote_status_bundle(

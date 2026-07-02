@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import re
-from typing import List, Optional
 
 from telegram import InlineKeyboardButton
 
@@ -35,12 +34,12 @@ URGENCY_LABELS = {
 }
 
 
-def urgency_label(code: Optional[str]) -> str:
+def urgency_label(code: str | None) -> str:
     key = str(code or "").strip().lower()
     return URGENCY_LABELS.get(key, str(code or "-"))
 
 
-def urgency_emoji(code: Optional[str]) -> str:
+def urgency_emoji(code: str | None) -> str:
     """Только эмодзи срочности — для компактных кнопок."""
     key = str(code or "").strip().lower()
     label = URGENCY_LABELS.get(key)
@@ -61,7 +60,7 @@ def progress_bar(percent: float, width: int = 10) -> str:
 _METRIC_LABEL_WIDTH = 5
 
 
-def metric_line(label: str, percent: Optional[float], detail: str = "") -> str:
+def metric_line(label: str, percent: float | None, detail: str = "") -> str:
     """Строка метрики с баром: <code>RAM   ▰▰▰▰▰▱▱▱▱▱   52%</code>  (2.1/4.0 GB).
 
     Бар и подпись внутри <code> — моноширинный шрифт выравнивает колонки;
@@ -81,7 +80,7 @@ def metric_line(label: str, percent: Optional[float], detail: str = "") -> str:
 _PERCENT_RE = re.compile(r"(\d{1,3})\s*%")
 
 
-def extract_percent(text: Optional[str]) -> Optional[int]:
+def extract_percent(text: str | None) -> int | None:
     m = _PERCENT_RE.search(str(text or ""))
     if not m:
         return None
@@ -89,7 +88,7 @@ def extract_percent(text: Optional[str]) -> Optional[int]:
     return value if 0 <= value <= 100 else None
 
 
-def used_total_percent(used: float, total: float) -> Optional[int]:
+def used_total_percent(used: float, total: float) -> int | None:
     try:
         used_f = float(used)
         total_f = float(total)
@@ -123,9 +122,9 @@ def btn_home() -> InlineKeyboardButton:
     return InlineKeyboardButton("🏠 Меню", callback_data="menu:home")
 
 
-def pager_row(cb_prefix: str, page: int, total_pages: int) -> List[InlineKeyboardButton]:
+def pager_row(cb_prefix: str, page: int, total_pages: int) -> list[InlineKeyboardButton]:
     """Навигация по страницам: ◀ / N/M / ▶ (callback = f"{cb_prefix}{page}")."""
-    row: List[InlineKeyboardButton] = []
+    row: list[InlineKeyboardButton] = []
     if page > 0:
         row.append(InlineKeyboardButton("◀", callback_data=f"{cb_prefix}{page - 1}"))
     row.append(InlineKeyboardButton(f"{page + 1}/{total_pages}", callback_data=f"{cb_prefix}{page}"))

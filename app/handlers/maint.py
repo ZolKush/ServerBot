@@ -1,6 +1,6 @@
 import re
 from datetime import date, datetime, timedelta
-from typing import Any, Optional
+from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
@@ -23,6 +23,7 @@ from .maint_helpers import (
     _build_maint_record,
     _build_scheduled_maint_record,
     _due_thresholds,
+    _hhmm_to_minutes,
     _initial_notified_thresholds,
     _maint_active_reminder_text,
     _maint_control_kb,
@@ -39,15 +40,14 @@ from .maint_helpers import (
     _scheduled_panel_text,
     _scheduled_to_active_record,
     _scope_label,
-    format_scheduled_maint,
     format_maint,
+    format_scheduled_maint,
     maint_mode_kb,
     parse_clock_range,
     parse_hhmm,
     schedule_calendar_kb,
     scope_kb,
     urgency_kb,
-    _hhmm_to_minutes,
 )
 
 (
@@ -78,7 +78,7 @@ def _clear_maint_ctx(context: ContextTypes.DEFAULT_TYPE) -> None:
         context.user_data.pop(key, None)
 
 
-async def _take_active_maintenance(maint_id: str) -> Optional[dict[str, Any]]:
+async def _take_active_maintenance(maint_id: str) -> dict[str, Any] | None:
     def _take(cfg):
         current = getattr(cfg, "maintenance", {})
         if not isinstance(current, dict) or not current.get("active"):
@@ -95,7 +95,7 @@ async def _take_active_maintenance(maint_id: str) -> Optional[dict[str, Any]]:
     return None
 
 
-async def _take_scheduled_maintenance(sched_id: str) -> Optional[dict[str, Any]]:
+async def _take_scheduled_maintenance(sched_id: str) -> dict[str, Any] | None:
     def _take(cfg):
         current = getattr(cfg, "scheduled_maintenance", {})
         if not isinstance(current, dict) or not current.get("id"):
@@ -135,7 +135,7 @@ def _maint_delivery_status(users_ok: int, users_fail: int, admins_ok: int, admin
     )
 
 
-def _maint_menu_text(scheduled: Optional[dict[str, Any]] = None) -> str:
+def _maint_menu_text(scheduled: dict[str, Any] | None = None) -> str:
     lines = [
         "<b>Техработы</b>",
         "",

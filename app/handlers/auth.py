@@ -1,7 +1,7 @@
-from datetime import datetime
+import contextlib
 import hmac
+from datetime import datetime
 from time import monotonic
-from typing import Optional
 
 from telegram import Update
 from telegram.constants import ParseMode
@@ -34,7 +34,7 @@ _AUTH_FAILS: dict[str, list[float]] = {}
 _AUTH_LOCKED_UNTIL: dict[str, float] = {}
 
 
-def _auth_prune(now: Optional[float] = None) -> None:
+def _auth_prune(now: float | None = None) -> None:
     now = monotonic() if now is None else now
     active_fails: dict[str, list[float]] = {}
     for key, attempts in _AUTH_FAILS.items():
@@ -97,10 +97,8 @@ async def _auth_delete_sensitive_message(update: Update) -> None:
     msg = update.effective_message
     if not msg:
         return
-    try:
+    with contextlib.suppress(Exception):
         await msg.delete()
-    except Exception:
-        pass
 
 
 @require_private
@@ -170,7 +168,7 @@ async def cmd_auth(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         # Сравниваем байты: compare_digest со str падает на non-ASCII вводе.
         passwd_b = passwd.encode("utf-8")
-        role: Optional[str] = None
+        role: str | None = None
         if ADMIN_PASSWORD and hmac.compare_digest(passwd_b, ADMIN_PASSWORD.encode("utf-8")):
             role = "admin"
         elif AUTH_PASSWORD and hmac.compare_digest(passwd_b, AUTH_PASSWORD.encode("utf-8")):

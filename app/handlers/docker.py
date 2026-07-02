@@ -1,5 +1,4 @@
 import re
-from typing import List, Optional
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
@@ -23,7 +22,7 @@ def _is_server_container_allowed(server_key: str, name: str) -> bool:
     return bool(is_valid_container_name(name) and name in srv.monitor_containers)
 
 
-def _filtered_containers(server_key: str) -> List[str]:
+def _filtered_containers(server_key: str) -> list[str]:
     srv = get_server_target(server_key)
     containers = srv.monitor_containers if srv else []
     return [nm for nm in containers if is_valid_container_name(nm)]
@@ -43,7 +42,7 @@ def _container_token(server_key: str, name: str) -> str:
         return name
 
 
-def _resolve_container_token(server_key: str, token: str) -> Optional[str]:
+def _resolve_container_token(server_key: str, token: str) -> str | None:
     """Принимает индексный токен (i0, i1, …) или легаси-имя из старых клавиатур."""
     if re.fullmatch(r"i\d{1,3}", token or ""):
         containers = _filtered_containers(server_key)
@@ -53,8 +52,8 @@ def _resolve_container_token(server_key: str, token: str) -> Optional[str]:
 
 
 def _docker_list_kb(server_key: str) -> InlineKeyboardMarkup:
-    rows: List[List[InlineKeyboardButton]] = []
-    row: List[InlineKeyboardButton] = []
+    rows: list[list[InlineKeyboardButton]] = []
+    row: list[InlineKeyboardButton] = []
     for idx, nm in enumerate(_filtered_containers(server_key)):
         row.append(InlineKeyboardButton(nm[:32], callback_data=f"docker:show:{server_key}:i{idx}"))
         if len(row) == 2:
@@ -84,7 +83,7 @@ def _docker_item_kb(server_key: str, name: str, tail: int = DOCKER_LOGS_TAIL_MIN
     )
 
 
-def _parse_server_and_name(data: str, action: str) -> Optional[tuple[str, str]]:
+def _parse_server_and_name(data: str, action: str) -> tuple[str, str] | None:
     m = re.fullmatch(rf"docker:{action}:({SERVER_KEY_PATTERN}):([a-zA-Z0-9_.\-]{{1,64}})", data or "")
     if not m:
         return None

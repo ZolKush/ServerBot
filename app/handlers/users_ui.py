@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Tuple
+from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -36,7 +36,7 @@ def users_list_title(filter_key: str) -> str:
     )
 
 
-def _filter_buttons(active_filter: str) -> List[List[InlineKeyboardButton]]:
+def _filter_buttons(active_filter: str) -> list[list[InlineKeyboardButton]]:
     def _btn(label: str, key: str) -> InlineKeyboardButton:
         suffix = " ✅" if active_filter == key else ""
         return InlineKeyboardButton(f"{label}{suffix}", callback_data=f"users:filter:{key}")
@@ -48,7 +48,7 @@ def _filter_buttons(active_filter: str) -> List[List[InlineKeyboardButton]]:
     ]
 
 
-def _passes_filter(meta: Dict[str, Any], filter_key: str) -> bool:
+def _passes_filter(meta: dict[str, Any], filter_key: str) -> bool:
     role = str(meta.get("role", "user"))
     enabled = bool(meta.get("enabled", True))
     is_paid = bool(meta.get("is_paid", False))
@@ -67,11 +67,11 @@ def users_list_kb(active_filter: str = USER_FILTER_ALL, page: int = 0) -> Inline
     if active_filter not in USER_FILTERS:
         active_filter = USER_FILTER_ALL
 
-    buttons: List[List[InlineKeyboardButton]] = []
+    buttons: list[list[InlineKeyboardButton]] = []
     buttons.extend(_filter_buttons(active_filter))
     buttons.append([InlineKeyboardButton("📣 Рассылка всем", callback_data="users:all")])
 
-    items: List[Tuple[str, bool, bool, str, int, str]] = []
+    items: list[tuple[str, bool, bool, str, int, str]] = []
     for k, meta in authorized_users_snapshot().items():
         try:
             uid = int(meta.get("user_id", k))
@@ -91,7 +91,7 @@ def users_list_kb(active_filter: str = USER_FILTER_ALL, page: int = 0) -> Inline
     page = max(0, min(int(page), total_pages - 1))
     page_items = items[page * USERS_PAGE_SIZE: (page + 1) * USERS_PAGE_SIZE]
 
-    row: List[InlineKeyboardButton] = []
+    row: list[InlineKeyboardButton] = []
     for role, enabled, is_paid, _, uid, name in page_items:
         prefix = ""
         if not enabled:
@@ -138,7 +138,7 @@ def user_card_kb(uid: int) -> InlineKeyboardMarkup:
     enabled = bool(meta.get("enabled", True))
     role = meta.get("role", "user")
 
-    rows: List[List[InlineKeyboardButton]] = [
+    rows: list[list[InlineKeyboardButton]] = [
         [InlineKeyboardButton("✉️ Написать сообщение", callback_data=f"users:msg:{uid}")],
         [InlineKeyboardButton("🏷 Изменить ник", callback_data=f"users:nick:{uid}")],
         [InlineKeyboardButton("⭐ Переключить оплату", callback_data=f"users:paid:{uid}")],
@@ -178,7 +178,7 @@ def confirm_paid_kb(uid: int, is_paid_now: bool) -> InlineKeyboardMarkup:
     )
 
 
-def format_user_card(meta: Dict[str, Any]) -> str:
+def format_user_card(meta: dict[str, Any]) -> str:
     uid = meta.get("user_id", "-")
     role = meta.get("role", "user")
     nick = meta.get("nickname") or "-"

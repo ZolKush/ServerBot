@@ -1,7 +1,7 @@
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
-import re
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
@@ -42,8 +42,8 @@ def _f2b_menu_kb(server_key: str) -> InlineKeyboardMarkup:
 
 def _f2b_tail_kb(server_key: str, current: int) -> InlineKeyboardMarkup:
     choices = [200, 600, 2000, 5000]
-    row1: List[InlineKeyboardButton] = []
-    row2: List[InlineKeyboardButton] = []
+    row1: list[InlineKeyboardButton] = []
+    row2: list[InlineKeyboardButton] = []
     for n in choices:
         label = f"{n} строк" + (" ✅" if n == current else "")
         button = InlineKeyboardButton(label, callback_data=f"f2b:tail:{server_key}:{n}")
@@ -76,12 +76,12 @@ def _fmt_dt_event(dt: datetime) -> str:
     return dt.astimezone(TZ).strftime("%d.%m %H:%M")
 
 
-def _parse_server_key(data: str, action: str) -> Optional[str]:
+def _parse_server_key(data: str, action: str) -> str | None:
     m = re.fullmatch(rf"f2b:{action}:({SERVER_KEY_PATTERN})", data or "")
     return m.group(1) if m else None
 
 
-def _parse_server_tail(data: str) -> Optional[tuple[str, int]]:
+def _parse_server_tail(data: str) -> tuple[str, int] | None:
     m = re.fullmatch(rf"f2b:tail:({SERVER_KEY_PATTERN}):(\d{{1,5}})", data or "")
     if not m:
         return None
@@ -96,7 +96,7 @@ def _daily_state_path_for_server(server_key: str) -> str:
     return str(p.with_name(fname))
 
 
-def _window_from_state(st: Dict[str, Any], until: datetime) -> datetime:
+def _window_from_state(st: dict[str, Any], until: datetime) -> datetime:
     try:
         if st.get("updated_at"):
             return datetime.fromisoformat(str(st["updated_at"])).astimezone(TZ) - timedelta(seconds=1)
@@ -105,7 +105,7 @@ def _window_from_state(st: Dict[str, Any], until: datetime) -> datetime:
     return until - timedelta(days=1)
 
 
-async def _daily_digest_events_for_server(server_key: str, since: datetime, until: datetime) -> tuple[Optional[object], Optional[str]]:
+async def _daily_digest_events_for_server(server_key: str, since: datetime, until: datetime) -> tuple[object | None, str | None]:
     srv = SERVERS.get(server_key)
     if not srv:
         return None, "server_not_found"
@@ -176,8 +176,8 @@ async def build_fail2ban_menu_text(server_key: str) -> str:
         )
 
 
-def build_fail2ban_digest_text(events: List[Fail2banEvent], since: datetime, until: datetime) -> str:
-    per_jail: Dict[str, Dict[str, Any]] = {}
+def build_fail2ban_digest_text(events: list[Fail2banEvent], since: datetime, until: datetime) -> str:
+    per_jail: dict[str, dict[str, Any]] = {}
     for ev in events:
         j = per_jail.setdefault(ev.jail, {"ban": [], "unban": 0, "restore": 0, "started": 0, "stopped": 0})
         if ev.action == "Ban":
@@ -201,10 +201,10 @@ def build_fail2ban_digest_text(events: List[Fail2banEvent], since: datetime, unt
     if total_bans == 0 and not any((v["unban"] or v["started"] or v["stopped"]) for v in per_jail.values()):
         return header + "\nСобытий не найдено."
 
-    lines: List[str] = [header]
+    lines: list[str] = [header]
     for jail in sorted(per_jail.keys()):
         v = per_jail[jail]
-        bans: List[Fail2banEvent] = v["ban"]
+        bans: list[Fail2banEvent] = v["ban"]
         if not bans and not (v["unban"] or v["started"] or v["stopped"]):
             continue
         lines.append(f"\n<b>[{html_escape(jail)}]</b>")
@@ -230,7 +230,7 @@ def build_fail2ban_digest_text(events: List[Fail2banEvent], since: datetime, unt
             lines.append(f"• Разбанов: <code>{v['unban']}</code>")
 
     limit = 3800
-    out_lines: List[str] = []
+    out_lines: list[str] = []
     cur_len = 0
     truncated = False
     for line in lines:

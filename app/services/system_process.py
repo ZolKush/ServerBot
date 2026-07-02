@@ -1,8 +1,9 @@
 import asyncio
-from typing import Sequence, Tuple
+import contextlib
+from collections.abc import Sequence
 
 
-async def run_exec(args: Sequence[str], timeout: int) -> Tuple[int, str, str]:
+async def run_exec(args: Sequence[str], timeout: int) -> tuple[int, str, str]:
     try:
         proc = await asyncio.create_subprocess_exec(
             *args,
@@ -18,14 +19,10 @@ async def run_exec(args: Sequence[str], timeout: int) -> Tuple[int, str, str]:
     try:
         out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except asyncio.TimeoutError:
-        try:
+        with contextlib.suppress(Exception):
             proc.kill()
-        except Exception:
-            pass
-        try:
+        with contextlib.suppress(Exception):
             await proc.wait()
-        except Exception:
-            pass
         return 124, "", "timeout"
 
     return (

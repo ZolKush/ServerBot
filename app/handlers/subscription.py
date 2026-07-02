@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from io import BytesIO
-from typing import Any, Dict, Optional
+from typing import Any
 
 from telegram import InputFile, Update
 from telegram.constants import ParseMode
@@ -26,17 +26,17 @@ SUBSCRIPTION_UPDATED_BY_NAME_KEY = "subscription_updated_by_name"
 _INLINE_SUBSCRIPTION_LIMIT = 3000
 
 
-def get_subscription_text(meta: Optional[Dict[str, Any]]) -> str:
+def get_subscription_text(meta: dict[str, Any] | None) -> str:
     if not meta:
         return ""
     return str(meta.get(SUBSCRIPTION_TEXT_KEY, "") or "")
 
 
-def has_subscription(meta: Optional[Dict[str, Any]]) -> bool:
+def has_subscription(meta: dict[str, Any] | None) -> bool:
     return bool(get_subscription_text(meta).strip())
 
 
-def _subscription_intro(meta: Dict[str, Any]) -> str:
+def _subscription_intro(meta: dict[str, Any]) -> str:
     updated_at = str(meta.get(SUBSCRIPTION_UPDATED_AT_KEY, "") or "").strip()
     lines = ["📦 <b>Моя подписка</b>", "Администрация назначила вам подписку."]
     if updated_at:
@@ -48,8 +48,8 @@ async def send_subscription_payload(
     context: ContextTypes.DEFAULT_TYPE,
     *,
     chat_id: int,
-    meta: Dict[str, Any],
-    title: Optional[str] = None,
+    meta: dict[str, Any],
+    title: str | None = None,
     filename_prefix: str = "subscription",
 ) -> None:
     cfg = get_subscription_text(meta)

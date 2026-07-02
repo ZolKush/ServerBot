@@ -3,7 +3,6 @@ import re
 import shutil
 from datetime import timedelta
 from pathlib import Path
-from typing import Dict, List
 
 from ..config import SUBPROC_SHORT_TIMEOUT
 from .system_process import run_exec
@@ -39,7 +38,7 @@ def _parse_uptime_p(text: str) -> str:
             hours = n
         elif unit.startswith("minute"):
             minutes = n
-    parts: List[str] = []
+    parts: list[str] = []
     if days:
         parts.append(f"{days} д")
     if hours:
@@ -64,7 +63,7 @@ async def check_uptime() -> str:
     hours, rem = divmod(td.seconds, 3600)
     minutes, _ = divmod(rem, 60)
 
-    parts: List[str] = []
+    parts: list[str] = []
     if days:
         parts.append(f"{days} д")
     if hours:
@@ -77,7 +76,7 @@ async def check_uptime() -> str:
 async def meminfo() -> str:
     try:
         raw = await asyncio.to_thread(Path("/proc/meminfo").read_text, encoding="utf-8")
-        kv: Dict[str, int] = {}
+        kv: dict[str, int] = {}
         for line in raw.splitlines():
             m = re.match(r"^(\w+):\s+(\d+)\s+kB$", line.strip())
             if m:
@@ -122,6 +121,6 @@ async def disk_root() -> str:
             return "н/д"
         parts = re.split(r"\s+", lines[1].strip())
         if len(parts) >= 6:
-            size, used, avail, usep, mnt = parts[1], parts[2], parts[3], parts[4], parts[5]
-            return f"{used} / {size} (avail {avail}, {usep}) mount {mnt}"
+            size_s, used_s, avail_s, usep_s, mnt_s = parts[1], parts[2], parts[3], parts[4], parts[5]
+            return f"{used_s} / {size_s} (avail {avail_s}, {usep_s}) mount {mnt_s}"
         return "н/д"

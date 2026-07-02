@@ -1,7 +1,7 @@
 import re
 import shlex
+from collections.abc import Sequence
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Sequence, Tuple
 
 from ..config import (
     DOCKER_BIN,
@@ -47,7 +47,7 @@ def _extract_wrapped_stdout(text: str) -> str:
     return payload[:-1] if payload.endswith("\n") else payload
 
 
-def _split_sections(text: str) -> Dict[str, str]:
+def _split_sections(text: str) -> dict[str, str]:
     lines = (text or "").splitlines()
     markers = {
         _SEC_UPTIME,
@@ -57,7 +57,7 @@ def _split_sections(text: str) -> Dict[str, str]:
         _SEC_DOCKER_STATUS,
     }
     cur = None
-    buf: Dict[str, List[str]] = {}
+    buf: dict[str, list[str]] = {}
     for ln in lines:
         if ln in markers:
             cur = ln
@@ -68,7 +68,7 @@ def _split_sections(text: str) -> Dict[str, str]:
     return {k: "\n".join(v).strip("\n") for k, v in buf.items()}
 
 
-def _split_ssh_target(target: str) -> Tuple[str, Optional[int]]:
+def _split_ssh_target(target: str) -> tuple[str, int | None]:
     tgt = (target or "").strip()
     m = _SSH_TARGET_WITH_PORT_RE.fullmatch(tgt)
     if not m:
@@ -80,7 +80,7 @@ def _split_ssh_target(target: str) -> Tuple[str, Optional[int]]:
     return host, port
 
 
-async def ssh_run_shell(target: str, command: str, timeout: int) -> Tuple[int, str, str]:
+async def ssh_run_shell(target: str, command: str, timeout: int) -> tuple[int, str, str]:
     tgt = (target or "").strip()
     if not tgt:
         return 127, "", "ssh target is not configured"
@@ -120,7 +120,7 @@ async def ssh_run_shell(target: str, command: str, timeout: int) -> Tuple[int, s
     return rc, _extract_wrapped_stdout(out), err
 
 
-async def ssh_run_exec(target: str, argv: Sequence[str], timeout: int) -> Tuple[int, str, str]:
+async def ssh_run_exec(target: str, argv: Sequence[str], timeout: int) -> tuple[int, str, str]:
     cmd = " ".join(shlex.quote(str(a)) for a in argv if str(a))
     return await ssh_run_shell(target, cmd, timeout)
 
@@ -134,7 +134,7 @@ def _parse_uptime_from_proc(raw: str) -> str:
     days = td.days
     hours, rem = divmod(td.seconds, 3600)
     minutes, _ = divmod(rem, 60)
-    parts: List[str] = []
+    parts: list[str] = []
     if days:
         parts.append(f"{days} д")
     if hours:
@@ -146,7 +146,7 @@ def _parse_uptime_from_proc(raw: str) -> str:
 
 def _parse_meminfo_text(raw: str) -> str:
     try:
-        kv: Dict[str, int] = {}
+        kv: dict[str, int] = {}
         for line in (raw or "").splitlines():
             m = re.match(r"^(\w+):\s+(\d+)\s+kB$", line.strip())
             if m:
@@ -183,13 +183,13 @@ async def remote_status_bundle(
     names: Sequence[str],
     *,
     admin_mode: bool,
-) -> Tuple[str, str, str, List[Tuple[str, bool, str, str]], str, List[str], List[str], List[str]]:
+) -> tuple[str, str, str, list[tuple[str, bool, str, str]], str, list[str], list[str], list[str]]:
     name_list = [n for n in names if n]
-    docker_candidates: List[str] = []
+    docker_candidates: list[str] = []
     for cand in [DOCKER_BIN, "/usr/bin/docker", "docker"]:
         if cand and cand not in docker_candidates:
             docker_candidates.append(cand)
-    ufw_candidates: List[str] = []
+    ufw_candidates: list[str] = []
     for cand in [UFW_BIN, "/usr/sbin/ufw", "ufw"]:
         if cand and cand not in ufw_candidates:
             ufw_candidates.append(cand)
@@ -198,7 +198,7 @@ async def remote_status_bundle(
     docker_for_loop = " ".join(shlex.quote(c) for c in docker_candidates) or '""'
     ufw_for_loop = " ".join(shlex.quote(c) for c in ufw_candidates) or '""'
 
-    docker_block_lines: List[str] = [
+    docker_block_lines: list[str] = [
         "_docker_done=0",
         f"for d in {docker_for_loop}; do",
         '  [ -n "$d" ] || continue',
@@ -218,7 +218,7 @@ async def remote_status_bundle(
     docker_block_lines.extend(["  fi", "done"])
     docker_block = "\n".join(docker_block_lines)
 
-    ufw_block_lines: List[str] = [
+    ufw_block_lines: list[str] = [
         f"for u in {ufw_for_loop}; do",
         '  [ -n "$u" ] || continue',
         '  if command -v "$u" >/dev/null 2>&1 || [ -x "$u" ]; then',
@@ -261,12 +261,12 @@ echo {_SEC_DOCKER_STATUS}
     else:
         allow, deny, reject = [], [], []
 
-    info: Dict[str, str] = {}
+    info: dict[str, str] = {}
     for line in (sec.get(_SEC_DOCKER_STATUS, "") or "").splitlines():
         p = line.split("|", 1)
         if len(p) == 2:
             info[p[0].strip()] = p[1].strip()
-    cont: List[Tuple[str, bool, str, str]] = []
+    cont: list[tuple[str, bool, str, str]] = []
     if not info:
         cont = [(n, False, "docker недоступен", "-") for n in name_list]
     else:
@@ -280,7 +280,7 @@ echo {_SEC_DOCKER_STATUS}
 
 
 async def remote_docker_inspect_summary(ssh_target: str, name: str) -> str:
-    cmds: List[List[str]] = []
+    cmds: list[list[str]] = []
     for docker_bin in [x for x in [DOCKER_BIN, "/usr/bin/docker", "docker"] if x]:
         cmds.append([docker_bin, "inspect", name])
         if SUDO_BIN:
@@ -335,7 +335,7 @@ async def remote_tail_text_file(ssh_target: str, path: str, n_lines: int) -> str
     return out
 
 
-async def remote_fail2ban_stat(ssh_target: str, path: str) -> Optional[Tuple[int, datetime]]:
+async def remote_fail2ban_stat(ssh_target: str, path: str) -> tuple[int, datetime] | None:
     quoted = shlex.quote(path)
     sudo_bin = shlex.quote(SUDO_BIN or "sudo")
     for cmd in (
@@ -354,6 +354,6 @@ async def remote_fail2ban_stat(ssh_target: str, path: str) -> Optional[Tuple[int
     return None
 
 
-async def remote_fail2ban_events(ssh_target: str, path: str, n_lines: int) -> List[Fail2banEvent]:
+async def remote_fail2ban_events(ssh_target: str, path: str, n_lines: int) -> list[Fail2banEvent]:
     raw = await remote_tail_text_file(ssh_target, path=path, n_lines=n_lines)
     return parse_fail2ban_events(raw.splitlines())
