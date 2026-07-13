@@ -102,15 +102,24 @@ def maint_mode_kb() -> InlineKeyboardMarkup:
 CAL_NOOP = "maint:cal:noop"
 
 _RU_MONTHS = [
-    "", "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
-    "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь",
+    "",
+    "Январь",
+    "Февраль",
+    "Март",
+    "Апрель",
+    "Май",
+    "Июнь",
+    "Июль",
+    "Август",
+    "Сентябрь",
+    "Октябрь",
+    "Ноябрь",
+    "Декабрь",
 ]
 _RU_WEEKDAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 
 
-def _calendar_grid(
-    year: int, month: int, today: date, horizon: date
-) -> list[list[tuple[str, str]]]:
+def _calendar_grid(year: int, month: int, today: date, horizon: date) -> list[list[tuple[str, str]]]:
     """Сетка месяца: список недель, каждая — 7 ячеек (подпись, callback_data).
 
     Дни не из текущего месяца, прошедшие дни и дни за горизонтом — некликабельны
@@ -131,9 +140,7 @@ def _calendar_grid(
     return weeks
 
 
-def schedule_calendar_kb(
-    year: int, month: int, *, today: date, horizon_days: int = 365
-) -> InlineKeyboardMarkup:
+def schedule_calendar_kb(year: int, month: int, *, today: date, horizon_days: int = 365) -> InlineKeyboardMarkup:
     horizon = today + timedelta(days=horizon_days)
     rows: list[list[InlineKeyboardButton]] = [
         [InlineKeyboardButton(f"{_RU_MONTHS[month]} {year}", callback_data=CAL_NOOP)],
@@ -221,7 +228,9 @@ def _fmt_dt_short(dt: datetime) -> str:
     return dt.astimezone(TZ).strftime("%d.%m.%Y %H:%M")
 
 
-def _build_maint_record(scope: str, urgency: str, hh: int, mm: int, author_id: int | None, author_name: str) -> dict[str, Any]:
+def _build_maint_record(
+    scope: str, urgency: str, hh: int, mm: int, author_id: int | None, author_name: str
+) -> dict[str, Any]:
     now = datetime.now(TZ)
     duration_min = _hhmm_to_minutes(hh, mm)
     expected_end = now + timedelta(minutes=duration_min)
@@ -263,6 +272,7 @@ def _build_scheduled_maint_record(
         "created_at": now.isoformat(),
         "updated_at": now.isoformat(),
         "notified_thresholds": _initial_notified_thresholds(remaining_min),
+        "announced_thresholds": [],
         "notified_start": False,
     }
     return record
@@ -271,7 +281,12 @@ def _build_scheduled_maint_record(
 def _scheduled_to_active_record(scheduled: ScheduledMaintenance) -> Maintenance:
     start_at = datetime.now(TZ)
     duration_min = int(scheduled.get("duration_min", 0) or 0)
-    expected_end = start_at + timedelta(minutes=max(duration_min, 1))
+    try:
+        expected_end = datetime.fromisoformat(str(scheduled.get("scheduled_end") or ""))
+        if expected_end.tzinfo is None:
+            expected_end = expected_end.replace(tzinfo=TZ)
+    except (TypeError, ValueError):
+        expected_end = start_at + timedelta(minutes=max(duration_min, 1))
     record: Maintenance = {
         "id": str(scheduled.get("id") or uuid4().hex),
         "active": True,

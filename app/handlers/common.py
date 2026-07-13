@@ -1,22 +1,17 @@
 from __future__ import annotations
 
-import asyncio
 import html
-import random
-from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field
+from collections.abc import Callable
 from datetime import datetime
 from functools import wraps
 from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatType, ParseMode
-from telegram.error import BadRequest, NetworkError, RetryAfter, TimedOut
+from telegram.error import BadRequest
 from telegram.ext import ContextTypes, ConversationHandler
 
 from ..config import (
-    BROADCAST_MAX_ATTEMPTS,
-    BROADCAST_MAX_CONCURRENCY,
     MENU_MAINT,
     MENU_STATUS,
     MENU_SUBSCRIPTION,
@@ -86,6 +81,22 @@ def wrap_as_codeblock_html(text: str, limit: int = 3300) -> str:
     return f"<pre><code>{clip_html(text, limit)}</code></pre>"
 
 
+def clip_html_message(text: str, limit: int = 4000) -> str:
+    value = str(text or "")
+    if len(value) <= limit:
+        return value
+    suffix = "\n<i>…сообщение сокращено из-за лимита Telegram</i>"
+    kept: list[str] = []
+    length = 0
+    for line in value.splitlines():
+        extra = len(line) + (1 if kept else 0)
+        if length + extra + len(suffix) > limit:
+            break
+        kept.append(line)
+        length += extra
+    return ("\n".join(kept) + suffix) if kept else html_escape(value[: limit - len(suffix)]) + suffix
+
+
 def now_str() -> str:
     return datetime.now(TZ).strftime("%d.%m.%Y %H:%M:%S")
 
@@ -98,12 +109,12 @@ def format_dt_human(value: Any, *, empty: str = "-", tz_label: str = "по МС�
     dt: datetime | None = None
     try:
         dt = datetime.fromisoformat(raw)
-    except Exception:
+    except ValueError:
         for fmt in ("%Y-%m-%d %H:%M:%S,%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
             try:
                 dt = datetime.strptime(raw, fmt)
                 break
-            except Exception:
+            except ValueError:
                 continue
 
     if dt is None:
@@ -131,7 +142,8 @@ def get_user_meta(uid: int) -> dict[str, Any] | None:
 
 def is_authorized(update: Update) -> bool:
     uid = get_user_id(update)
-    return bool(uid is not None and get_user_meta_copy(uid) is not None)
+    meta = get_user_meta_copy(uid) if uid is not None else None
+    return bool(meta and meta.get("access_state", "approved") == "approved")
 
 
 def is_enabled(update: Update) -> bool:
@@ -139,7 +151,7 @@ def is_enabled(update: Update) -> bool:
     if uid is None:
         return False
     meta = get_user_meta(uid)
-    return bool(meta and meta.get("enabled", True))
+    return bool(meta and meta.get("access_state", "approved") == "approved" and meta.get("enabled", True))
 
 
 def is_admin(update: Update) -> bool:
@@ -147,21 +159,47 @@ def is_admin(update: Update) -> bool:
     if uid is None:
         return False
     meta = get_user_meta(uid)
-    return bool(meta and meta.get("role") == "admin")
+    return bool(
+        meta
+        and meta.get("role") == "admin"
+        and meta.get("access_state", "approved") == "approved"
+        and meta.get("enabled", True)
+    )
 
 
 async def reply_disabled(update: Update) -> None:
     msg = update.effective_message
     if msg:
-        await msg.reply_text("Вы отключены от этого бота. Обратитесь к администратору напрямую.")
+        meta = get_user_meta(get_user_id(update) or 0) or {}
+        state = str(meta.get("access_state") or "blocked")
+        texts = {
+            "blocked": "Доступ к боту заблокирован администратором.",
+            "pending": "Заявка на доступ ожидает решения администратора.",
+            "rejected": "Заявка на доступ была отклонена. Вы можете отправить новую позднее.",
+            "logged_out": "Вы вышли из бота. Для возврата отправьте новую заявку на доступ.",
+        }
+        await msg.reply_text(texts.get(state, "Доступ к боту сейчас отключён."))
 
 
 async def reply_need_auth(update: Update) -> None:
     msg = update.effective_message
     if msg:
+        meta = get_user_meta(get_user_id(update) or 0) or {}
+        state = str(meta.get("access_state") or "")
+        if state == "blocked":
+            await reply_disabled(update)
+            return
+        if state == "pending":
+            await msg.reply_text("Заявка на доступ уже отправлена и ожидает решения администратора.")
+            return
+        if meta.get("role") == "admin":
+            await msg.reply_text("Сессия администратора завершена. Войдите снова командой /auth.")
+            return
         await msg.reply_text(
-            "Доступ ограничен. Авторизуйтесь командой:\n<b>/auth пароль</b>",
-            parse_mode=ParseMode.HTML,
+            "Доступ предоставляется после одобрения администратором.",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("🔐 Запросить доступ", callback_data="access:request")]]
+            ),
         )
 
 
@@ -215,13 +253,13 @@ async def _ensure_access(update: Update, role: str | None) -> bool:
 def display_name_from_meta(meta: dict[str, Any] | None) -> str:
     if not meta:
         return "пользователь"
-    nick = (meta.get("nickname") or "").strip()
+    nick = str(meta.get("nickname") or "").strip()
     if nick:
         return nick
     uname = meta.get("username")
     if uname:
-        return f"@{uname}"
-    nm = " ".join([x for x in [meta.get("first_name"), meta.get("last_name")] if x])
+        return f"@{str(uname)}"
+    nm = " ".join(str(x) for x in [meta.get("first_name"), meta.get("last_name")] if x)
     if nm.strip():
         return nm.strip()
     uid = meta.get("user_id")
@@ -306,6 +344,7 @@ async def safe_edit_or_reply(
     """
     if message is None:
         return
+    text = clip_html_message(text)
     try:
         await message.edit_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
         return
@@ -343,118 +382,17 @@ async def cancel_to_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-@dataclass
-class SendErrorInfo:
-    user_id: int
-    error_type: str
-    message: str
-
-
-@dataclass
-class SendManyReport:
-    ok: int = 0
-    fail: int = 0
-    errors: list[SendErrorInfo] = field(default_factory=list)
-
-    def __iter__(self):
-        yield self.ok
-        yield self.fail
-
-
-def _retry_after_seconds(exc: RetryAfter) -> float:
-    ra = getattr(exc, "retry_after", 1)
-    try:
-        return max(0.5, float(ra))
-    except Exception:
-        return 1.0
-
-
-async def send_to_many(
-    context: ContextTypes.DEFAULT_TYPE,
-    user_ids: Iterable[int],
-    text: str,
-    *,
-    reply_markup: InlineKeyboardMarkup | None = None,
-    max_concurrency: int | None = None,
-    max_attempts: int | None = None,
-) -> SendManyReport:
-    if max_concurrency is None:
-        max_concurrency = BROADCAST_MAX_CONCURRENCY
-    if max_attempts is None:
-        max_attempts = BROADCAST_MAX_ATTEMPTS
-    ids = sorted(set(int(uid) for uid in user_ids))
-    if not ids:
-        return SendManyReport()
-    report = SendManyReport()
-    report_lock = asyncio.Lock()
-    queue: asyncio.Queue[int] = asyncio.Queue()
-    for uid in ids:
-        queue.put_nowait(uid)
-
-    async def _send_one(uid: int) -> tuple[bool, SendErrorInfo | None]:
-        last_exc: Exception | None = None
-        for attempt in range(1, max(1, max_attempts) + 1):
-            try:
-                await context.bot.send_message(
-                    chat_id=uid,
-                    text=text,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=reply_markup,
-                )
-                return True, None
-            except RetryAfter as e:
-                last_exc = e
-                if attempt >= max_attempts:
-                    break
-                await asyncio.sleep(_retry_after_seconds(e))
-            except (TimedOut, NetworkError) as e:
-                last_exc = e
-                if attempt >= max_attempts:
-                    break
-                await asyncio.sleep(min(2.0, 0.25 * (2 ** (attempt - 1))) + random.uniform(0.0, 0.2))
-            except Exception as e:
-                last_exc = e
-                break
-        err = SendErrorInfo(
-            user_id=uid,
-            error_type=(last_exc.__class__.__name__ if last_exc else "Error"),
-            message=(str(last_exc).strip() if last_exc else "unknown error"),
-        )
-        return False, err
-
-    async def _worker() -> None:
-        while True:
-            try:
-                uid = queue.get_nowait()
-            except asyncio.QueueEmpty:
-                return
-            ok, err = await _send_one(uid)
-            async with report_lock:
-                if ok:
-                    report.ok += 1
-                else:
-                    report.fail += 1
-                    if err:
-                        report.errors.append(err)
-                        logger.warning("Не удалось отправить пользователю %s: %s: %s", err.user_id, err.error_type, err.message)
-            queue.task_done()
-
-    workers = [asyncio.create_task(_worker()) for _ in range(min(len(ids), max(1, max_concurrency)))]
-    await asyncio.gather(*workers)
-    return report
-
-
 def authorized_ids(role_filter: str | None = None, exclude: set[int] | None = None) -> list[int]:
     exclude = exclude or set()
     ids: list[int] = []
     for k, meta in authorized_users_snapshot().items():
         try:
             uid = int(meta.get("user_id", k))
-        except Exception:
+        except (TypeError, ValueError, OverflowError):
             continue
         if uid in exclude:
             continue
-        if not bool(meta.get("enabled", True)):
+        if meta.get("access_state", "approved") != "approved" or not bool(meta.get("enabled", True)):
             continue
         if role_filter and meta.get("role") != role_filter:
             continue

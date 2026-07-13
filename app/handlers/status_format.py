@@ -36,8 +36,11 @@ def _fmt_ufw_list(items: list[str]) -> list[str]:
     if not items:
         return ["<code>  —</code>"]
     out: list[str] = []
-    for item in items:
+    visible = items[:40]
+    for item in visible:
         out.append(f"<code>  • {html_escape(item)}</code>")
+    if len(items) > len(visible):
+        out.append(f"<i>  … ещё {len(items) - len(visible)} правил</i>")
     return out
 
 
@@ -119,11 +122,7 @@ def _format_offline_message(snapshot: StatusSnapshot) -> str:
     lines: list[str] = []
     lines.append(header(snapshot.server_flag or "🖥", snapshot.server_label, "🔴 офлайн"))
     lines.append(SEP)
-    if snapshot.metrics_error:
-        lines.append("📡 <b>Нет связи с панелью</b>")
-        lines.append(f"<i>{html_escape(snapshot.metrics_error)}</i>")
-    else:
-        lines.append("🔴 <b>Нода офлайн</b>")
+    lines.append("🔴 <b>Нода офлайн</b>")
     if snapshot.last_seen_text:
         lines.append(f"Последнее обновление: <code>{html_escape(snapshot.last_seen_text)}</code>")
     lines.append(SEP)
@@ -137,8 +136,28 @@ def _format_offline_message(snapshot: StatusSnapshot) -> str:
     return "\n".join(lines)
 
 
+def _format_metrics_error_message(snapshot: StatusSnapshot) -> str:
+    lines = [
+        header(snapshot.server_flag or "🖥", snapshot.server_label, "⚠️ статус неизвестен"),
+        SEP,
+        "📡 <b>Панель метрик недоступна или вернула неполные данные</b>",
+        f"<i>{html_escape(snapshot.metrics_error or 'неизвестная ошибка')}</i>",
+    ]
+    if snapshot.last_seen_text:
+        lines.append(f"Последнее успешное обновление: <code>{html_escape(snapshot.last_seen_text)}</code>")
+    lines.extend([SEP, _summary_chips_line(snapshot)])
+    dns_line = _dns_detail_line(snapshot)
+    if dns_line:
+        lines.append(dns_line)
+    lines.extend(_dns_error_block(snapshot))
+    lines.extend(["", footer_updated(snapshot.now_text)])
+    return "\n".join(lines)
+
+
 def format_status_message(snapshot: StatusSnapshot) -> str:
-    if snapshot.source_mode == "mixed" and (snapshot.node_online is False or snapshot.metrics_error):
+    if snapshot.source_mode == "mixed" and snapshot.metrics_error:
+        return _format_metrics_error_message(snapshot)
+    if snapshot.source_mode == "mixed" and snapshot.node_online is False:
         return _format_offline_message(snapshot)
 
     status_text = ""

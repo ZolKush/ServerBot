@@ -68,7 +68,11 @@ def _docker_list_kb(server_key: str) -> InlineKeyboardMarkup:
 
 def _docker_item_kb(server_key: str, name: str, tail: int = DOCKER_LOGS_TAIL_MIN) -> InlineKeyboardMarkup:
     tail = int(tail)
-    tail = DOCKER_LOGS_TAIL_MIN if tail < DOCKER_LOGS_TAIL_MIN else (DOCKER_LOGS_TAIL_MAX if tail > DOCKER_LOGS_TAIL_MAX else tail)
+    tail = (
+        DOCKER_LOGS_TAIL_MIN
+        if tail < DOCKER_LOGS_TAIL_MIN
+        else (DOCKER_LOGS_TAIL_MAX if tail > DOCKER_LOGS_TAIL_MAX else tail)
+    )
     token = _container_token(server_key, name)
     return InlineKeyboardMarkup(
         [
@@ -194,7 +198,11 @@ async def docker_logs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await q.edit_message_text(ui_error_text("контейнер недоступен."), reply_markup=_docker_list_kb(server_key))
         return
     tail = int(tail_s)
-    tail = DOCKER_LOGS_TAIL_MIN if tail < DOCKER_LOGS_TAIL_MIN else (DOCKER_LOGS_TAIL_MAX if tail > DOCKER_LOGS_TAIL_MAX else tail)
+    tail = (
+        DOCKER_LOGS_TAIL_MIN
+        if tail < DOCKER_LOGS_TAIL_MIN
+        else (DOCKER_LOGS_TAIL_MAX if tail > DOCKER_LOGS_TAIL_MAX else tail)
+    )
 
     srv = get_server_target(server_key)
     if not srv:
@@ -226,7 +234,6 @@ async def docker_logs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     max_note = f"\n<i>Достигнут предел tail={DOCKER_LOGS_TAIL_MAX}.</i>\n" if is_at_max else ""
     payload = (
         f"<b>{html_escape(breadcrumbs('Статус', srv.label, 'Docker', name, 'Logs'))}</b>\n"
-        f"<code>tail={tail}</code>{max_note}\n"
-        + wrap_as_codeblock_html(log_text)
+        f"<code>tail={tail}</code>{max_note}\n" + wrap_as_codeblock_html(log_text)
     )
     await q.edit_message_text(payload, parse_mode=ParseMode.HTML, reply_markup=kb)

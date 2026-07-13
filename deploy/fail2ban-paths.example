@@ -1,0 +1,3 @@
+# One absolute fail2ban log path per line. Install as:
+# /etc/maintbot/fail2ban-paths
+/var/log/fail2ban.log

@@ -8,6 +8,7 @@ SenderRole = Literal["user", "admin"]
 AttachmentType = Literal["photo", "document"]
 MaintScope = str
 MaintUrgency = Literal["urgent", "planned"]
+AccessState = Literal["pending", "approved", "blocked", "logged_out", "rejected"]
 
 
 class Attachment(TypedDict, total=False):
@@ -73,6 +74,7 @@ class ScheduledMaintenance(TypedDict, total=False):
     created_at: str
     updated_at: str
     notified_thresholds: list[int]
+    announced_thresholds: list[int]
     notified_start: bool
 
 
@@ -80,6 +82,7 @@ class UserMeta(TypedDict, total=False):
     user_id: int
     role: Literal["user", "admin"]
     enabled: bool
+    access_state: AccessState
     is_paid: bool
     nickname: str | None
     username: str | None
@@ -90,6 +93,15 @@ class UserMeta(TypedDict, total=False):
     subscription_updated_at: str | None
     subscription_updated_by_id: int | None
     subscription_updated_by_name: str | None
+    access_requested_at: str | None
+    access_reviewed_at: str | None
+    access_reviewed_by_id: int | None
+    access_reviewed_by_name: str | None
+    blocked_at: str | None
+    blocked_by_id: int | None
+    blocked_by_name: str | None
+    blocked_reason: str | None
+    logged_out_at: str | None
 
 
 class TicketKeys:
@@ -136,6 +148,7 @@ class ScheduledMaintenanceKeys:
     CREATED_AT = "created_at"
     UPDATED_AT = "updated_at"
     NOTIFIED_THRESHOLDS = "notified_thresholds"
+    ANNOUNCED_THRESHOLDS = "announced_thresholds"
     NOTIFIED_START = "notified_start"
 
 
@@ -160,6 +173,7 @@ def coerce_scheduled_maintenance(raw: dict[str, Any] | None) -> ScheduledMainten
 __all__ = [
     "Attachment",
     "AttachmentType",
+    "AccessState",
     "Maintenance",
     "MaintenanceKeys",
     "MaintScope",

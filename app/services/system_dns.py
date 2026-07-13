@@ -15,7 +15,9 @@ def dns_supports_custom_resolver() -> bool:
     return aiodns is not None
 
 
-_HOST_RE = re.compile(r"^(?=.{1,253}$)([a-zA-Z0-9_]([a-zA-Z0-9_\-]{0,61}[a-zA-Z0-9_])?)(\.[a-zA-Z0-9_]([a-zA-Z0-9_\-]{0,61}[a-zA-Z0-9_])?)*$")
+_HOST_RE = re.compile(
+    r"^(?=.{1,253}$)([a-zA-Z0-9_]([a-zA-Z0-9_\-]{0,61}[a-zA-Z0-9_])?)(\.[a-zA-Z0-9_]([a-zA-Z0-9_\-]{0,61}[a-zA-Z0-9_])?)*$"
+)
 
 
 async def resolve_a_record(domain: str, resolver: str | None = None, timeout: float = 2.0) -> list[str]:
@@ -26,11 +28,12 @@ async def resolve_a_record(domain: str, resolver: str | None = None, timeout: fl
     if aiodns is not None:
         try:
             if resolver:
-                res = aiodns.DNSResolver(nameservers=[resolver], timeout=timeout)
+                async with aiodns.DNSResolver(nameservers=[resolver], timeout=timeout) as res:
+                    answer = await res.query_dns(dom, "A")
             else:
-                res = aiodns.DNSResolver(timeout=timeout)
-            ans = await res.query(dom, "A")
-            ips = [a.host for a in ans if getattr(a, "host", None)]
+                async with aiodns.DNSResolver(timeout=timeout) as res:
+                    answer = await res.query_dns(dom, "A")
+            ips = [str(address) for record in answer.answer if (address := getattr(record.data, "addr", None))]
             return list(dict.fromkeys(ips))
         except Exception as e:
             if resolver:
@@ -39,7 +42,8 @@ async def resolve_a_record(domain: str, resolver: str | None = None, timeout: fl
             logger.debug("DNS resolve %s via aiodns failed, fallback to getaddrinfo: %s", dom, e)
 
     try:
-        infos = await asyncio.get_running_loop().getaddrinfo(dom, None, family=socket.AF_INET)
+        lookup = asyncio.get_running_loop().getaddrinfo(dom, None, family=socket.AF_INET)
+        infos = await asyncio.wait_for(lookup, timeout=max(0.1, float(timeout)))
         found: list[str] = []
         for info in infos:
             addr = info[4]

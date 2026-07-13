@@ -1,0 +1,2 @@
+Defaults!/usr/local/libexec/maintbot-helper env_reset,secure_path=/usr/sbin:/usr/bin:/sbin:/bin
+maintbot ALL=(root) NOPASSWD: /usr/local/libexec/maintbot-helper *

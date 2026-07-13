@@ -5,10 +5,10 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import dotenv_values
-from pydantic import BaseModel, Field, ValidationError, ValidationInfo, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic_settings.sources import DotEnvSettingsSource
 
@@ -21,9 +21,8 @@ _ENV_PATH = os.getenv("ENV_PATH", "").strip()
 ENV_FILE = Path(_ENV_PATH) if _ENV_PATH else (BASE_DIR / ".env")
 _SECRETS_ENV_PATH = os.getenv("SECRETS_ENV_PATH", "").strip()
 SECRETS_ENV_FILE = Path(_SECRETS_ENV_PATH) if _SECRETS_ENV_PATH else (BASE_DIR / "env.secrets")
-_SECRET_KEYS = ("BOT_TOKEN", "AUTH_PASSWORD", "ADMIN_PASSWORD")
+_SECRET_KEYS = ("BOT_TOKEN", "ADMIN_PASSWORD")
 _SSH_TARGET_RE = re.compile(r"^[A-Za-z0-9_.:@\-\[\]]{1,255}$")
-_SSH_TARGET_WITH_PORT_RE = re.compile(r"^[A-Za-z0-9_.@\-\[\]:]+:(\d{1,5})$")
 _SERVER_CODE_RE = re.compile(r"[^a-z0-9_-]+")
 _CONTAINER_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.\-]{0,62}$")
 _UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
@@ -52,7 +51,7 @@ def split_env_list(raw: Any, *, dedupe: bool = True) -> list[str]:
                 parsed = json.loads(s)
                 if isinstance(parsed, list):
                     raw = parsed
-            except Exception:
+            except json.JSONDecodeError:
                 pass
     if isinstance(raw, list):
         items = [str(x).strip() for x in raw]
@@ -155,16 +154,31 @@ def _validate_ssh_target(value: str) -> str:
         return ""
     if s.startswith("-") or not _SSH_TARGET_RE.fullmatch(s):
         raise ValueError("SSH target has invalid format")
-    m = _SSH_TARGET_WITH_PORT_RE.fullmatch(s)
-    if m and not 1 <= int(m.group(1)) <= 65535:
+    host_part = s.rsplit("@", 1)[-1]
+    port_text = ""
+    if host_part.startswith("["):
+        closing = host_part.find("]")
+        if closing < 0:
+            raise ValueError("SSH target has an unclosed IPv6 bracket")
+        suffix = host_part[closing + 1 :]
+        if suffix:
+            if not suffix.startswith(":") or not suffix[1:].isdigit():
+                raise ValueError("SSH target port has invalid format")
+            port_text = suffix[1:]
+    elif host_part.count(":") == 1:
+        _host, maybe_port = host_part.rsplit(":", 1)
+        if maybe_port.isdigit():
+            port_text = maybe_port
+    if port_text and not 1 <= int(port_text) <= 65535:
         raise ValueError("SSH target port out of range")
     return s
 
 
 class SecretSettings(BaseModel):
+    model_config = ConfigDict(hide_input_in_errors=True)
+
     BOT_TOKEN: str
-    AUTH_PASSWORD: str = ""
-    ADMIN_PASSWORD: str = ""
+    ADMIN_PASSWORD: str
 
     @field_validator("BOT_TOKEN", mode="before")
     @classmethod
@@ -174,16 +188,13 @@ class SecretSettings(BaseModel):
             raise ValueError("empty secret")
         return s
 
-    @field_validator("AUTH_PASSWORD", "ADMIN_PASSWORD", mode="before")
+    @field_validator("ADMIN_PASSWORD", mode="before")
     @classmethod
     def _strip_password(cls, v: Any) -> str:
-        return str(v or "").strip()
-
-    @model_validator(mode="after")
-    def _require_at_least_one_password(self) -> "SecretSettings":
-        if not self.AUTH_PASSWORD and not self.ADMIN_PASSWORD:
-            raise ValueError("хотя бы один из AUTH_PASSWORD или ADMIN_PASSWORD должен быть задан")
-        return self
+        password = str(v or "").strip()
+        if len(password) < 16:
+            raise ValueError("ADMIN_PASSWORD должен содержать не менее 16 символов")
+        return password
 
 
 def _load_env_file_values(path: Path) -> dict[str, str]:
@@ -233,14 +244,14 @@ def load_required_secrets(path: Path, *, fallback_path: Path | None = None) -> S
 
     try:
         return SecretSettings.model_validate(merged)
-    except ValidationError as e:
-        missing_s = _extract_missing_fields(e)
+    except ValidationError as exc:
+        missing_s = _extract_missing_fields(exc)
         raise RuntimeError(
             "Не заданы обязательные секреты: "
             f"{missing_s}. Проверены источники: {', '.join(checked_sources)}. "
             "Рекомендуемый вариант: хранить секреты в app/env.secrets; "
             "также поддерживаются app/.env и переменные окружения процесса."
-        ) from e
+        ) from None
 
 
 class _PermissiveDotEnvSource(DotEnvSettingsSource):
@@ -263,6 +274,9 @@ class AppSettings(BaseSettings):
 
     @classmethod
     def settings_customise_sources(cls, settings_cls, init_settings, env_settings, dotenv_settings, **kwargs):
+        # Pydantic supplies its default dotenv source, but this project replaces
+        # it with the comma-list-aware source below.
+        _ = dotenv_settings
         secrets = kwargs.get("secrets_settings") or kwargs.get("file_secret_settings")
         sources = [init_settings, env_settings, _PermissiveDotEnvSource(settings_cls)]
         if secrets is not None:
@@ -283,7 +297,8 @@ class AppSettings(BaseSettings):
     DNS_RESOLVERS: list[str] = Field(default_factory=lambda: ["1.1.1.1", "8.8.8.8", "77.88.8.8"])
 
     FAIL2BAN_LOG_PATH: str = "/var/log/fail2ban.log"
-    FAIL2BAN_STATE_PATH: str = ""
+    FAIL2BAN_ENABLED: bool = True
+    FAIL2BAN_TIMEZONE: str = ""
     FAIL2BAN_DAILY_AT: str = "12:00"
     FAIL2BAN_DIGEST_TAIL_LINES: int = 20000
     FAIL2BAN_DIGEST_MAX_BYTES: int = 3_000_000
@@ -295,17 +310,24 @@ class AppSettings(BaseSettings):
     SUBPROC_SHORT_TIMEOUT: int = 3
     SUBPROC_MEDIUM_TIMEOUT: int = 8
 
-    SSH_STRICT_HOST_KEY_CHECKING: str = "accept-new"
+    SSH_STRICT_HOST_KEY_CHECKING: str = "yes"
     SSH_KNOWN_HOSTS_FILE: str = ""
-
-    BROADCAST_MAX_CONCURRENCY: int = 8
-    BROADCAST_MAX_ATTEMPTS: int = 3
+    SSH_IDENTITY_FILE: str = ""
+    PRIVILEGED_HELPER_BIN: str = "/usr/local/libexec/maintbot-helper"
 
     AUTH_FAIL_WINDOW_SEC: int = 300
     AUTH_MAX_FAILS_IN_WINDOW: int = 5
+    AUTH_GLOBAL_MAX_FAILS_IN_WINDOW: int = 40
     AUTH_LOCKOUT_SEC: int = 600
     AUTH_PRUNE_INTERVAL_SEC: int = 300
+    ACCESS_REQUEST_COOLDOWN_SEC: int = 300
     ERROR_NOTIFY_INTERVAL_SEC: int = 300
+    OUTBOX_PROCESS_INTERVAL_SEC: int = 10
+
+    INSTANCE_LOCK_PATH: str = ""
+    PTB_PERSISTENCE_PATH: str = ""
+    SUBPROC_MAX_OUTPUT_BYTES: int = 1_000_000
+    STATUS_CACHE_TTL_SEC: int = 5
 
     LOCAL_SERVER_CODE: str = "local"
     LOCAL_SERVER_LABEL: str = "Local server"
@@ -319,6 +341,9 @@ class AppSettings(BaseSettings):
     REMOTE_SERVER_EXPECTED_A_IP: str = ""
     REMOTE_SERVER_CHECK_A_DOMAINS: list[str] = Field(default_factory=list)
     REMOTE_SERVER_FAIL2BAN_LOG_PATH: str = "/var/log/fail2ban.log"
+    REMOTE_SERVER_FAIL2BAN_LOG_PATHS: list[str] = Field(default_factory=list)
+    REMOTE_SERVER_FAIL2BAN_ENABLED: list[str] = Field(default_factory=list)
+    REMOTE_SERVER_FAIL2BAN_TIMEZONES: list[str] = Field(default_factory=list)
     REMOTE_SERVER_MONITOR_CONTAINERS: list[str] = Field(default_factory=list)
 
     REMOTE_SERVER_FLAGS: list[str] = Field(default_factory=list)
@@ -335,6 +360,7 @@ class AppSettings(BaseSettings):
     REMNAWAVE_METRICS_PASS: str = ""
     REMNAWAVE_METRICS_TIMEOUT_SEC: int = 3
     REMNAWAVE_METRICS_CACHE_TTL_SEC: int = 8
+    REMNAWAVE_METRICS_MAX_BYTES: int = 2_000_000
     REMNAWAVE_HIDDEN_UUIDS: list[str] = Field(default_factory=list)
     LOCAL_SERVER_REMNAWAVE_UUID: str = ""
     REMOTE_SERVER_REMNAWAVE_UUIDS: list[str] = Field(default_factory=list)
@@ -351,6 +377,9 @@ class AppSettings(BaseSettings):
         "REMOTE_SERVER_EXPECTED_A_IPS",
         "REMOTE_SERVER_CODES",
         "REMOTE_SERVER_LABELS",
+        "REMOTE_SERVER_FAIL2BAN_LOG_PATHS",
+        "REMOTE_SERVER_FAIL2BAN_ENABLED",
+        "REMOTE_SERVER_FAIL2BAN_TIMEZONES",
         "REMNAWAVE_HIDDEN_UUIDS",
         mode="before",
     )
@@ -362,6 +391,9 @@ class AppSettings(BaseSettings):
             "REMOTE_SERVER_EXPECTED_A_IPS",
             "REMOTE_SERVER_CODES",
             "REMOTE_SERVER_LABELS",
+            "REMOTE_SERVER_FAIL2BAN_LOG_PATHS",
+            "REMOTE_SERVER_FAIL2BAN_ENABLED",
+            "REMOTE_SERVER_FAIL2BAN_TIMEZONES",
         }
         return split_env_list(v, dedupe=info.field_name not in ordered_fields)
 
@@ -397,7 +429,9 @@ class AppSettings(BaseSettings):
     def _strip_str(cls, v: Any) -> str:
         return str(v or "").strip()
 
-    @field_validator("LOCAL_SERVER_REMNAWAVE_UUID", "REMOTE_SERVER_REMNAWAVE_UUIDS", "REMNAWAVE_HIDDEN_UUIDS", mode="after")
+    @field_validator(
+        "LOCAL_SERVER_REMNAWAVE_UUID", "REMOTE_SERVER_REMNAWAVE_UUIDS", "REMNAWAVE_HIDDEN_UUIDS", mode="after"
+    )
     @classmethod
     def _validate_uuids(cls, v: Any, info: ValidationInfo) -> Any:
         if isinstance(v, str):
@@ -419,6 +453,38 @@ class AppSettings(BaseSettings):
         iv = int(v)
         if iv < 1 or iv > 600:
             raise ValueError("metrics timeout/ttl out of range (1..600)")
+        return iv
+
+    @field_validator("REMNAWAVE_METRICS_MAX_BYTES")
+    @classmethod
+    def _metrics_max_bytes(cls, v: int) -> int:
+        iv = int(v)
+        if not 1024 <= iv <= 20_000_000:
+            raise ValueError("REMNAWAVE_METRICS_MAX_BYTES out of range")
+        return iv
+
+    @field_validator("FAIL2BAN_DIGEST_TAIL_LINES")
+    @classmethod
+    def _fail2ban_tail_lines(cls, v: int) -> int:
+        iv = int(v)
+        if not 1 <= iv <= 50_000:
+            raise ValueError("FAIL2BAN_DIGEST_TAIL_LINES must be in range 1..50000")
+        return iv
+
+    @field_validator("FAIL2BAN_DIGEST_MAX_BYTES")
+    @classmethod
+    def _fail2ban_max_bytes(cls, v: int) -> int:
+        iv = int(v)
+        if not 1024 <= iv <= 3_000_000:
+            raise ValueError("FAIL2BAN_DIGEST_MAX_BYTES must be in range 1024..3000000")
+        return iv
+
+    @field_validator("SUBPROC_MAX_OUTPUT_BYTES")
+    @classmethod
+    def _subprocess_max_output_bytes(cls, v: int) -> int:
+        iv = int(v)
+        if not 1024 <= iv <= 20_000_000:
+            raise ValueError("SUBPROC_MAX_OUTPUT_BYTES must be in range 1024..20000000")
         return iv
 
     @field_validator("DAILY_NODE_STATUS_REFRESH_AT")
@@ -473,8 +539,12 @@ class AppSettings(BaseSettings):
     @field_validator("TZ")
     @classmethod
     def _validate_tz(cls, v: str) -> str:
-        ZoneInfo((v or "").strip() or "UTC")
-        return (v or "").strip()
+        timezone_name = (v or "").strip() or "UTC"
+        try:
+            ZoneInfo(timezone_name)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError(f"unknown timezone: {timezone_name}") from exc
+        return timezone_name
 
     @field_validator("LOG_LEVEL", mode="before")
     @classmethod
@@ -515,14 +585,14 @@ class AppSettings(BaseSettings):
     @field_validator(
         "AUTH_FAIL_WINDOW_SEC",
         "AUTH_MAX_FAILS_IN_WINDOW",
+        "AUTH_GLOBAL_MAX_FAILS_IN_WINDOW",
         "AUTH_LOCKOUT_SEC",
         "AUTH_PRUNE_INTERVAL_SEC",
+        "ACCESS_REQUEST_COOLDOWN_SEC",
         "ERROR_NOTIFY_INTERVAL_SEC",
+        "OUTBOX_PROCESS_INTERVAL_SEC",
         "MAINT_RESTART_REMINDER_INTERVAL_SEC",
-        "BROADCAST_MAX_CONCURRENCY",
-        "BROADCAST_MAX_ATTEMPTS",
-        "FAIL2BAN_DIGEST_TAIL_LINES",
-        "FAIL2BAN_DIGEST_MAX_BYTES",
+        "STATUS_CACHE_TTL_SEC",
     )
     @classmethod
     def _positive_int(cls, v: int, info: ValidationInfo) -> int:
@@ -551,8 +621,22 @@ class AppSettings(BaseSettings):
     def _normalize_ssh_targets(cls, v: list[str]) -> list[str]:
         return [_validate_ssh_target(x) for x in v if str(x or "").strip()]
 
+    @field_validator("SSH_STRICT_HOST_KEY_CHECKING", mode="before")
+    @classmethod
+    def _validate_ssh_host_key_mode(cls, v: Any) -> str:
+        value = str(v or "").strip().lower() or "yes"
+        if value not in {"yes", "no", "ask", "accept-new"}:
+            raise ValueError("SSH_STRICT_HOST_KEY_CHECKING must be yes, no, ask, or accept-new")
+        return value
+
     @model_validator(mode="after")
     def _validate_server_codes(self) -> "AppSettings":
+        for timezone_name in [self.FAIL2BAN_TIMEZONE, *self.REMOTE_SERVER_FAIL2BAN_TIMEZONES]:
+            if timezone_name:
+                try:
+                    ZoneInfo(timezone_name)
+                except ZoneInfoNotFoundError as exc:
+                    raise ValueError(f"unknown fail2ban timezone: {timezone_name}") from exc
         targets = list(self.REMOTE_SERVER_SSH_TARGETS)
         if not targets and self.REMOTE_SERVER_SSH_TARGET.strip():
             targets = [self.REMOTE_SERVER_SSH_TARGET.strip()]
@@ -565,10 +649,17 @@ class AppSettings(BaseSettings):
                 "REMOTE_SERVER_EXPECTED_A_IPS": self.REMOTE_SERVER_EXPECTED_A_IPS,
                 "REMOTE_SERVER_CODES": self.REMOTE_SERVER_CODES,
                 "REMOTE_SERVER_LABELS": self.REMOTE_SERVER_LABELS,
+                "REMOTE_SERVER_FAIL2BAN_LOG_PATHS": self.REMOTE_SERVER_FAIL2BAN_LOG_PATHS,
+                "REMOTE_SERVER_FAIL2BAN_ENABLED": self.REMOTE_SERVER_FAIL2BAN_ENABLED,
+                "REMOTE_SERVER_FAIL2BAN_TIMEZONES": self.REMOTE_SERVER_FAIL2BAN_TIMEZONES,
+                "REMOTE_SERVER_REMNAWAVE_UUIDS": self.REMOTE_SERVER_REMNAWAVE_UUIDS,
             }
             for field_name, values in exact_order_fields.items():
                 if values and len(values) != total:
                     raise ValueError(f"{field_name} must contain exactly {total} comma-separated values")
+            for enabled_value in self.REMOTE_SERVER_FAIL2BAN_ENABLED:
+                if enabled_value.strip().lower() not in {"1", "0", "true", "false", "yes", "no", "on", "off"}:
+                    raise ValueError("REMOTE_SERVER_FAIL2BAN_ENABLED values must be true/false")
             if self.REMOTE_SERVER_CODES:
                 normalized_codes = [normalize_server_key(code, "srv") for code in self.REMOTE_SERVER_CODES]
                 if len(set(normalized_codes)) != len(normalized_codes):
@@ -578,9 +669,7 @@ class AppSettings(BaseSettings):
             if self.REMOTE_SERVER_DOMAINS:
                 group_count = len(self.REMOTE_SERVER_DOMAINS)
                 if group_count > 1 and group_count != total:
-                    raise ValueError(
-                        f"REMOTE_SERVER_DOMAINS must contain exactly {total} semicolon-separated groups"
-                    )
+                    raise ValueError(f"REMOTE_SERVER_DOMAINS must contain exactly {total} semicolon-separated groups")
                 if group_count == 1 and total > 1 and len(self.REMOTE_SERVER_DOMAINS[0]) != total:
                     raise ValueError(
                         "REMOTE_SERVER_DOMAINS must contain one comma-separated domain per server, "
@@ -593,11 +682,12 @@ class AppSettings(BaseSettings):
                         "REMOTE_SERVER_MONITOR_CONTAINERS_BY_SERVER must contain exactly "
                         f"{total} semicolon-separated groups"
                     )
-            if self.REMOTE_SERVER_REMNAWAVE_UUIDS and len(self.REMOTE_SERVER_REMNAWAVE_UUIDS) != total:
-                raise ValueError(
-                    f"REMOTE_SERVER_REMNAWAVE_UUIDS must contain exactly {total} comma-separated UUIDs "
-                    "(use empty value between commas to skip a server)"
-                )
+            if self.SSH_STRICT_HOST_KEY_CHECKING != "yes":
+                raise ValueError("SSH_STRICT_HOST_KEY_CHECKING must be yes when remote servers are enabled")
+            if not self.SSH_KNOWN_HOSTS_FILE.strip():
+                raise ValueError("SSH_KNOWN_HOSTS_FILE is required when remote servers are enabled")
+            if not self.SSH_IDENTITY_FILE.strip():
+                raise ValueError("SSH_IDENTITY_FILE is required when remote servers are enabled")
         if self.SUBPROC_SHORT_TIMEOUT > self.SUBPROC_MEDIUM_TIMEOUT:
             raise ValueError("SUBPROC_SHORT_TIMEOUT must be <= SUBPROC_MEDIUM_TIMEOUT")
         if self.BOT_MODE == "mixed" and not self.REMNAWAVE_METRICS_URL:
@@ -615,6 +705,8 @@ class ServerTarget:
     check_a_domains: list[str]
     monitor_containers: list[str]
     fail2ban_log_path: str
+    fail2ban_enabled: bool = True
+    fail2ban_timezone: str = ""
     ssh_target: str = ""
     remnawave_uuid: str = ""
 
@@ -623,25 +715,14 @@ SETTINGS = AppSettings()
 SECRETS = load_required_secrets(SECRETS_ENV_FILE, fallback_path=ENV_FILE)
 
 BOT_TOKEN = SECRETS.BOT_TOKEN
-AUTH_PASSWORD = SECRETS.AUTH_PASSWORD
 ADMIN_PASSWORD = SECRETS.ADMIN_PASSWORD
 
 TZ_NAME = SETTINGS.TZ.strip() or "Europe/Moscow"
-try:
-    TZ = ZoneInfo(TZ_NAME)
-except Exception:
-    logger.warning("Invalid TZ=%s, fallback to UTC", TZ_NAME)
-    TZ_NAME = "UTC"
-    TZ = ZoneInfo("UTC")
+TZ = ZoneInfo(TZ_NAME)
 
 USER_DATA_PATH = resolve_path(SETTINGS.USER_DATA_PATH, ROOT_DIR)
 IMPORTANT_DATA_PATH = resolve_path(SETTINGS.IMPORTANT_DATA_PATH, ROOT_DIR)
 LEGACY_CONFIG_PATH = resolve_path(SETTINGS.CONFIG_PATH, ROOT_DIR)
-
-FAIL2BAN_STATE_PATH = resolve_path(
-    SETTINGS.FAIL2BAN_STATE_PATH or str(Path(IMPORTANT_DATA_PATH).with_suffix(".fail2ban_state.json")),
-    ROOT_DIR,
-)
 
 MONITOR_CONTAINERS = list(SETTINGS.MONITOR_CONTAINERS)
 EXPECTED_A_IP = SETTINGS.EXPECTED_A_IP.strip()
@@ -661,13 +742,24 @@ DNS_DAILY_REFRESH_AT = SETTINGS.DNS_DAILY_REFRESH_AT.strip()
 DNS_STARTUP_REFRESH_DELAY_SEC = SETTINGS.DNS_STARTUP_REFRESH_DELAY_SEC
 MAINT_RESTART_NOTIFY_DELAY_SEC = SETTINGS.MAINT_RESTART_NOTIFY_DELAY_SEC
 MAINT_RESTART_REMINDER_INTERVAL_SEC = int(SETTINGS.MAINT_RESTART_REMINDER_INTERVAL_SEC)
-BROADCAST_MAX_CONCURRENCY = int(SETTINGS.BROADCAST_MAX_CONCURRENCY)
-BROADCAST_MAX_ATTEMPTS = int(SETTINGS.BROADCAST_MAX_ATTEMPTS)
 AUTH_FAIL_WINDOW_SEC = int(SETTINGS.AUTH_FAIL_WINDOW_SEC)
 AUTH_MAX_FAILS_IN_WINDOW = int(SETTINGS.AUTH_MAX_FAILS_IN_WINDOW)
+AUTH_GLOBAL_MAX_FAILS_IN_WINDOW = int(SETTINGS.AUTH_GLOBAL_MAX_FAILS_IN_WINDOW)
 AUTH_LOCKOUT_SEC = int(SETTINGS.AUTH_LOCKOUT_SEC)
 AUTH_PRUNE_INTERVAL_SEC = int(SETTINGS.AUTH_PRUNE_INTERVAL_SEC)
+ACCESS_REQUEST_COOLDOWN_SEC = int(SETTINGS.ACCESS_REQUEST_COOLDOWN_SEC)
 ERROR_NOTIFY_INTERVAL_SEC = int(SETTINGS.ERROR_NOTIFY_INTERVAL_SEC)
+OUTBOX_PROCESS_INTERVAL_SEC = int(SETTINGS.OUTBOX_PROCESS_INTERVAL_SEC)
+INSTANCE_LOCK_PATH = resolve_path(
+    SETTINGS.INSTANCE_LOCK_PATH or str(Path(USER_DATA_PATH).with_name("maintbot.lock")),
+    ROOT_DIR,
+)
+PTB_PERSISTENCE_PATH = resolve_path(
+    SETTINGS.PTB_PERSISTENCE_PATH or str(Path(USER_DATA_PATH).with_name("ptb_persistence")),
+    ROOT_DIR,
+)
+SUBPROC_MAX_OUTPUT_BYTES = int(SETTINGS.SUBPROC_MAX_OUTPUT_BYTES)
+STATUS_CACHE_TTL_SEC = int(SETTINGS.STATUS_CACHE_TTL_SEC)
 LOG_LEVEL = SETTINGS.LOG_LEVEL
 LOG_JSON = bool(SETTINGS.LOG_JSON)
 LOCAL_SERVER_CODE = SETTINGS.LOCAL_SERVER_CODE
@@ -682,6 +774,9 @@ REMOTE_SERVER_SSH_TARGET = SETTINGS.REMOTE_SERVER_SSH_TARGET.strip()
 REMOTE_SERVER_EXPECTED_A_IP = SETTINGS.REMOTE_SERVER_EXPECTED_A_IP.strip()
 REMOTE_SERVER_CHECK_A_DOMAINS = list(SETTINGS.REMOTE_SERVER_CHECK_A_DOMAINS)
 REMOTE_SERVER_FAIL2BAN_LOG_PATH = SETTINGS.REMOTE_SERVER_FAIL2BAN_LOG_PATH.strip() or "/var/log/fail2ban.log"
+REMOTE_SERVER_FAIL2BAN_LOG_PATHS = list(SETTINGS.REMOTE_SERVER_FAIL2BAN_LOG_PATHS)
+REMOTE_SERVER_FAIL2BAN_ENABLED = list(SETTINGS.REMOTE_SERVER_FAIL2BAN_ENABLED)
+REMOTE_SERVER_FAIL2BAN_TIMEZONES = list(SETTINGS.REMOTE_SERVER_FAIL2BAN_TIMEZONES)
 REMOTE_SERVER_MONITOR_CONTAINERS = list(SETTINGS.REMOTE_SERVER_MONITOR_CONTAINERS) or list(MONITOR_CONTAINERS)
 REMOTE_SERVER_FLAGS = list(SETTINGS.REMOTE_SERVER_FLAGS)
 REMOTE_SERVER_SSH_TARGETS = list(SETTINGS.REMOTE_SERVER_SSH_TARGETS)
@@ -697,6 +792,7 @@ REMNAWAVE_METRICS_USER = SETTINGS.REMNAWAVE_METRICS_USER
 REMNAWAVE_METRICS_PASS = SETTINGS.REMNAWAVE_METRICS_PASS
 REMNAWAVE_METRICS_TIMEOUT_SEC = int(SETTINGS.REMNAWAVE_METRICS_TIMEOUT_SEC)
 REMNAWAVE_METRICS_CACHE_TTL_SEC = int(SETTINGS.REMNAWAVE_METRICS_CACHE_TTL_SEC)
+REMNAWAVE_METRICS_MAX_BYTES = int(SETTINGS.REMNAWAVE_METRICS_MAX_BYTES)
 REMNAWAVE_HIDDEN_UUIDS = list(SETTINGS.REMNAWAVE_HIDDEN_UUIDS)
 LOCAL_SERVER_REMNAWAVE_UUID = SETTINGS.LOCAL_SERVER_REMNAWAVE_UUID
 REMOTE_SERVER_REMNAWAVE_UUIDS = list(SETTINGS.REMOTE_SERVER_REMNAWAVE_UUIDS)
@@ -705,8 +801,13 @@ DAILY_NODE_STATUS_REFRESH_AT = SETTINGS.DAILY_NODE_STATUS_REFRESH_AT
 SUBPROC_SHORT_TIMEOUT = SETTINGS.SUBPROC_SHORT_TIMEOUT
 SUBPROC_MEDIUM_TIMEOUT = SETTINGS.SUBPROC_MEDIUM_TIMEOUT
 
-SSH_STRICT_HOST_KEY_CHECKING = (SETTINGS.SSH_STRICT_HOST_KEY_CHECKING or "").strip() or "accept-new"
-SSH_KNOWN_HOSTS_FILE = (SETTINGS.SSH_KNOWN_HOSTS_FILE or "").strip()
+SSH_STRICT_HOST_KEY_CHECKING = (SETTINGS.SSH_STRICT_HOST_KEY_CHECKING or "").strip() or "yes"
+SSH_KNOWN_HOSTS_FILE = (
+    resolve_path(SETTINGS.SSH_KNOWN_HOSTS_FILE, ROOT_DIR) if SETTINGS.SSH_KNOWN_HOSTS_FILE.strip() else ""
+)
+SSH_IDENTITY_FILE = resolve_path(SETTINGS.SSH_IDENTITY_FILE, ROOT_DIR) if SETTINGS.SSH_IDENTITY_FILE.strip() else ""
+PRIVILEGED_HELPER_BIN = (SETTINGS.PRIVILEGED_HELPER_BIN or "").strip()
+
 
 def _build_servers() -> dict[str, ServerTarget]:
     local_flag = LOCAL_SERVER_FLAG or LOCAL_SERVER_CODE.upper()
@@ -720,6 +821,8 @@ def _build_servers() -> dict[str, ServerTarget]:
         check_a_domains=list(CHECK_A_DOMAINS),
         monitor_containers=list(MONITOR_CONTAINERS),
         fail2ban_log_path=FAIL2BAN_LOG_PATH,
+        fail2ban_enabled=bool(SETTINGS.FAIL2BAN_ENABLED),
+        fail2ban_timezone=SETTINGS.FAIL2BAN_TIMEZONE.strip() or TZ_NAME,
         remnawave_uuid=LOCAL_SERVER_REMNAWAVE_UUID,
     )
 
@@ -773,7 +876,14 @@ def _build_servers() -> dict[str, ServerTarget]:
             expected_a_ip=_nth_or_default(ips, idx, ""),
             check_a_domains=_domains_for_index(domain_groups, idx, total),
             monitor_containers=_group_for_index(container_groups, idx, REMOTE_SERVER_MONITOR_CONTAINERS),
-            fail2ban_log_path=REMOTE_SERVER_FAIL2BAN_LOG_PATH,
+            fail2ban_log_path=_nth_or_default(
+                REMOTE_SERVER_FAIL2BAN_LOG_PATHS,
+                idx,
+                REMOTE_SERVER_FAIL2BAN_LOG_PATH,
+            ),
+            fail2ban_enabled=_nth_or_default(REMOTE_SERVER_FAIL2BAN_ENABLED, idx, "true").strip().lower()
+            in {"1", "true", "yes", "on"},
+            fail2ban_timezone=_nth_or_default(REMOTE_SERVER_FAIL2BAN_TIMEZONES, idx, TZ_NAME) or TZ_NAME,
             ssh_target=target,
             remnawave_uuid=_nth_or_default(REMOTE_SERVER_REMNAWAVE_UUIDS, idx, ""),
         )

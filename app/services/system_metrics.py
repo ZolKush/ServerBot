@@ -111,7 +111,9 @@ async def disk_root() -> str:
         free = usage.free
 
         usep = int(round((used / total) * 100)) if total else 0
-        return f"{_fmt_bytes_binary(used)} / {_fmt_bytes_binary(total)} (avail {_fmt_bytes_binary(free)}, {usep}%) mount /"
+        return (
+            f"{_fmt_bytes_binary(used)} / {_fmt_bytes_binary(total)} (avail {_fmt_bytes_binary(free)}, {usep}%) mount /"
+        )
     except Exception:
         rc, out, _ = await run_exec(["df", "-h", "/"], timeout=SUBPROC_SHORT_TIMEOUT)
         if rc != 0:

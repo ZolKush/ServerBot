@@ -8,6 +8,7 @@ from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
 from ..logging_setup import logger
+from ..services.outbox import document_text_payload, message_payload
 from ..storage import get_user_meta_copy
 from .common import (
     format_dt_human,
@@ -24,6 +25,7 @@ SUBSCRIPTION_UPDATED_AT_KEY = "subscription_updated_at"
 SUBSCRIPTION_UPDATED_BY_ID_KEY = "subscription_updated_by_id"
 SUBSCRIPTION_UPDATED_BY_NAME_KEY = "subscription_updated_by_name"
 _INLINE_SUBSCRIPTION_LIMIT = 3000
+MAX_SUBSCRIPTION_BYTES = 1_000_000
 
 
 def get_subscription_text(meta: dict[str, Any] | None) -> str:
@@ -44,6 +46,27 @@ def _subscription_intro(meta: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def subscription_outbox_payload(
+    meta: dict[str, Any],
+    *,
+    title: str | None = None,
+    filename_prefix: str = "subscription",
+) -> dict[str, Any]:
+    cfg = get_subscription_text(meta)
+    if not cfg.strip():
+        raise ValueError("subscription is empty")
+    if len(cfg.encode("utf-8")) > MAX_SUBSCRIPTION_BYTES:
+        raise ValueError("subscription exceeds 1000000 UTF-8 bytes")
+    intro = title or _subscription_intro(meta)
+    if len(html_escape(cfg)) <= _INLINE_SUBSCRIPTION_LIMIT:
+        return message_payload(intro + "\n\n" + wrap_as_codeblock_html(cfg, limit=_INLINE_SUBSCRIPTION_LIMIT))
+    return document_text_payload(
+        cfg,
+        filename=f"{filename_prefix}.txt",
+        caption=intro + "\n\nПолная подписка находится в файле.",
+    )
+
+
 async def send_subscription_payload(
     context: ContextTypes.DEFAULT_TYPE,
     *,
@@ -55,6 +78,8 @@ async def send_subscription_payload(
     cfg = get_subscription_text(meta)
     if not cfg.strip():
         raise ValueError("subscription is empty")
+    if len(cfg.encode("utf-8")) > MAX_SUBSCRIPTION_BYTES:
+        raise ValueError("subscription exceeds 1000000 UTF-8 bytes")
 
     intro = title or _subscription_intro(meta)
     # Лимит Telegram считается по экранированному тексту (& -> &amp; и т.п.).

@@ -3,7 +3,7 @@ import logging
 import re
 from collections.abc import Sequence
 
-from ..config import DOCKER_BIN, SUBPROC_MEDIUM_TIMEOUT, SUDO_BIN
+from ..config import DOCKER_BIN, PRIVILEGED_HELPER_BIN, SUBPROC_MEDIUM_TIMEOUT, SUDO_BIN
 from .system_process import run_exec
 
 logger = logging.getLogger("maint-bot")
@@ -26,8 +26,16 @@ def _docker_cmds(*args: str) -> list[list[str]]:
     commands: list[list[str]] = []
     for base in bases:
         commands.append([base, *args])
-        if SUDO_BIN:
-            commands.append([SUDO_BIN, "-n", base, *args])
+    if SUDO_BIN and PRIVILEGED_HELPER_BIN:
+        helper_args: list[str] | None = None
+        if args[:1] == ("ps",):
+            helper_args = ["docker-ps"]
+        elif len(args) == 2 and args[0] == "inspect":
+            helper_args = ["docker-inspect", args[1]]
+        elif len(args) == 4 and args[0:2] == ("logs", "--tail"):
+            helper_args = ["docker-logs", args[3], args[2]]
+        if helper_args:
+            commands.append([SUDO_BIN, "-n", PRIVILEGED_HELPER_BIN, *helper_args])
     return commands
 
 

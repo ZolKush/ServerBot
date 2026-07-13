@@ -75,7 +75,7 @@ def users_list_kb(active_filter: str = USER_FILTER_ALL, page: int = 0) -> Inline
     for k, meta in authorized_users_snapshot().items():
         try:
             uid = int(meta.get("user_id", k))
-        except Exception:
+        except (TypeError, ValueError, OverflowError):
             continue
         if not _passes_filter(meta, active_filter):
             continue
@@ -89,7 +89,7 @@ def users_list_kb(active_filter: str = USER_FILTER_ALL, page: int = 0) -> Inline
 
     total_pages = max(1, (len(items) + USERS_PAGE_SIZE - 1) // USERS_PAGE_SIZE)
     page = max(0, min(int(page), total_pages - 1))
-    page_items = items[page * USERS_PAGE_SIZE: (page + 1) * USERS_PAGE_SIZE]
+    page_items = items[page * USERS_PAGE_SIZE : (page + 1) * USERS_PAGE_SIZE]
 
     row: list[InlineKeyboardButton] = []
     for role, enabled, is_paid, _, uid, name in page_items:
@@ -135,7 +135,8 @@ def users_all_confirm_kb() -> InlineKeyboardMarkup:
 
 def user_card_kb(uid: int) -> InlineKeyboardMarkup:
     meta = get_user_meta(uid) or {}
-    enabled = bool(meta.get("enabled", True))
+    state = str(meta.get("access_state") or ("approved" if meta.get("enabled", True) else "blocked"))
+    enabled = state == "approved"
     role = meta.get("role", "user")
 
     rows: list[list[InlineKeyboardButton]] = [
@@ -149,15 +150,18 @@ def user_card_kb(uid: int) -> InlineKeyboardMarkup:
     ]
 
     if role != "admin":
-        rows.append([InlineKeyboardButton("🚫 Забанить" if enabled else "✅ Разбанить", callback_data=f"users:toggle:{uid}")])
+        label = "🚫 Забанить" if enabled else ("✅ Разбанить" if state == "blocked" else "✅ Одобрить доступ")
+        rows.append([InlineKeyboardButton(label, callback_data=f"users:toggle:{uid}")])
 
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="users:back")])
     rows.append([InlineKeyboardButton("🏠 Меню", callback_data="menu:home")])
     return InlineKeyboardMarkup(rows)
 
 
-def confirm_toggle_kb(uid: int, enabled_now: bool) -> InlineKeyboardMarkup:
-    action = "Разбанить" if not enabled_now else "Забанить"
+def confirm_toggle_kb(uid: int, access_state: str) -> InlineKeyboardMarkup:
+    action = (
+        "Забанить" if access_state == "approved" else ("Разбанить" if access_state == "blocked" else "Одобрить доступ")
+    )
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton(f"✅ Подтвердить: {action}", callback_data=f"users:toggleapply:{uid}")],
@@ -185,9 +189,16 @@ def format_user_card(meta: dict[str, Any]) -> str:
     uname = meta.get("username")
     nm = " ".join([x for x in [meta.get("first_name"), meta.get("last_name")] if x]) or "-"
     auth_at = meta.get("auth_at") or "-"
-    enabled = bool(meta.get("enabled", True))
-    status = "активен" if enabled else "отключен"
-    status_dot = "🟢" if enabled else "🔴"
+    state = str(meta.get("access_state") or ("approved" if meta.get("enabled", True) else "blocked"))
+    state_labels = {
+        "approved": "доступ одобрен",
+        "pending": "ожидает одобрения",
+        "blocked": "заблокирован",
+        "logged_out": "вышел",
+        "rejected": "заявка отклонена",
+    }
+    status = state_labels.get(state, "статус неизвестен")
+    status_dot = "🟢" if state == "approved" else ("🟡" if state == "pending" else "🔴")
     has_subscription = bool(str(meta.get(SUBSCRIPTION_TEXT_KEY, "") or "").strip())
     subscription_updated_at = meta.get("subscription_updated_at") or "-"
     auth_at_human = format_dt_human(auth_at)
@@ -198,6 +209,7 @@ def format_user_card(meta: dict[str, Any]) -> str:
         f"ID: <code>{html_escape(str(uid))}</code>\n"
         f"{SEP}\n"
         "🔐 <b>Доступ</b>\n"
+        f"• Статус: <b>{html_escape(status)}</b>\n"
         f"• Роль: <b>{html_escape(str(role))}</b>\n"
         f"• Оплата: <b>{'⭐ оплачена' if bool(meta.get('is_paid', False)) else 'не оплачена'}</b>\n"
         f"• Авторизация: <code>{html_escape(auth_at_human)}</code>\n"

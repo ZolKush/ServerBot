@@ -1,7 +1,24 @@
+# Direct runtime dependencies.
 python-telegram-bot[job-queue]==22.8
 python-dotenv==1.2.2
-aiofiles==25.1.0
 aiodns==4.0.4
-httpx>=0.28,<0.29
-pydantic>=2.13,<3
+httpx==0.28.1
+idna==3.18
+pydantic==2.13.4
 pydantic-settings==2.14.2
+
+# Compatible transitive runtime lock (review and test as one set).
+annotated-types==0.7.0
+anyio==4.14.2
+APScheduler==3.11.3
+certifi==2026.6.17
+cffi==2.1.0
+h11==0.16.0
+httpcore==1.0.9
+pycares==5.0.1
+pycparser==3.0
+pydantic-core==2.46.4
+typing-extensions==4.16.0
+typing-inspection==0.4.2
+tzlocal==5.4.4
+tzdata==2026.3; sys_platform == "win32"

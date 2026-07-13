@@ -2,19 +2,56 @@
 Description=MaintBot Telegram Bot
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=3
 
 [Service]
 Type=simple
 User=maintbot
+Group=maintbot
 WorkingDirectory=/opt/maintbot
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/opt/maintbot/.venv/bin/python -m app.main
-Restart=always
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=LANG=C.UTF-8
+Environment=LC_ALL=C.UTF-8
+Environment=INSTANCE_LOCK_PATH=/run/maintbot/maintbot.lock
+RuntimeDirectory=maintbot
+RuntimeDirectoryMode=0700
+UMask=0077
+ExecCondition=/opt/maintbot/.venv/bin/python -m app.config_check
+ExecStart=/opt/maintbot/.venv/bin/python -m app.launcher
+Restart=on-failure
+RestartPreventExitStatus=75
+SuccessExitStatus=75
 RestartSec=5
+TimeoutStartSec=30
 TimeoutStopSec=30
-LogsDirectory=maintbot
-StandardOutput=append:/var/log/maintbot/bot.log
-StandardError=append:/var/log/maintbot/bot.log
+KillMode=control-group
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=maintbot
+
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictNamespaces=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+ReadWritePaths=/opt/maintbot/data
+
+MemoryMax=512M
+TasksMax=128
+LimitNOFILE=4096
 
 [Install]
 WantedBy=multi-user.target
