@@ -9,6 +9,8 @@ AttachmentType = Literal["photo", "document"]
 MaintScope = str
 MaintUrgency = Literal["urgent", "planned"]
 AccessState = Literal["pending", "approved", "blocked", "logged_out", "rejected"]
+ServiceTier = Literal["basic", "subscriber", "unlimited_trial"]
+AdminLevel = Literal["admin", "owner", "none"]
 
 
 class Attachment(TypedDict, total=False):
@@ -28,6 +30,7 @@ class TicketMessage(TypedDict, total=False):
     text: str
     kind: str
     attachment: Attachment
+    sender_signature_version: int
 
 
 class Ticket(TypedDict, total=False):
@@ -40,11 +43,13 @@ class Ticket(TypedDict, total=False):
     user_username: str | None
     assignee_id: int | None
     assignee_name: str | None
+    assignee_signature_version: int | None
     created_at: str
     updated_at: str
     closed_at: str | None
     closed_by_id: int | None
     closed_by_name: str | None
+    closed_by_signature_version: int | None
     user_reply_allowed: bool
     messages: list[TicketMessage]
 
@@ -59,6 +64,7 @@ class Maintenance(TypedDict, total=False):
     expected_end: str
     author_id: int | None
     author_name: str
+    author_signature_version: int
     updated_at: str
 
 
@@ -71,6 +77,7 @@ class ScheduledMaintenance(TypedDict, total=False):
     scheduled_end: str
     author_id: int | None
     author_name: str
+    author_signature_version: int
     created_at: str
     updated_at: str
     notified_thresholds: list[int]
@@ -84,12 +91,22 @@ class UserMeta(TypedDict, total=False):
     enabled: bool
     access_state: AccessState
     is_paid: bool
+    service_tier: ServiceTier
+    admin_level: AdminLevel
+    staff_title: str | None
+    staff_alias: str | None
+    staff_display_mode: str
     nickname: str | None
     username: str | None
     first_name: str | None
     last_name: str | None
     auth_at: str | None
-    subscription_text: str | None
+    connection_url: str | None
+    subscription_end_at: str | None
+    paid_at: str | None
+    trial_issued_at: str | None
+    last_auto_payment_reminder_at: str | None
+    last_manual_payment_reminder_at: str | None
     subscription_updated_at: str | None
     subscription_updated_by_id: int | None
     subscription_updated_by_name: str | None
@@ -133,6 +150,7 @@ class MaintenanceKeys:
     EXPECTED_END = "expected_end"
     AUTHOR_ID = "author_id"
     AUTHOR_NAME = "author_name"
+    AUTHOR_SIGNATURE_VERSION = "author_signature_version"
     UPDATED_AT = "updated_at"
 
 
@@ -145,6 +163,7 @@ class ScheduledMaintenanceKeys:
     SCHEDULED_END = "scheduled_end"
     AUTHOR_ID = "author_id"
     AUTHOR_NAME = "author_name"
+    AUTHOR_SIGNATURE_VERSION = "author_signature_version"
     CREATED_AT = "created_at"
     UPDATED_AT = "updated_at"
     NOTIFIED_THRESHOLDS = "notified_thresholds"
@@ -174,6 +193,7 @@ __all__ = [
     "Attachment",
     "AttachmentType",
     "AccessState",
+    "AdminLevel",
     "Maintenance",
     "MaintenanceKeys",
     "MaintScope",
@@ -181,6 +201,7 @@ __all__ = [
     "ScheduledMaintenance",
     "ScheduledMaintenanceKeys",
     "SenderRole",
+    "ServiceTier",
     "Ticket",
     "TicketKeys",
     "TicketMessage",

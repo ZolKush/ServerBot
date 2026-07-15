@@ -13,11 +13,31 @@ from pathlib import Path
 from typing import IO, Any, TypeVar
 
 from .config import IMPORTANT_DATA_PATH, LEGACY_CONFIG_PATH, USER_DATA_PATH, logger
+from .constants import IMPORTANT_DATA_SCHEMA_VERSION, USER_DATA_SCHEMA_VERSION
+from .staff import (
+    STAFF_DISPLAY_TITLE,
+    is_owner_meta,
+    normalize_staff_alias,
+    normalize_staff_display_mode,
+    normalize_staff_title,
+    staff_public_signature,
+)
 
 T = TypeVar("T")
-USER_DATA_SCHEMA_VERSION = 2
-IMPORTANT_DATA_SCHEMA_VERSION = 2
 ACCESS_STATES = {"pending", "approved", "blocked", "logged_out", "rejected"}
+SERVICE_TIERS = {"basic", "subscriber", "unlimited_trial"}
+ADMIN_LEVELS = {"admin", "owner"}
+SERVICE_REQUEST_KINDS = {"trial", "purchase", "renewal"}
+SERVICE_REQUEST_STATUSES = {
+    "pending",
+    "claimed",
+    "awaiting_link",
+    "requisites_sent",
+    "payment_reported",
+    "approved",
+    "rejected",
+    "cancelled",
+}
 
 
 class UpdateAborted(Exception):
@@ -28,6 +48,104 @@ def _normalize_bool(value: Any, truthy: set[str]) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in truthy
     return bool(value)
+
+
+def _optional_text(value: Any, *, limit: int = 4096) -> str | None:
+    if value in (None, ""):
+        return None
+    text = str(value).strip()
+    return text[:limit] if text else None
+
+
+def _optional_int(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _normalize_product_settings(raw: Any = None) -> dict[str, Any]:
+    source = dict(raw) if isinstance(raw, dict) else {}
+    return {
+        "payment_bank": _optional_text(source.get("payment_bank"), limit=160),
+        "payment_recipient": _optional_text(source.get("payment_recipient"), limit=160),
+        "payment_phone": _optional_text(source.get("payment_phone"), limit=80),
+        "current_period_end": _optional_text(source.get("current_period_end"), limit=80),
+        "next_period_end": _optional_text(source.get("next_period_end"), limit=80),
+        "period_setup_reminder_for": _optional_text(source.get("period_setup_reminder_for"), limit=80),
+        "period_missing_notice_for": _optional_text(source.get("period_missing_notice_for"), limit=80),
+    }
+
+
+def _normalize_service_requests(raw: Any) -> dict[str, dict[str, Any]]:
+    if not isinstance(raw, dict):
+        return {}
+    normalized: dict[str, dict[str, Any]] = {}
+    for raw_id, raw_request in raw.items():
+        if not isinstance(raw_request, dict):
+            continue
+        try:
+            request_id = int(str(raw_request.get("id", raw_id)))
+            user_id = int(raw_request.get("user_id", 0))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        kind = str(raw_request.get("kind") or "")
+        status = str(raw_request.get("status") or "pending")
+        if request_id <= 0 or user_id <= 0 or kind not in SERVICE_REQUEST_KINDS:
+            continue
+        if status not in SERVICE_REQUEST_STATUSES:
+            status = "pending"
+        item = copy.deepcopy(raw_request)
+        item.pop("used_app", None)
+        item.pop("used_application", None)
+        item.update({"id": request_id, "user_id": user_id, "kind": kind, "status": status})
+        resume_status = str(item.get("resume_status") or "")
+        item["resume_status"] = resume_status if resume_status in {"pending", "payment_reported"} else None
+        for key in (
+            "created_at",
+            "updated_at",
+            "comment",
+            "claimed_at",
+            "reviewed_at",
+            "target_end_at",
+            "payment_reported_at",
+            "decision_reason",
+        ):
+            item[key] = _optional_text(item.get(key), limit=3200 if key == "comment" else 500)
+        for key in ("claimed_by_id", "reviewed_by_id"):
+            try:
+                item[key] = int(item[key]) if item.get(key) not in (None, "") else None
+            except (TypeError, ValueError, OverflowError):
+                item[key] = None
+        normalized[str(request_id)] = item
+    return normalized
+
+
+def _normalize_audit_log(raw: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw, list):
+        return []
+    result: list[dict[str, Any]] = []
+    for item in raw[-2000:]:
+        if not isinstance(item, dict):
+            continue
+        action = _optional_text(item.get("action"), limit=100)
+        ts = _optional_text(item.get("ts"), limit=80)
+        if not action or not ts:
+            continue
+        clean: dict[str, Any] = {
+            "ts": ts,
+            "action": action,
+            "actor_id": item.get("actor_id"),
+            "actor_public": _optional_text(item.get("actor_public"), limit=160),
+            "actor_internal": _optional_text(item.get("actor_internal"), limit=240),
+            "target_user_id": item.get("target_user_id"),
+            "details": copy.deepcopy(item.get("details")) if isinstance(item.get("details"), dict) else {},
+        }
+        result.append(clean)
+    return result[-2000:]
 
 
 def _normalize_outbox(raw: Any) -> dict[str, dict[str, Any]]:
@@ -265,10 +383,16 @@ def _backup_corrupt_file(path: str) -> None:
 class UserData:
     authorized_users: dict[str, dict[str, Any]] = field(default_factory=dict)
     outbox: dict[str, dict[str, Any]] = field(default_factory=dict)
+    request_seq: int = 0
+    service_requests: dict[str, dict[str, Any]] = field(default_factory=dict)
+    product_settings: dict[str, Any] = field(default_factory=_normalize_product_settings)
+    audit_log: list[dict[str, Any]] = field(default_factory=list)
 
     @staticmethod
     def _normalize_user(meta: dict[str, Any]) -> dict[str, Any]:
         meta = dict(meta) if isinstance(meta, dict) else {}
+        meta.pop("used_app", None)
+        meta.pop("used_application", None)
 
         uid_raw = meta.get("user_id")
         try:
@@ -289,14 +413,14 @@ class UserData:
         meta["role"] = role
         meta["access_state"] = state
         meta["enabled"] = state == "approved"
-        for key, raw_value in (
-            ("nickname", meta.get("nickname") or meta.get("nick")),
-            ("username", meta.get("username")),
-            ("first_name", meta.get("first_name")),
-            ("last_name", meta.get("last_name")),
-            ("auth_at", meta.get("auth_at")),
+        for key, raw_value, limit in (
+            ("nickname", meta.get("nickname") or meta.get("nick"), 160),
+            ("username", meta.get("username"), 64),
+            ("first_name", meta.get("first_name"), 256),
+            ("last_name", meta.get("last_name"), 256),
+            ("auth_at", meta.get("auth_at"), 80),
         ):
-            meta[key] = str(raw_value)[:4096] if raw_value not in (None, "") else None
+            meta[key] = _optional_text(raw_value, limit=limit)
         for key in (
             "access_requested_at",
             "access_reviewed_at",
@@ -309,13 +433,112 @@ class UserData:
             "logged_out_at",
         ):
             meta.setdefault(key, None)
+        for key, limit in (
+            ("access_requested_at", 80),
+            ("access_reviewed_at", 80),
+            ("access_reviewed_by_name", 160),
+            ("blocked_at", 80),
+            ("blocked_by_name", 160),
+            ("blocked_reason", 500),
+            ("logged_out_at", 80),
+        ):
+            meta[key] = _optional_text(meta.get(key), limit=limit)
+        for key in ("access_reviewed_by_id", "blocked_by_id"):
+            meta[key] = _optional_int(meta.get(key))
 
+        is_admin = role == "admin"
+        admin_level = str(meta.get("admin_level") or "admin") if is_admin else "none"
+        if admin_level not in ADMIN_LEVELS:
+            admin_level = "admin" if is_admin else "none"
+        meta["admin_level"] = admin_level
+        meta["staff_title"] = (
+            normalize_staff_title(meta.get("staff_title"), owner=admin_level == "owner") if is_admin else None
+        )
+        meta["staff_alias"] = normalize_staff_alias(meta.get("staff_alias")) if is_admin else None
+        display_mode = normalize_staff_display_mode(meta.get("staff_display_mode")) if is_admin else STAFF_DISPLAY_TITLE
+        meta["staff_display_mode"] = display_mode if meta["staff_alias"] else STAFF_DISPLAY_TITLE
+
+        tier = "subscriber" if is_admin else str(meta.get("service_tier") or "basic")
+        if tier not in SERVICE_TIERS:
+            tier = "basic"
+        meta["service_tier"] = tier
         meta["is_paid"] = _normalize_bool(meta.get("is_paid", False), {"1", "true", "yes", "y", "on", "paid"})
+        if tier != "subscriber":
+            meta["is_paid"] = False
+
+        connection = meta.get("connection_url")
+        if connection in (None, ""):
+            connection = meta.get("subscription_text")
+        meta["connection_url"] = _optional_text(connection, limit=1_000_000)
+        meta.pop("subscription_text", None)
+
+        for key in (
+            "subscription_updated_at",
+            "subscription_updated_by_id",
+            "subscription_updated_by_name",
+            "paid_at",
+            "payment_confirmed_by_id",
+            "payment_confirmed_by_name",
+            "subscription_end_at",
+            "trial_issued_at",
+            "trial_issued_by_id",
+            "trial_issued_by_name",
+            "last_auto_payment_reminder_at",
+            "last_auto_payment_reminder_type",
+            "last_manual_payment_reminder_at",
+            "last_manual_payment_reminder_by_id",
+            "last_manual_payment_reminder_by_name",
+            "service_tier_updated_at",
+            "service_tier_updated_by_id",
+            "service_tier_updated_by_name",
+        ):
+            meta.setdefault(key, None)
+        for key, limit in (
+            ("subscription_updated_at", 80),
+            ("subscription_updated_by_name", 160),
+            ("paid_at", 80),
+            ("payment_confirmed_by_name", 160),
+            ("subscription_end_at", 80),
+            ("trial_issued_at", 80),
+            ("trial_issued_by_name", 160),
+            ("last_auto_payment_reminder_at", 80),
+            ("last_auto_payment_reminder_type", 40),
+            ("last_manual_payment_reminder_at", 80),
+            ("last_manual_payment_reminder_by_name", 160),
+            ("service_tier_updated_at", 80),
+            ("service_tier_updated_by_name", 160),
+        ):
+            meta[key] = _optional_text(meta.get(key), limit=limit)
+        for key in (
+            "subscription_updated_by_id",
+            "payment_confirmed_by_id",
+            "trial_issued_by_id",
+            "last_manual_payment_reminder_by_id",
+            "service_tier_updated_by_id",
+        ):
+            meta[key] = _optional_int(meta.get(key))
+        if tier == "unlimited_trial":
+            meta["subscription_end_at"] = None
+
+        raw_reminders = meta.get("payment_auto_reminders")
+        meta["payment_auto_reminders"] = (
+            {
+                str(key)[:180]: str(value)[:80]
+                for key, value in list(raw_reminders.items())[-200:]
+                if str(key).strip() and str(value).strip()
+            }
+            if isinstance(raw_reminders, dict)
+            else {}
+        )
         return meta
 
     @staticmethod
     def _migrate(raw: dict[str, Any]) -> "UserData":
         authorized_users: dict[str, dict[str, Any]] = {}
+        try:
+            schema_version = int(raw.get("schema_version", 0) or 0)
+        except (TypeError, ValueError):
+            schema_version = 0
 
         if isinstance(raw.get("authorized_users"), dict):
             for k, meta in raw["authorized_users"].items():
@@ -325,7 +548,10 @@ class UserData:
                     uid = int(meta.get("user_id", k))
                 except (TypeError, ValueError, OverflowError):
                     continue
-                authorized_users[str(uid)] = UserData._normalize_user({**meta, "user_id": uid})
+                candidate = {**meta, "user_id": uid}
+                if schema_version < 3 and "service_tier" not in candidate:
+                    candidate["service_tier"] = "subscriber"
+                authorized_users[str(uid)] = UserData._normalize_user(candidate)
         else:
             allowed = raw.get("allowed_user_ids", [])
             if isinstance(allowed, list):
@@ -334,16 +560,43 @@ class UserData:
                         uid_i = int(uid)
                     except (TypeError, ValueError, OverflowError):
                         continue
-                    authorized_users[str(uid_i)] = UserData._normalize_user({"user_id": uid_i, "role": "user"})
+                    authorized_users[str(uid_i)] = UserData._normalize_user(
+                        {"user_id": uid_i, "role": "user", "service_tier": "subscriber"}
+                    )
 
         outbox = _normalize_outbox(raw.get("outbox"))
-        return UserData(authorized_users=authorized_users, outbox=outbox)
+        owners = [meta for meta in authorized_users.values() if is_owner_meta(meta)]
+        if len(owners) > 1:
+            raise ValueError("в пользовательских данных найдено несколько руководителей сервиса")
+        try:
+            request_seq = max(0, int(raw.get("request_seq", 0) or 0))
+        except (TypeError, ValueError):
+            request_seq = 0
+        service_requests = _normalize_service_requests(raw.get("service_requests"))
+        if service_requests:
+            request_seq = max(request_seq, max(int(key) for key in service_requests))
+        return UserData(
+            authorized_users=authorized_users,
+            outbox=outbox,
+            request_seq=request_seq,
+            service_requests=service_requests,
+            product_settings=_normalize_product_settings(raw.get("product_settings")),
+            audit_log=_normalize_audit_log(raw.get("audit_log")),
+        )
 
     @staticmethod
     def _needs_rewrite(raw: dict[str, Any]) -> bool:
         if raw.get("schema_version") != USER_DATA_SCHEMA_VERSION:
             return True
-        allowed_keys = {"schema_version", "authorized_users", "outbox"}
+        allowed_keys = {
+            "schema_version",
+            "authorized_users",
+            "outbox",
+            "request_seq",
+            "service_requests",
+            "product_settings",
+            "audit_log",
+        }
         return any(k not in allowed_keys for k in raw)
 
     @classmethod
@@ -383,6 +636,10 @@ class UserData:
             "schema_version": USER_DATA_SCHEMA_VERSION,
             "authorized_users": self.authorized_users,
             "outbox": self.outbox,
+            "request_seq": self.request_seq,
+            "service_requests": self.service_requests,
+            "product_settings": self.product_settings,
+            "audit_log": self.audit_log,
         }
         _write_json_atomic_sync(path, payload)
 
@@ -393,6 +650,10 @@ class UserData:
                 "schema_version": USER_DATA_SCHEMA_VERSION,
                 "authorized_users": self.authorized_users,
                 "outbox": self.outbox,
+                "request_seq": self.request_seq,
+                "service_requests": self.service_requests,
+                "product_settings": self.product_settings,
+                "audit_log": self.audit_log,
             },
         )
 
@@ -534,6 +795,9 @@ _IMPORTANT_DATA_LOCK: asyncio.Lock | None = None
 USER_DATA_SNAPSHOT: dict[str, dict[str, Any]] = {}
 IMPORTANT_DATA_SNAPSHOT: dict[str, Any] = {}
 USER_OUTBOX_SNAPSHOT: dict[str, dict[str, Any]] = {}
+USER_SERVICE_REQUESTS_SNAPSHOT: dict[str, dict[str, Any]] = {}
+USER_PRODUCT_SETTINGS_SNAPSHOT: dict[str, Any] = {}
+USER_AUDIT_LOG_SNAPSHOT: list[dict[str, Any]] = []
 
 
 def _get_user_data_lock() -> asyncio.Lock:
@@ -551,11 +815,15 @@ def _get_important_data_lock() -> asyncio.Lock:
 
 
 def _refresh_user_snapshot() -> None:
-    global USER_DATA_SNAPSHOT, USER_OUTBOX_SNAPSHOT
+    global USER_AUDIT_LOG_SNAPSHOT, USER_DATA_SNAPSHOT, USER_OUTBOX_SNAPSHOT
+    global USER_PRODUCT_SETTINGS_SNAPSHOT, USER_SERVICE_REQUESTS_SNAPSHOT
     USER_DATA_SNAPSHOT = {
         k: copy.deepcopy(v) for k, v in getattr(USER_DATA, "authorized_users", {}).items() if isinstance(v, dict)
     }
     USER_OUTBOX_SNAPSHOT = copy.deepcopy(getattr(USER_DATA, "outbox", {}) or {})
+    USER_SERVICE_REQUESTS_SNAPSHOT = copy.deepcopy(getattr(USER_DATA, "service_requests", {}) or {})
+    USER_PRODUCT_SETTINGS_SNAPSHOT = copy.deepcopy(getattr(USER_DATA, "product_settings", {}) or {})
+    USER_AUDIT_LOG_SNAPSHOT = copy.deepcopy(getattr(USER_DATA, "audit_log", []) or [])
 
 
 def _refresh_important_snapshot() -> None:
@@ -589,6 +857,10 @@ async def _reload_user_data_from_disk() -> None:
     latest = UserData._migrate(raw)
     USER_DATA.authorized_users = copy.deepcopy(latest.authorized_users)
     USER_DATA.outbox = copy.deepcopy(latest.outbox)
+    USER_DATA.request_seq = int(latest.request_seq or 0)
+    USER_DATA.service_requests = copy.deepcopy(latest.service_requests)
+    USER_DATA.product_settings = copy.deepcopy(latest.product_settings)
+    USER_DATA.audit_log = copy.deepcopy(latest.audit_log)
 
 
 async def _reload_important_data_from_disk() -> None:
@@ -621,16 +893,28 @@ async def update_user_data(update_fn: Callable[[UserData], T]) -> T:
             await _reload_user_data_from_disk()
             prev_authorized_users = copy.deepcopy(USER_DATA.authorized_users)
             prev_outbox = copy.deepcopy(USER_DATA.outbox)
+            prev_request_seq = USER_DATA.request_seq
+            prev_service_requests = copy.deepcopy(USER_DATA.service_requests)
+            prev_product_settings = copy.deepcopy(USER_DATA.product_settings)
+            prev_audit_log = copy.deepcopy(USER_DATA.audit_log)
             try:
                 result = update_fn(USER_DATA)
                 await USER_DATA.save_async(USER_DATA_PATH)
             except UpdateAborted:
                 USER_DATA.authorized_users = prev_authorized_users
                 USER_DATA.outbox = prev_outbox
+                USER_DATA.request_seq = prev_request_seq
+                USER_DATA.service_requests = prev_service_requests
+                USER_DATA.product_settings = prev_product_settings
+                USER_DATA.audit_log = prev_audit_log
                 raise
             except Exception:
                 USER_DATA.authorized_users = prev_authorized_users
                 USER_DATA.outbox = prev_outbox
+                USER_DATA.request_seq = prev_request_seq
+                USER_DATA.service_requests = prev_service_requests
+                USER_DATA.product_settings = prev_product_settings
+                USER_DATA.audit_log = prev_audit_log
                 logger.exception("Не удалось обновить user_data")
                 raise
             _refresh_user_snapshot()
@@ -736,6 +1020,83 @@ def authorized_users_snapshot() -> dict[str, dict[str, Any]]:
     return copy.deepcopy(USER_DATA_SNAPSHOT)
 
 
+def service_requests_snapshot() -> dict[str, dict[str, Any]]:
+    return copy.deepcopy(USER_SERVICE_REQUESTS_SNAPSHOT)
+
+
+def product_settings_snapshot() -> dict[str, Any]:
+    return copy.deepcopy(USER_PRODUCT_SETTINGS_SNAPSHOT)
+
+
+def audit_log_snapshot() -> list[dict[str, Any]]:
+    return copy.deepcopy(USER_AUDIT_LOG_SNAPSHOT)
+
+
+def get_owner_meta_copy() -> dict[str, Any] | None:
+    for meta in USER_DATA_SNAPSHOT.values():
+        if is_owner_meta(meta):
+            return copy.deepcopy(meta)
+    return None
+
+
+def get_user_audit_entries(uid: int, *, limit: int = 5) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for item in reversed(USER_AUDIT_LOG_SNAPSHOT):
+        try:
+            target_uid = int(item.get("target_user_id", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if target_uid == int(uid):
+            result.append(copy.deepcopy(item))
+            if len(result) >= max(1, int(limit)):
+                break
+    return result
+
+
+def next_service_request_id(cfg: UserData) -> int:
+    cfg.request_seq = max(0, int(cfg.request_seq or 0)) + 1
+    return cfg.request_seq
+
+
+def append_audit_entry(
+    cfg: UserData,
+    *,
+    action: str,
+    actor_meta: dict[str, Any] | None,
+    target_user_id: int | None = None,
+    details: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    safe_details = copy.deepcopy(details) if isinstance(details, dict) else {}
+    for key in tuple(safe_details):
+        lowered = str(key).lower()
+        if any(secret_part in lowered for secret_part in ("password", "token", "connection", "url")):
+            safe_details[key] = "<скрыто>"
+    actor_id = (actor_meta or {}).get("user_id")
+    real_name = " ".join(
+        str(part).strip()
+        for part in ((actor_meta or {}).get("first_name"), (actor_meta or {}).get("last_name"))
+        if str(part or "").strip()
+    )
+    username = str((actor_meta or {}).get("username") or "").strip().lstrip("@")
+    internal_name = (
+        f"{real_name} (@{username})"
+        if real_name and username
+        else (real_name or (f"@{username}" if username else "система"))
+    )
+    internal = f"{internal_name}, ID {actor_id}" if actor_id not in (None, "") else internal_name
+    entry = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "action": str(action or "unknown")[:100],
+        "actor_id": actor_id,
+        "actor_public": staff_public_signature(actor_meta) if actor_meta else "Система",
+        "actor_internal": internal[:240],
+        "target_user_id": int(target_user_id) if target_user_id is not None else None,
+        "details": safe_details,
+    }
+    cfg.audit_log = [*list(cfg.audit_log or []), entry][-2000:]
+    return copy.deepcopy(entry)
+
+
 async def upsert_user_meta(uid: int, meta: dict[str, Any]) -> dict[str, Any]:
     return await update_user_data(lambda cfg: _set_user_meta(cfg, uid, meta))
 
@@ -824,14 +1185,7 @@ def get_admin_name_by_id(admin_id: int) -> str | None:
         or not bool(meta.get("enabled", True))
     ):
         return None
-    nick = str(meta.get("nickname") or "").strip()
-    if nick:
-        return nick
-    uname = meta.get("username")
-    if uname:
-        return f"@{str(uname)}"
-    nm = " ".join(str(x) for x in [meta.get("first_name"), meta.get("last_name")] if x)
-    return nm.strip() or str(admin_id)
+    return staff_public_signature(meta)
 
 
 def get_dns_status_cache(server_key: str) -> dict[str, Any] | None:

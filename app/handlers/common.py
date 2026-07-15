@@ -13,12 +13,20 @@ from telegram.ext import ContextTypes, ConversationHandler
 
 from ..config import (
     MENU_MAINT,
+    MENU_REQUESTS,
+    MENU_STAFF_PROFILE,
     MENU_STATUS,
     MENU_SUBSCRIPTION,
     MENU_TICKET,
     MENU_USERS,
     TZ,
     logger,
+)
+from ..staff import (
+    is_lead_or_owner_meta,
+    is_owner_meta,
+    staff_public_signature,
+    staff_title_label,
 )
 from ..storage import authorized_users_snapshot, get_user_meta_copy
 
@@ -167,13 +175,39 @@ def is_admin(update: Update) -> bool:
     )
 
 
+def is_owner(update: Update) -> bool:
+    uid = get_user_id(update)
+    return bool(uid is not None and is_owner_meta(get_user_meta(uid)))
+
+
+def is_lead_or_owner(update: Update) -> bool:
+    uid = get_user_id(update)
+    return bool(uid is not None and is_lead_or_owner_meta(get_user_meta(uid)))
+
+
+def has_subscriber_access(meta: dict[str, Any] | None) -> bool:
+    if not meta:
+        return False
+    return bool(meta.get("role") == "admin" or meta.get("service_tier") in {"subscriber", "unlimited_trial"})
+
+
+def staff_signature(update: Update, *, allow_alias: bool = True) -> str:
+    uid = get_user_id(update)
+    return staff_public_signature(get_user_meta(uid) if uid is not None else None, allow_alias=allow_alias)
+
+
+def staff_title(update: Update) -> str:
+    uid = get_user_id(update)
+    return staff_title_label(get_user_meta(uid) if uid is not None else None)
+
+
 async def reply_disabled(update: Update) -> None:
     msg = update.effective_message
     if msg:
         meta = get_user_meta(get_user_id(update) or 0) or {}
         state = str(meta.get("access_state") or "blocked")
         texts = {
-            "blocked": "Доступ к боту заблокирован администратором.",
+            "blocked": "🚫 Доступ к боту отключён\n\nВы отключены от данного бота по решению администрации.",
             "pending": "Заявка на доступ ожидает решения администратора.",
             "rejected": "Заявка на доступ была отклонена. Вы можете отправить новую позднее.",
             "logged_out": "Вы вышли из бота. Для возврата отправьте новую заявку на доступ.",
@@ -233,6 +267,36 @@ def require_admin(func: Callable[..., Any]) -> Callable[..., Any]:
     return wrapper
 
 
+def require_subscriber(func: Callable[..., Any]) -> Callable[..., Any]:
+    @wraps(func)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args: Any, **kwargs: Any):
+        if not await _ensure_access(update, role="subscriber"):
+            return ConversationHandler.END
+        return await func(update, context, *args, **kwargs)
+
+    return wrapper
+
+
+def require_owner(func: Callable[..., Any]) -> Callable[..., Any]:
+    @wraps(func)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args: Any, **kwargs: Any):
+        if not await _ensure_access(update, role="owner"):
+            return ConversationHandler.END
+        return await func(update, context, *args, **kwargs)
+
+    return wrapper
+
+
+def require_lead(func: Callable[..., Any]) -> Callable[..., Any]:
+    @wraps(func)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args: Any, **kwargs: Any):
+        if not await _ensure_access(update, role="lead"):
+            return ConversationHandler.END
+        return await func(update, context, *args, **kwargs)
+
+    return wrapper
+
+
 async def _ensure_access(update: Update, role: str | None) -> bool:
     if not is_private(update):
         return False
@@ -246,6 +310,26 @@ async def _ensure_access(update: Update, role: str | None) -> bool:
         msg = update.effective_message
         if msg:
             await msg.reply_text("Доступ только для администратора.")
+        return False
+    if role == "subscriber" and not has_subscriber_access(get_user_meta(get_user_id(update) or 0)):
+        msg = update.effective_message
+        if msg:
+            await msg.reply_text(
+                "🔒 Этот раздел доступен подписчикам. Откройте раздел подключения, чтобы запросить тест или купить подписку.",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton(MENU_SUBSCRIPTION, callback_data="menu:subscription")]]
+                ),
+            )
+        return False
+    if role == "owner" and not is_owner(update):
+        msg = update.effective_message
+        if msg:
+            await msg.reply_text("Это действие доступно только руководителю сервиса.")
+        return False
+    if role == "lead" and not is_lead_or_owner(update):
+        msg = update.effective_message
+        if msg:
+            await msg.reply_text("Это действие доступно ведущему инженеру сопровождения или руководителю сервиса.")
         return False
     return True
 
@@ -279,36 +363,50 @@ def display_name(update: Update) -> str:
     return nm if nm else str(u.id)
 
 
-def main_menu_inline_kb_for_admin(is_admin_user: bool) -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = [
-        [
-            InlineKeyboardButton(MENU_STATUS, callback_data="menu:status"),
-            InlineKeyboardButton(MENU_SUBSCRIPTION, callback_data="menu:subscription"),
-        ]
-    ]
+def main_menu_inline_kb_for_meta(meta: dict[str, Any] | None) -> InlineKeyboardMarkup:
+    is_admin_user = bool(meta and meta.get("role") == "admin")
+    rows: list[list[InlineKeyboardButton]] = []
+    if has_subscriber_access(meta):
+        rows.append(
+            [
+                InlineKeyboardButton(MENU_STATUS, callback_data="menu:status"),
+                InlineKeyboardButton(MENU_SUBSCRIPTION, callback_data="menu:subscription"),
+            ]
+        )
+    else:
+        rows.append([InlineKeyboardButton(MENU_SUBSCRIPTION, callback_data="menu:subscription")])
     rows.append([InlineKeyboardButton(MENU_TICKET, callback_data="menu:ticket")])
     if is_admin_user:
         rows.append(
             [
                 InlineKeyboardButton(MENU_USERS, callback_data="menu:users"),
+                InlineKeyboardButton(MENU_REQUESTS, callback_data="product:requests"),
+            ]
+        )
+        rows.append(
+            [
                 InlineKeyboardButton(MENU_MAINT, callback_data="menu:maint"),
+                InlineKeyboardButton(MENU_STAFF_PROFILE, callback_data="staff:profile"),
             ]
         )
     rows.append([InlineKeyboardButton("ℹ️ Помощь", callback_data="menu:help")])
     return InlineKeyboardMarkup(rows)
 
 
+def main_menu_inline_kb_for_admin(is_admin_user: bool) -> InlineKeyboardMarkup:
+    meta = {"role": "admin", "service_tier": "subscriber"} if is_admin_user else {"service_tier": "subscriber"}
+    return main_menu_inline_kb_for_meta(meta)
+
+
 def main_menu_inline_kb(update: Update) -> InlineKeyboardMarkup:
-    return main_menu_inline_kb_for_admin(is_admin(update))
+    uid = get_user_id(update)
+    return main_menu_inline_kb_for_meta(get_user_meta(uid) if uid is not None else None)
 
 
 def main_menu_text(is_admin_user: bool, text: str = "Меню:") -> str:
     if text == "Меню:":
-        # Локальный импорт: ui импортирует common, обратная зависимость допустима только в рантайме
-        from .ui import SEP
-
         title = "👑 <b>Админ-панель</b>" if is_admin_user else "👤 <b>Главное меню</b>"
-        return f"{title}\n{SEP}\nВыберите раздел:"
+        return f"{title}\n\nВыберите раздел:"
     return text
 
 
@@ -365,19 +463,19 @@ async def menu_home_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await show_main_menu(update)
 
 
-def _clear_transient_user_context(context: ContextTypes.DEFAULT_TYPE) -> None:
+def clear_transient_user_context(context: ContextTypes.DEFAULT_TYPE) -> None:
     ud = context.user_data
     if ud is None:
         return
     transient_keys = {"selected_uid", "subscription_delivery_mode", "users_all_broadcast_text"}
     for key in tuple(ud.keys()):
-        if key.startswith("ticket_") or key.startswith("maint_") or key in transient_keys:
+        if key.startswith(("ticket_", "maint_", "product_")) or key in transient_keys:
             ud.pop(key, None)
 
 
 @require_auth
 async def cancel_to_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    _clear_transient_user_context(context)
+    clear_transient_user_context(context)
     await show_main_menu(update)
     return ConversationHandler.END
 
@@ -401,7 +499,7 @@ def authorized_ids(role_filter: str | None = None, exclude: set[int] | None = No
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    _clear_transient_user_context(context)
+    clear_transient_user_context(context)
     msg = update.effective_message
     if msg:
         await msg.reply_text("Действие отменено.")

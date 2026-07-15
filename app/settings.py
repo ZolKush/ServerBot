@@ -21,7 +21,7 @@ _ENV_PATH = os.getenv("ENV_PATH", "").strip()
 ENV_FILE = Path(_ENV_PATH) if _ENV_PATH else (BASE_DIR / ".env")
 _SECRETS_ENV_PATH = os.getenv("SECRETS_ENV_PATH", "").strip()
 SECRETS_ENV_FILE = Path(_SECRETS_ENV_PATH) if _SECRETS_ENV_PATH else (BASE_DIR / "env.secrets")
-_SECRET_KEYS = ("BOT_TOKEN", "ADMIN_PASSWORD")
+_SECRET_KEYS = ("BOT_TOKEN", "ADMIN_PASSWORD", "OWNER_PASSWORD")
 _SSH_TARGET_RE = re.compile(r"^[A-Za-z0-9_.:@\-\[\]]{1,255}$")
 _SERVER_CODE_RE = re.compile(r"[^a-z0-9_-]+")
 _CONTAINER_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.\-]{0,62}$")
@@ -179,6 +179,7 @@ class SecretSettings(BaseModel):
 
     BOT_TOKEN: str
     ADMIN_PASSWORD: str
+    OWNER_PASSWORD: str
 
     @field_validator("BOT_TOKEN", mode="before")
     @classmethod
@@ -188,13 +189,19 @@ class SecretSettings(BaseModel):
             raise ValueError("empty secret")
         return s
 
-    @field_validator("ADMIN_PASSWORD", mode="before")
+    @field_validator("ADMIN_PASSWORD", "OWNER_PASSWORD", mode="before")
     @classmethod
-    def _strip_password(cls, v: Any) -> str:
+    def _strip_password(cls, v: Any, info: ValidationInfo) -> str:
         password = str(v or "").strip()
         if len(password) < 16:
-            raise ValueError("ADMIN_PASSWORD должен содержать не менее 16 символов")
+            raise ValueError(f"{info.field_name} должен содержать не менее 16 символов")
         return password
+
+    @model_validator(mode="after")
+    def _passwords_must_differ(self) -> "SecretSettings":
+        if self.ADMIN_PASSWORD == self.OWNER_PASSWORD:
+            raise ValueError("OWNER_PASSWORD должен отличаться от ADMIN_PASSWORD")
+        return self
 
 
 def _load_env_file_values(path: Path) -> dict[str, str]:
@@ -216,13 +223,20 @@ def _load_env_file_values(path: Path) -> dict[str, str]:
     return out
 
 
-def _extract_missing_fields(exc: ValidationError) -> str:
-    missing: list[str] = []
+def _safe_secret_error_fields(exc: ValidationError) -> tuple[str, bool]:
+    fields: set[str] = set()
+    only_missing = True
     for err in exc.errors():
+        if err.get("type") != "missing":
+            only_missing = False
         loc = err.get("loc") or ()
-        if loc:
-            missing.append(str(loc[0]))
-    return ", ".join(sorted(set(missing))) if missing else str(exc)
+        if loc and str(loc[0]) in _SECRET_KEYS:
+            fields.add(str(loc[0]))
+    if not fields:
+        # Ошибки model_validator имеют пустой loc. Значения и repr входного
+        # словаря намеренно не включаются: там находятся реальные секреты.
+        fields.update({"ADMIN_PASSWORD", "OWNER_PASSWORD"})
+    return ", ".join(sorted(fields)), only_missing
 
 
 def load_required_secrets(path: Path, *, fallback_path: Path | None = None) -> SecretSettings:
@@ -245,10 +259,10 @@ def load_required_secrets(path: Path, *, fallback_path: Path | None = None) -> S
     try:
         return SecretSettings.model_validate(merged)
     except ValidationError as exc:
-        missing_s = _extract_missing_fields(exc)
+        fields, only_missing = _safe_secret_error_fields(exc)
+        problem = "Не заданы обязательные секреты" if only_missing else "Некорректно заданы обязательные секреты"
         raise RuntimeError(
-            "Не заданы обязательные секреты: "
-            f"{missing_s}. Проверены источники: {', '.join(checked_sources)}. "
+            f"{problem}: {fields}. Проверены источники: {', '.join(checked_sources)}. "
             "Рекомендуемый вариант: хранить секреты в app/env.secrets; "
             "также поддерживаются app/.env и переменные окружения процесса."
         ) from None
@@ -270,6 +284,7 @@ class AppSettings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
         env_ignore_empty=True,
+        hide_input_in_errors=True,
     )
 
     @classmethod
@@ -323,6 +338,9 @@ class AppSettings(BaseSettings):
     ACCESS_REQUEST_COOLDOWN_SEC: int = 300
     ERROR_NOTIFY_INTERVAL_SEC: int = 300
     OUTBOX_PROCESS_INTERVAL_SEC: int = 10
+    MESSAGE_CLEANUP_ENABLED: bool = True
+    MESSAGE_RETENTION_HOURS: int = 24
+    MESSAGE_CLEANUP_INTERVAL_SEC: int = 1800
 
     INSTANCE_LOCK_PATH: str = ""
     PTB_PERSISTENCE_PATH: str = ""
@@ -601,6 +619,22 @@ class AppSettings(BaseSettings):
             raise ValueError(f"{info.field_name} must be >= 1")
         return iv
 
+    @field_validator("MESSAGE_RETENTION_HOURS")
+    @classmethod
+    def _message_retention_hours(cls, v: int) -> int:
+        iv = int(v)
+        if not 1 <= iv <= 36:
+            raise ValueError("MESSAGE_RETENTION_HOURS must be in range 1..36")
+        return iv
+
+    @field_validator("MESSAGE_CLEANUP_INTERVAL_SEC")
+    @classmethod
+    def _message_cleanup_interval(cls, v: int) -> int:
+        iv = int(v)
+        if not 60 <= iv <= 3600:
+            raise ValueError("MESSAGE_CLEANUP_INTERVAL_SEC must be in range 60..3600")
+        return iv
+
     @field_validator("LOCAL_SERVER_CODE", "REMOTE_SERVER_CODE", mode="before")
     @classmethod
     def _normalize_server_code(cls, v: Any) -> str:
@@ -716,6 +750,7 @@ SECRETS = load_required_secrets(SECRETS_ENV_FILE, fallback_path=ENV_FILE)
 
 BOT_TOKEN = SECRETS.BOT_TOKEN
 ADMIN_PASSWORD = SECRETS.ADMIN_PASSWORD
+OWNER_PASSWORD = SECRETS.OWNER_PASSWORD
 
 TZ_NAME = SETTINGS.TZ.strip() or "Europe/Moscow"
 TZ = ZoneInfo(TZ_NAME)
@@ -750,6 +785,9 @@ AUTH_PRUNE_INTERVAL_SEC = int(SETTINGS.AUTH_PRUNE_INTERVAL_SEC)
 ACCESS_REQUEST_COOLDOWN_SEC = int(SETTINGS.ACCESS_REQUEST_COOLDOWN_SEC)
 ERROR_NOTIFY_INTERVAL_SEC = int(SETTINGS.ERROR_NOTIFY_INTERVAL_SEC)
 OUTBOX_PROCESS_INTERVAL_SEC = int(SETTINGS.OUTBOX_PROCESS_INTERVAL_SEC)
+MESSAGE_CLEANUP_ENABLED = bool(SETTINGS.MESSAGE_CLEANUP_ENABLED)
+MESSAGE_RETENTION_HOURS = int(SETTINGS.MESSAGE_RETENTION_HOURS)
+MESSAGE_CLEANUP_INTERVAL_SEC = int(SETTINGS.MESSAGE_CLEANUP_INTERVAL_SEC)
 INSTANCE_LOCK_PATH = resolve_path(
     SETTINGS.INSTANCE_LOCK_PATH or str(Path(USER_DATA_PATH).with_name("maintbot.lock")),
     ROOT_DIR,

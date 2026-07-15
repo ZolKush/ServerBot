@@ -2,7 +2,7 @@ import contextlib
 import sys
 import time
 import warnings
-from datetime import datetime
+from datetime import datetime, timedelta
 from datetime import time as dtime
 from pathlib import Path
 from typing import Any
@@ -12,6 +12,7 @@ if __package__ in (None, ""):
     if str(_PROJECT_ROOT) not in sys.path:
         sys.path.insert(0, str(_PROJECT_ROOT))
 
+from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
@@ -21,6 +22,7 @@ from telegram.ext import (
     ConversationHandler,
     MessageHandler,
     PicklePersistence,
+    TypeHandler,
     filters,
 )
 from telegram.warnings import PTBUserWarning
@@ -37,6 +39,9 @@ from app.config import (
     INSTANCE_LOCK_PATH,
     MAINT_RESTART_NOTIFY_DELAY_SEC,
     MAINT_RESTART_REMINDER_INTERVAL_SEC,
+    MESSAGE_CLEANUP_ENABLED,
+    MESSAGE_CLEANUP_INTERVAL_SEC,
+    MESSAGE_RETENTION_HOURS,
     OUTBOX_PROCESS_INTERVAL_SEC,
     PTB_PERSISTENCE_PATH,
     SERVER_KEY_PATTERN,
@@ -50,12 +55,14 @@ from app.handlers.auth import (
     cmd_auth,
     cmd_help,
     cmd_logout,
+    cmd_owner,
     cmd_start,
 )
 from app.handlers.common import (
     authorized_ids,
     cancel,
     cancel_to_menu_cb,
+    clear_transient_user_context,
     clip_html_message,
     html_escape,
     is_authorized,
@@ -100,6 +107,33 @@ from app.handlers.maint import (
     maint_start,
     maint_urgency,
 )
+from app.handlers.product import (
+    PRODUCT_CONFIRM,
+    PRODUCT_INPUT,
+    abandon_product_flow,
+    owner_panel_cb,
+    payment_reported_cb,
+    product_cancel,
+    product_confirm_cb,
+    product_input_start_cb,
+    product_manage_user_cb,
+    product_manual_reminder_cb,
+    product_profile_cb,
+    product_request_action_cb,
+    product_request_view_cb,
+    product_requests_cb,
+    product_text_input,
+    product_tier_cb,
+    product_title_apply_cb,
+    product_title_menu_cb,
+    purchase_create_cb,
+    purchase_show_cb,
+    renewal_reported_cb,
+    staff_mode_cb,
+    staff_profile_cb,
+    subscription_lifecycle_job,
+    trial_request_start_cb,
+)
 from app.handlers.status import (
     cmd_health,
     daily_node_status_refresh,
@@ -114,7 +148,7 @@ from app.handlers.status import (
     status_ssh_refresh_confirm_cb,
     status_ufw_cb,
 )
-from app.handlers.subscription import subscription_show
+from app.handlers.subscription import connection_show_cb, subscription_show
 from app.handlers.tickets import (
     TICKET_ADMIN_REPLY_TEXT,
     TICKET_CONFIRM,
@@ -160,6 +194,7 @@ from app.handlers.users import (
     users_user_msg_text,
     users_user_nick_text,
 )
+from app.services.message_cleanup import MessageCleanupStats, MessageTracker, TrackingExtBot
 from app.services.outbox import process_outbox_job
 from app.services.remnawave_metrics import close_metrics_client
 from app.single_instance import ALREADY_RUNNING_EXIT_CODE, InstanceAlreadyRunning, SingleInstanceLock
@@ -169,8 +204,119 @@ PRIVATE_TICKET_INPUT = (
     filters.ChatType.PRIVATE & ~filters.COMMAND & (filters.TEXT | filters.PHOTO | filters.Document.ALL)
 )
 
+_NAVIGATION_COMMANDS = frozenset(
+    {
+        "start",
+        "menu",
+        "help",
+        "auth",
+        "login",
+        "logout",
+        "owner",
+        "health",
+        "subscription",
+        "fail2ban",
+        "users",
+        "ticket",
+        "maint",
+        "cancel",
+    }
+)
+_ROOT_NAVIGATION_CALLBACKS = frozenset({"product:requests", "staff:profile"})
 
-def _conversation_handler(**kwargs: Any) -> ConversationHandler:
+
+class NavigableConversationHandler(ConversationHandler):
+    """ConversationHandler that can be ended by the global navigation preprocessor."""
+
+    def matches_entry_point(self, update: Update) -> bool:
+        return any(handler.check_update(update) not in (None, False) for handler in self.entry_points)
+
+    def end_for_update(self, update: Update) -> bool:
+        # PTB has no public API for ending a conversation from another handler.
+        # _update_state is intentionally used instead of mutating the mapping directly:
+        # with persistent handlers its TrackingDict records the deletion for the next flush.
+        try:
+            key = self._get_key(update)
+        except RuntimeError:
+            return False
+        if key not in self._conversations:
+            return False
+        timeout_job = self.timeout_jobs.pop(key, None)
+        if timeout_job is not None:
+            with contextlib.suppress(Exception):
+                timeout_job.schedule_removal()
+        self._update_state(self.END, key)
+        return True
+
+
+def _navigation_command(update: Update) -> str | None:
+    message = update.effective_message
+    text = str(message.text or "").strip() if message else ""
+    if not text.startswith("/"):
+        return None
+    return text.split(maxsplit=1)[0][1:].split("@", maxsplit=1)[0].casefold() or None
+
+
+def _is_navigation_update(
+    update: Update,
+    conversations: list[NavigableConversationHandler],
+    callback_handlers: list[CallbackQueryHandler],
+) -> bool:
+    command = _navigation_command(update)
+    if command in _NAVIGATION_COMMANDS:
+        return True
+    data = update.callback_query.data if update.callback_query else None
+    if isinstance(data, str) and (data.startswith("menu:") or data in _ROOT_NAVIGATION_CALLBACKS):
+        return True
+    if any(conversation.matches_entry_point(update) for conversation in conversations):
+        return True
+    return any(handler.check_update(update) not in (None, False) for handler in callback_handlers)
+
+
+def _navigation_trigger(update: Update) -> str:
+    command = _navigation_command(update)
+    if command:
+        return f"command:{command}"
+    data = update.callback_query.data if update.callback_query else None
+    return f"callback:{str(data)[:100]}"
+
+
+async def _reset_navigation_state(
+    update: Update,
+    context,
+    conversations: list[NavigableConversationHandler],
+    callback_handlers: list[CallbackQueryHandler],
+) -> None:
+    if not _is_navigation_update(update, conversations, callback_handlers):
+        return
+
+    # A product request can be temporarily claimed while an administrator enters
+    # a connection link. Release that claim before dropping the conversation.
+    try:
+        await abandon_product_flow(update, context)
+    except Exception:
+        # A temporary storage error must not make every menu button unusable.
+        logger.exception(
+            "Failed to release product flow during navigation reset",
+            extra={
+                "user_id": update.effective_user.id if update.effective_user else None,
+                "action": "navigation_product_release_failed",
+            },
+        )
+    ended = [conversation.name for conversation in conversations if conversation.end_for_update(update)]
+    clear_transient_user_context(context)
+    if ended:
+        user_id = update.effective_user.id if update.effective_user else None
+        logger.info(
+            "Navigation state reset user_id=%s flows=%s trigger=%s",
+            user_id,
+            ",".join(str(name) for name in ended),
+            _navigation_trigger(update),
+            extra={"user_id": user_id, "action": "navigation_reset"},
+        )
+
+
+def _conversation_handler(**kwargs: Any) -> NavigableConversationHandler:
     # These flows deliberately mix callback and text steps and are tracked per
     # user/chat. per_message=True is therefore not applicable. Suppress only
     # PTB's informational warning emitted by the constructor.
@@ -180,7 +326,7 @@ def _conversation_handler(**kwargs: Any) -> ConversationHandler:
             message=r"If 'per_message=False', 'CallbackQueryHandler' will not be tracked for every message\..*",
             category=PTBUserWarning,
         )
-        return ConversationHandler(**kwargs)
+        return NavigableConversationHandler(**kwargs)
 
 
 def _parse_schedule_hhmm(raw: str, *, field_name: str, fallback: str) -> tuple[int, int]:
@@ -256,6 +402,21 @@ async def fallback_text(update, context) -> None:
     await msg.reply_text("Не понимаю команду. Используйте /menu для меню или /help для подсказок.")
 
 
+async def unhandled_callback(update: Update, context) -> None:
+    query = update.callback_query
+    if query is None:
+        return
+    user_id = update.effective_user.id if update.effective_user else None
+    logger.warning(
+        "Unhandled callback user_id=%s data=%s",
+        user_id,
+        str(query.data)[:100],
+        extra={"user_id": user_id, "action": "unhandled_callback"},
+    )
+    with contextlib.suppress(Exception):
+        await query.answer("Эта кнопка устарела. Откройте меню заново командой /menu.", show_alert=True)
+
+
 def build_app() -> Application:
     if not BOT_TOKEN:
         raise RuntimeError("Не задан BOT_TOKEN в app/env.secrets, app/.env или переменных окружения")
@@ -271,8 +432,56 @@ def build_app() -> Application:
         with contextlib.suppress(OSError):
             persistence_path.chmod(0o600)
     persistence = PicklePersistence(filepath=str(persistence_path))
+    message_tracker = MessageTracker(
+        enabled=MESSAGE_CLEANUP_ENABLED,
+        retention=timedelta(hours=MESSAGE_RETENTION_HOURS),
+    )
+    bot = TrackingExtBot(BOT_TOKEN, message_tracker=message_tracker)
+
+    def _log_message_cleanup(stats: MessageCleanupStats, *, reason: str) -> None:
+        if reason == "startup" or stats.deleted or stats.expired or stats.failed:
+            logger.info(
+                "Message cleanup (%s): chats=%s candidates=%s deleted=%s expired=%s failed=%s",
+                reason,
+                stats.tracked_chats,
+                stats.candidates,
+                stats.deleted,
+                stats.expired,
+                stats.failed,
+                extra={"action": "message_cleanup"},
+            )
+        if stats.expired:
+            logger.warning(
+                "Message cleanup skipped %s messages older than Telegram's 48-hour deletion limit",
+                stats.expired,
+                extra={"action": "message_cleanup_expired"},
+            )
+
+    async def post_init(application: Application) -> None:
+        message_tracker.bind(application.bot_data)
+        if MESSAGE_CLEANUP_ENABLED:
+            try:
+                stats = await message_tracker.cleanup(application.bot)
+            except Exception:
+                logger.exception("Message cleanup startup check failed", extra={"action": "message_cleanup_failed"})
+            else:
+                _log_message_cleanup(stats, reason="startup")
+
+    async def message_cleanup_job(context) -> None:
+        try:
+            stats = await message_tracker.cleanup(context.bot)
+        except Exception:
+            logger.exception("Scheduled message cleanup failed", extra={"action": "message_cleanup_failed"})
+        else:
+            _log_message_cleanup(stats, reason="scheduled")
+
     app: Application = (
-        ApplicationBuilder().token(BOT_TOKEN).persistence(persistence).post_shutdown(_post_shutdown).build()
+        ApplicationBuilder()
+        .bot(bot)
+        .persistence(persistence)
+        .post_init(post_init)
+        .post_shutdown(_post_shutdown)
+        .build()
     )
 
     app.add_handler(CommandHandler("start", cmd_start))
@@ -281,10 +490,52 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("auth", cmd_auth))
     app.add_handler(CommandHandler("login", cmd_auth))
     app.add_handler(CommandHandler("logout", cmd_logout))
+    app.add_handler(CommandHandler("owner", cmd_owner))
     app.add_handler(CallbackQueryHandler(access_request_cb, pattern=r"^access:request$"))
     app.add_handler(CallbackQueryHandler(access_review_cb, pattern=r"^access:(approve|reject|block):\d+$"))
     app.add_handler(CommandHandler("health", cmd_health, block=False))
     app.add_handler(CommandHandler("subscription", subscription_show))
+
+    product_conv = _conversation_handler(
+        entry_points=[
+            CallbackQueryHandler(trial_request_start_cb, pattern=r"^subscription:trial$"),
+            CallbackQueryHandler(
+                product_request_action_cb,
+                pattern=r"^product:req:(approve|reject|requisites|confirm|notfound):\d+$",
+            ),
+            CallbackQueryHandler(
+                product_input_start_cb,
+                pattern=r"^(staff:alias|product:input:(setting_(bank|recipient|phone|current|next)|massdate|massremind|user_end:\d+|manualpay:\d+))$",
+            ),
+        ],
+        states={
+            PRODUCT_INPUT: [MessageHandler(PRIVATE_TEXT, product_text_input)],
+            PRODUCT_CONFIRM: [CallbackQueryHandler(product_confirm_cb, pattern=r"^product:confirm:apply$")],
+        },
+        fallbacks=[
+            CommandHandler("cancel", product_cancel),
+            CallbackQueryHandler(product_cancel, pattern=r"^(product:cancel|menu:home)$"),
+        ],
+        name="product_flow",
+        persistent=True,
+    )
+    app.add_handler(product_conv)
+    app.add_handler(CallbackQueryHandler(purchase_show_cb, pattern=r"^subscription:buy$"))
+    app.add_handler(CallbackQueryHandler(purchase_create_cb, pattern=r"^subscription:buyconfirm$"))
+    app.add_handler(CallbackQueryHandler(payment_reported_cb, pattern=r"^subscription:paid:\d+$"))
+    app.add_handler(CallbackQueryHandler(renewal_reported_cb, pattern=r"^subscription:renew$"))
+    app.add_handler(CallbackQueryHandler(connection_show_cb, pattern=r"^subscription:connection$"))
+    app.add_handler(CallbackQueryHandler(product_profile_cb, pattern=r"^product:profile$"))
+    app.add_handler(CallbackQueryHandler(product_requests_cb, pattern=r"^product:requests$"))
+    app.add_handler(CallbackQueryHandler(product_request_view_cb, pattern=r"^product:req:view:\d+$"))
+    app.add_handler(CallbackQueryHandler(staff_profile_cb, pattern=r"^staff:profile$"))
+    app.add_handler(CallbackQueryHandler(staff_mode_cb, pattern=r"^staff:mode:(title|title_alias)$"))
+    app.add_handler(CallbackQueryHandler(owner_panel_cb, pattern=r"^product:owner$"))
+    app.add_handler(CallbackQueryHandler(product_manage_user_cb, pattern=r"^product:manage:\d+$"))
+    app.add_handler(CallbackQueryHandler(product_title_menu_cb, pattern=r"^product:titlemenu:\d+$"))
+    app.add_handler(CallbackQueryHandler(product_title_apply_cb, pattern=r"^product:title:\d+:[a-z_]+$"))
+    app.add_handler(CallbackQueryHandler(product_tier_cb, pattern=r"^product:tier:\d+:(basic|unlimited_trial)$"))
+    app.add_handler(CallbackQueryHandler(product_manual_reminder_cb, pattern=r"^product:remind:\d+$"))
 
     maint_conv = _conversation_handler(
         entry_points=[
@@ -364,6 +615,7 @@ def build_app() -> Application:
         entry_points=[
             CommandHandler("users", users_entry),
             CallbackQueryHandler(users_entry, pattern=r"^menu:users$"),
+            CallbackQueryHandler(users_pick, pattern=r"^users:user:\d+$"),
         ],
         states={
             ADMIN_PICK: [
@@ -384,7 +636,7 @@ def build_app() -> Application:
             ADMIN_USER_MENU: [
                 CallbackQueryHandler(
                     users_user_menu,
-                    pattern=r"^users:(msg:\d+|nick:\d+|cfg:\d+|subassign:\d+|subsend:\d+|toggle:\d+|toggleapply:\d+|paid:\d+|paidapply:\d+|back)$",
+                    pattern=r"^users:(msg:\d+|nick:\d+|cfg:\d+|subassign:\d+|subsend:\d+|toggle:\d+|toggleapply:\d+|back)$",
                 ),
                 CallbackQueryHandler(users_pick, pattern=r"^users:user:\d+$"),
             ],
@@ -407,6 +659,12 @@ def build_app() -> Application:
         persistent=True,
     )
     app.add_handler(users_conv)
+
+    conversation_handlers = [product_conv, maint_conv, ticket_conv, users_conv]
+
+    # /cancel is also processed after the preprocessor has ended every active
+    # flow, so a single command cannot leave another hidden conversation behind.
+    app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(CallbackQueryHandler(menu_home_cb, pattern=r"^menu:home$"))
     app.add_handler(CallbackQueryHandler(cmd_help, pattern=r"^menu:help$"))
     app.add_handler(CallbackQueryHandler(cmd_health, pattern=r"^menu:status$", block=False))
@@ -536,8 +794,43 @@ def build_app() -> Application:
             first=3,
             name="ticket_orphan_release",
         )
+        app.job_queue.run_repeating(
+            subscription_lifecycle_job,
+            interval=60,
+            first=5,
+            name="subscription_lifecycle",
+        )
+        if MESSAGE_CLEANUP_ENABLED:
+            app.job_queue.run_repeating(
+                message_cleanup_job,
+                interval=MESSAGE_CLEANUP_INTERVAL_SEC,
+                first=MESSAGE_CLEANUP_INTERVAL_SEC,
+                name="message_cleanup",
+            )
     else:
         logger.warning("JobQueue недоступен: для ежедневной выжимки установите python-telegram-bot[job-queue].")
+
+    navigation_callback_handlers = [handler for handler in app.handlers[0] if isinstance(handler, CallbackQueryHandler)]
+
+    async def message_tracking_preprocessor(update: Update, context) -> None:
+        await message_tracker.observe_update(update)
+
+    async def navigation_preprocessor(update: Update, context) -> None:
+        await _reset_navigation_state(
+            update,
+            context,
+            conversation_handlers,
+            navigation_callback_handlers,
+        )
+
+    # Group -1 runs before regular handlers. It clears every unfinished flow,
+    # then the same update is handled normally in group 0 as a fresh entry point.
+    app.add_handler(TypeHandler(Update, message_tracking_preprocessor), group=-2)
+    app.add_handler(TypeHandler(Update, navigation_preprocessor), group=-1)
+
+    # Неизвестная callback-кнопка должна получить ответ, иначе Telegram оставляет
+    # индикатор загрузки и создаётся впечатление, что бот завис.
+    app.add_handler(CallbackQueryHandler(unhandled_callback))
 
     # Fallback должен жить в группе 0 ПОСЛЕ всех разговоров: если активный
     # ConversationHandler уже обработал сообщение, первый сработавший обработчик

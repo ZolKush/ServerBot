@@ -11,6 +11,7 @@ from telegram.ext import ContextTypes, ConversationHandler
 from ..config import TZ, logger
 from ..models import Attachment, Ticket, TicketMessage
 from ..services.outbox import message_payload
+from ..staff import staff_internal_identity, staff_internal_name
 from ..storage import (
     ImportantData,
     UpdateAborted,
@@ -18,6 +19,7 @@ from ..storage import (
     get_admin_name_by_id,
     get_all_tickets_snapshot,
     get_ticket_copy,
+    get_user_meta_copy,
     get_user_open_tickets,
     make_outbox_event,
     update_important_data,
@@ -34,6 +36,7 @@ from .common import (
     require_auth,
     safe_edit_or_reply,
     show_main_menu,
+    staff_signature,
     ui_error_text,
     ui_ok_text,
     ui_warn_text,
@@ -139,6 +142,8 @@ def _append_ticket_message(
     }
     if attachment:
         item["attachment"] = dict(attachment)  # type: ignore[typeddict-item]
+    if sender_role == "admin" and sender_id is not None:
+        item["sender_signature_version"] = 1
     messages.append(item)
     if len(messages) > MAX_TICKET_MESSAGES_STORED:
         first = messages[0]
@@ -185,7 +190,9 @@ def _attachment_label(attachment: dict[str, Any]) -> str:
     return "📎 Вложение"
 
 
-def _format_ticket_history(ticket: dict[str, Any], *, limit: int = MAX_TICKET_HISTORY_CHARS) -> str:
+def _format_ticket_history(
+    ticket: dict[str, Any], *, limit: int = MAX_TICKET_HISTORY_CHARS, public_view: bool = False
+) -> str:
     messages = _ticket_messages(ticket)[-MAX_TICKET_HISTORY_ITEMS:]
     if not messages:
         return "История пуста."
@@ -194,6 +201,16 @@ def _format_ticket_history(ticket: dict[str, Any], *, limit: int = MAX_TICKET_HI
         parts: list[str] = []
         sender_role = "Админ" if item.get("sender_role") == "admin" else "Пользователь"
         sender_name = str(item.get("sender_name") or sender_role)[:160]
+        if item.get("sender_role") == "admin":
+            is_system = sender_name.strip().casefold() == "система"
+            if public_view and item.get("sender_signature_version") != 1 and not is_system:
+                sender_name = "Техническая поддержка"
+            elif not public_view and item.get("sender_id") is not None:
+                admin_meta = get_user_meta_copy(_safe_int(item.get("sender_id")))
+                if admin_meta:
+                    sender_name = (
+                        f"{sender_name} — {staff_internal_name(admin_meta)}, ID {admin_meta.get('user_id') or '-'}"
+                    )
         ts = format_dt_human(item.get("ts"))
         text = str(item.get("text") or "")
         parts.append(f"<b>{html_escape(sender_role)}:</b> {html_escape(sender_name)}")
@@ -274,18 +291,27 @@ def _format_ticket_for_admin(ticket: dict[str, Any], admin_uid: int, *, event_li
     ]
     if user_username:
         lines.append(f"• Username: <code>@{html_escape(user_username.lstrip('@'))}</code>")
+    assignee_id = _safe_int(ticket.get("assignee_id"))
+    if assignee_id:
+        assignee_meta = get_user_meta_copy(assignee_id)
+        if assignee_meta:
+            lines.append(
+                f"• Внутренний исполнитель: <code>{html_escape(staff_internal_identity(assignee_meta))}</code>"
+            )
     if str(ticket.get("status", "open")) == "closed":
         lines.append(f"• Закрыт: <code>{html_escape(format_dt_human(ticket.get('closed_at')))}</code>")
     if event_line:
         lines.extend(["", event_line])
     if _ticket_is_assignee(ticket, admin_uid):
         lines.extend(["", "<b>Доступ:</b> вы исполнитель этого тикета."])
-    lines.extend([SEP, "🕘 <b>История</b>", _format_ticket_history(ticket)])
+    lines.extend([SEP, "🕘 <b>История</b>", _format_ticket_history(ticket, public_view=False)])
     return "\n".join(lines)
 
 
 def _format_ticket_for_user(ticket: dict[str, Any], *, event_line: str | None = None) -> str:
     assignee_name = str(ticket.get("assignee_name") or "ещё не назначен")[:160]
+    if ticket.get("assignee_id") and ticket.get("assignee_signature_version") != 1:
+        assignee_name = "Техническая поддержка"
     subject = str(ticket.get("subject") or "-")[:300]
     lines = [
         _ticket_header(ticket, title_prefix="Мой тикет"),
@@ -298,7 +324,7 @@ def _format_ticket_for_user(ticket: dict[str, Any], *, event_line: str | None = 
         lines.append(f"• Закрыт: <code>{html_escape(format_dt_human(ticket.get('closed_at')))}</code>")
     if event_line:
         lines.extend(["", event_line])
-    lines.extend([SEP, "🕘 <b>История</b>", _format_ticket_history(ticket)])
+    lines.extend([SEP, "🕘 <b>История</b>", _format_ticket_history(ticket, public_view=True)])
     return "\n".join(lines)
 
 
@@ -334,6 +360,7 @@ def _build_ticket_record(
         "user_username": (user_username or None),
         "assignee_id": None,
         "assignee_name": None,
+        "assignee_signature_version": None,
         "created_at": now,
         "updated_at": now,
         "closed_at": None,
@@ -512,9 +539,9 @@ async def release_orphaned_tickets(context: ContextTypes.DEFAULT_TYPE) -> None:
             if not assignee_id or assignee_id in active_set:
                 continue
             updated = dict(raw)
-            old_name = str(updated.get("assignee_name") or assignee_id)[:160]
             updated["assignee_id"] = None
             updated["assignee_name"] = None
+            updated["assignee_signature_version"] = None
             updated["status"] = "open"
             updated["user_reply_allowed"] = False
             updated = _append_ticket_message(
@@ -522,7 +549,7 @@ async def release_orphaned_tickets(context: ContextTypes.DEFAULT_TYPE) -> None:
                 sender_role="admin",
                 sender_id=None,
                 sender_name="Система",
-                text=f"Исполнитель {old_name} недоступен; тикет возвращён в общую очередь",
+                text="Предыдущий исполнитель недоступен; тикет возвращён в общую очередь",
                 kind="assignee_released",
             )
             tickets[key] = updated
@@ -862,7 +889,7 @@ async def ticket_take_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not ticket_id or admin_id is None:
         await q.answer()
         return
-    admin_name = display_name(update)
+    admin_name = staff_signature(update)
     active_admins = authorized_ids(role_filter="admin")
 
     try:
@@ -879,6 +906,7 @@ async def ticket_take_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             was_orphaned = bool(assignee_id and assignee_id not in active_admins)
             updated["assignee_id"] = admin_id
             updated["assignee_name"] = admin_name
+            updated["assignee_signature_version"] = 1
             updated["status"] = "in_progress"
             updated["updated_at"] = _now_iso()
             if was_orphaned:
@@ -904,7 +932,7 @@ async def ticket_take_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             _queue_user_notification(
                 cfg,
                 updated,
-                event_line=f"👤 <b>Исполнитель назначен:</b> {html_escape(admin_name)}",
+                event_line=f"👤 <b>Обращение принял:</b> {html_escape(admin_name)}",
                 kind="ticket_assigned_user",
                 include_attachment=False,
             )
@@ -1024,7 +1052,7 @@ async def ticket_admin_reply_text(update: Update, context: ContextTypes.DEFAULT_
     if attachment and not text:
         text = "(вложение)"
 
-    admin_name = display_name(update)
+    admin_name = staff_signature(update)
     try:
 
         def _reply(ticket: dict[str, Any]) -> dict[str, Any]:
@@ -1164,7 +1192,7 @@ async def ticket_close_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not ticket_id or admin_id is None:
         await q.answer()
         return
-    admin_name = display_name(update)
+    admin_name = staff_signature(update)
     other_admin_ids = [aid for aid in authorized_ids(role_filter="admin") if aid != admin_id]
     try:
 
@@ -1178,6 +1206,7 @@ async def ticket_close_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             updated["closed_at"] = _now_iso()
             updated["closed_by_id"] = admin_id
             updated["closed_by_name"] = admin_name
+            updated["closed_by_signature_version"] = 1
             updated["user_reply_allowed"] = False
             updated["updated_at"] = _now_iso()
             return updated
@@ -1186,7 +1215,7 @@ async def ticket_close_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             _queue_user_notification(
                 cfg,
                 updated,
-                event_line=f"✅ <b>Тикет закрыт администратором:</b> {html_escape(admin_name)}",
+                event_line=f"✅ <b>Тикет закрыт:</b> {html_escape(admin_name)}",
                 kind="ticket_closed_user",
                 include_attachment=False,
             )
@@ -1459,7 +1488,8 @@ async def ticket_transfer_init_cb(update: Update, context: ContextTypes.DEFAULT_
     await q.answer()
     rows: list[list[InlineKeyboardButton]] = []
     for aid in other_admins:
-        name = get_admin_name_by_id(aid) or str(aid)
+        admin_meta = get_user_meta_copy(aid)
+        name = staff_internal_identity(admin_meta) if admin_meta else (get_admin_name_by_id(aid) or str(aid))
         rows.append([InlineKeyboardButton(f"👤 {name}"[:60], callback_data=f"ticket:transfer_to:{ticket_id}:{aid}")])
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"ticket:open:{ticket_id}")])
     rows.append([InlineKeyboardButton("🏠 Меню", callback_data="menu:home")])
@@ -1495,7 +1525,7 @@ async def ticket_transfer_to_cb(update: Update, context: ContextTypes.DEFAULT_TY
         await q.answer("Администратор не найден.", show_alert=True)
         return ConversationHandler.END
 
-    admin_name = display_name(update)
+    admin_name = staff_signature(update)
 
     try:
 
@@ -1509,6 +1539,7 @@ async def ticket_transfer_to_cb(update: Update, context: ContextTypes.DEFAULT_TY
             updated = dict(ticket)
             updated["assignee_id"] = new_admin_id
             updated["assignee_name"] = new_admin_name
+            updated["assignee_signature_version"] = 1
             updated["updated_at"] = _now_iso()
             return _append_ticket_message(
                 updated,

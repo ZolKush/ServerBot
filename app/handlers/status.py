@@ -37,7 +37,7 @@ from ..storage import (
     set_daily_node_status_cache,
     set_dns_status_cache,
 )
-from .common import html_escape, is_admin, now_str, require_admin, require_auth, ui_error_text, ui_info_text
+from .common import html_escape, is_admin, now_str, require_admin, require_subscriber, ui_error_text, ui_info_text
 from .status_format import format_status_message, format_ufw_message
 from .status_models import DockerContainerView, StatusSnapshot
 
@@ -164,7 +164,7 @@ def _exc_brief(value: object) -> str:
     return f"{name}: {text}" if text else name
 
 
-@require_auth
+@require_subscriber
 async def cmd_health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     msg = update.effective_message
@@ -194,7 +194,7 @@ async def cmd_health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await msg.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
 
 
-@require_auth
+@require_subscriber
 async def status_pick_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     if not q:
@@ -203,7 +203,7 @@ async def status_pick_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await q.edit_message_text(_status_pick_text(), parse_mode=ParseMode.HTML, reply_markup=_status_pick_kb())
 
 
-@require_auth
+@require_subscriber
 async def status_show_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     if not q:
@@ -248,7 +248,7 @@ async def status_ufw_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     )
 
 
-@require_auth
+@require_subscriber
 async def status_dns_refresh_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     if not q:
@@ -767,7 +767,7 @@ async def build_status_message(
     return format_status_message(snapshot), markup
 
 
-@require_auth
+@require_subscriber
 async def dns_back_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     if not q:

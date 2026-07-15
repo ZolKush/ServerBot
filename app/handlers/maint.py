@@ -17,7 +17,7 @@ from ..storage import (
     make_outbox_event,
     update_important_data,
 )
-from .common import authorized_ids, display_name, get_user_id, html_escape, require_admin
+from .common import authorized_ids, get_user_id, html_escape, require_admin, staff_title
 from .maint_helpers import (
     MAINT_SCOPE_ALL,
     MAINT_WARN_THRESHOLDS_MIN,
@@ -297,7 +297,7 @@ async def maint_duration(update: Update, context: ContextTypes.DEFAULT_TYPE):
     hh, mm = parsed
     scope = _normalize_scope(str(context.user_data.get("maint_scope", MAINT_SCOPE_ALL)))
     urgency = str(context.user_data.get("maint_urgency", "planned"))
-    author = display_name(update)
+    author = staff_title(update)
     author_id = get_user_id(update)
 
     maint = _build_maint_record(scope, urgency, hh, mm, author_id, author)
@@ -401,7 +401,7 @@ async def maint_schedule_range(update: Update, context: ContextTypes.DEFAULT_TYP
         return STATE_MAINT_SCHEDULE_RANGE
 
     scope = _normalize_scope(str(context.user_data.get("maint_scope", MAINT_SCOPE_ALL)))
-    author = display_name(update)
+    author = staff_title(update)
     author_id = get_user_id(update)
     scheduled = _build_scheduled_maint_record(scope, start_at, end_at, author_id, author)
 
@@ -497,7 +497,7 @@ async def maint_extend_duration(update: Update, context: ContextTypes.DEFAULT_TY
 
     hh, mm = parsed
     duration_min = _hhmm_to_minutes(hh, mm)
-    author = display_name(update)
+    author = staff_title(update)
     author_id = get_user_id(update)
     users_count = admins_count = 0
 
@@ -552,7 +552,7 @@ async def maint_end_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not m:
         return
     maint_id = m.group(1)
-    author = display_name(update)
+    author = staff_title(update)
     ended_at = datetime.now(TZ)
     author_id = get_user_id(update)
     users_count = admins_count = 0

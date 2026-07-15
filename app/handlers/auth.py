@@ -17,12 +17,15 @@ from ..config import (
     AUTH_GLOBAL_MAX_FAILS_IN_WINDOW,
     AUTH_LOCKOUT_SEC,
     AUTH_MAX_FAILS_IN_WINDOW,
+    OWNER_PASSWORD,
     TZ,
     logger,
 )
 from ..services.outbox import message_payload
+from ..staff import STAFF_TITLE_OWNER, STAFF_TITLE_SUPPORT
 from ..storage import (
     UserData,
+    append_audit_entry,
     enqueue_user_outbox,
     get_user_meta_copy,
     make_outbox_event,
@@ -44,6 +47,7 @@ from .common import (
     require_admin,
     require_private,
     show_main_menu,
+    staff_title,
 )
 
 _AUTH_FAILS: dict[str, list[float]] = {}
@@ -216,6 +220,9 @@ async def cmd_auth(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "last_name": user.last_name,
                 "auth_at": datetime.now(TZ).isoformat(),
                 "is_paid": bool(existing.get("is_paid", False)),
+                "service_tier": existing.get("service_tier") or "subscriber",
+                "admin_level": existing.get("admin_level") or "admin",
+                "staff_title": existing.get("staff_title") or STAFF_TITLE_SUPPORT,
                 "logged_out_at": None,
             }
         )
@@ -307,6 +314,9 @@ async def access_request_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             {
                 "user_id": user.id,
                 "role": "user",
+                # Повторная заявка после /logout не должна стирать уже
+                # оплаченный или безлимитный уровень пользователя.
+                "service_tier": current.get("service_tier") or "basic",
                 "access_state": "pending",
                 "enabled": False,
                 "username": user.username,
@@ -323,7 +333,7 @@ async def access_request_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     result = await update_user_data(_apply)
     texts = {
         "approved": "Доступ уже одобрен. Откройте /menu.",
-        "blocked": "Доступ заблокирован администратором.",
+        "blocked": "🚫 Доступ к боту отключён\n\nВы отключены от данного бота по решению администрации.",
         "admin": "Для возврата в администраторскую учётную запись используйте команду /auth.",
         "pending": "Заявка уже ожидает решения администратора.",
         "cooldown": "Повторная заявка отправлялась недавно. Попробуйте позже.",
@@ -355,6 +365,7 @@ async def access_review_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     now = datetime.now(TZ)
     actor_name = display_name(update)
+    actor_public = staff_title(update)
     labels = {"approve": "одобрена", "reject": "отклонена", "block": "заблокирована"}
 
     def _apply(cfg: UserData) -> tuple[str, dict[str, object] | None]:
@@ -384,10 +395,17 @@ async def access_review_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             }
         )
         cfg.authorized_users[str(target_uid)] = UserData._normalize_user(current)
+        append_audit_entry(
+            cfg,
+            action=f"access_{desired}",
+            actor_meta=cfg.authorized_users.get(str(actor.id)),
+            target_user_id=target_uid,
+            details={},
+        )
         user_text = {
             "approved": "✅ Ваша заявка на доступ одобрена. Используйте /menu.",
             "rejected": "❌ Ваша заявка на доступ отклонена.",
-            "blocked": "🚫 Доступ к боту заблокирован администратором.",
+            "blocked": "🚫 Доступ к боту отключён\n\nВы отключены от данного бота по решению администрации.",
         }[desired]
         enqueue_user_outbox(
             cfg,
@@ -411,7 +429,7 @@ async def access_review_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await query.answer("Решение сохранено.")
         original_text = str(getattr(query.message, "text_html", "") or "Заявка")
         await query.edit_message_text(
-            original_text + f"\n\n<b>Решение:</b> {labels[action]} администратором {html_escape(actor_name)}",
+            original_text + f"\n\n<b>Решение:</b> {labels[action]} · {html_escape(actor_public)}",
             parse_mode=ParseMode.HTML,
         )
         return
@@ -422,6 +440,68 @@ async def access_review_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         "stale": "Заявка уже обработана другим администратором.",
     }
     await query.answer(messages.get(outcome, "Заявка уже обработана."), show_alert=True)
+
+
+async def cmd_owner(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Однократно назначает единственного руководителя сервиса."""
+
+    if not is_private(update):
+        await _auth_delete_sensitive_message(update)
+        return
+    message = update.effective_message
+    try:
+        left = _auth_lock_remaining_sec(update)
+        if left > 0:
+            if message:
+                await message.reply_text(f"Слишком много попыток. Повторите через {left} сек.")
+            return
+        uid = get_user_id(update)
+        current = get_user_meta(uid or 0) if uid is not None else None
+        if uid is None or not current or current.get("role") != "admin" or current.get("access_state") != "approved":
+            if message:
+                await message.reply_text("Сначала авторизуйтесь как администратор.")
+            return
+        text = (message.text if message else "") or ""
+        parts = text.split(maxsplit=1)
+        if len(parts) != 2 or not parts[1]:
+            if message:
+                await message.reply_text("Формат: <b>/owner отдельный_пароль</b>", parse_mode=ParseMode.HTML)
+            return
+        if not hmac.compare_digest(parts[1].encode("utf-8"), OWNER_PASSWORD.encode("utf-8")):
+            _auth_register_failure(update)
+            logger.warning("Owner claim failed for %s", _auth_actor_key(update), extra={"action": "owner_claim_failed"})
+            if message:
+                await message.reply_text("Пароль неверный.")
+            return
+
+        def _claim(cfg: UserData) -> str:
+            if any(
+                isinstance(meta, dict) and meta.get("role") == "admin" and meta.get("admin_level") == "owner"
+                for meta in cfg.authorized_users.values()
+            ):
+                return "exists"
+            latest = cfg.authorized_users.get(str(uid))
+            if not isinstance(latest, dict) or latest.get("role") != "admin":
+                return "denied"
+            updated = UserData._normalize_user({**latest, "admin_level": "owner", "staff_title": STAFF_TITLE_OWNER})
+            cfg.authorized_users[str(uid)] = updated
+            append_audit_entry(
+                cfg,
+                action="owner_claimed",
+                actor_meta=updated,
+                target_user_id=uid,
+                details={"staff_title": "Руководитель сервиса"},
+            )
+            return "claimed"
+
+        outcome = await update_user_data(_claim)
+        if outcome == "claimed":
+            _auth_reset_actor_limits(update)
+            logger.info("Service owner claimed by user_id=%s", uid, extra={"user_id": uid, "action": "owner_claimed"})
+            await show_main_menu(update, text="Роль руководителя сервиса активирована ✅\n\nМеню:")
+        # Если руководитель уже существует, бизнес-состояние и интерфейс не меняются.
+    finally:
+        await _auth_delete_sensitive_message(update)
 
 
 @require_private

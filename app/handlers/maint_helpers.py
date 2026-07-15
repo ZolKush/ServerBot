@@ -245,6 +245,7 @@ def _build_maint_record(
         "expected_end": expected_end.isoformat(),
         "author_id": author_id,
         "author_name": author_name,
+        "author_signature_version": 1,
         "updated_at": now.isoformat(),
     }
     return record
@@ -269,6 +270,7 @@ def _build_scheduled_maint_record(
         "scheduled_end": end_at.isoformat(),
         "author_id": author_id,
         "author_name": author_name,
+        "author_signature_version": 1,
         "created_at": now.isoformat(),
         "updated_at": now.isoformat(),
         "notified_thresholds": _initial_notified_thresholds(remaining_min),
@@ -296,7 +298,12 @@ def _scheduled_to_active_record(scheduled: ScheduledMaintenance) -> Maintenance:
         "started_at": start_at.isoformat(),
         "expected_end": expected_end.isoformat(),
         "author_id": scheduled.get("author_id"),
-        "author_name": scheduled.get("author_name") or "администратор",
+        "author_name": (
+            str(scheduled.get("author_name") or "Техническая поддержка")
+            if scheduled.get("author_signature_version") == 1
+            else "Техническая поддержка"
+        ),
+        "author_signature_version": 1,
         "updated_at": start_at.isoformat(),
     }
     return record
@@ -445,7 +452,7 @@ def _maint_scheduled_soon_notice(scheduled: dict[str, Any], remaining_min: int) 
     except Exception:
         start_dt = end_dt = None
     scope = scheduled.get("scope", MAINT_SCOPE_ALL)
-    author = scheduled.get("author_name") or "администратор"
+    author = scheduled.get("author_name") if scheduled.get("author_signature_version") == 1 else "Техническая поддержка"
     return (
         f"🛠 <b>Техработы</b> · ⏳ начнутся через {html_escape(humanize_until(remaining_min))}\n"
         f"{SEP}\n"
@@ -477,7 +484,7 @@ def _maint_scheduled_start_notice(scheduled: dict[str, Any]) -> str:
     except Exception:
         end_dt = None
     scope = scheduled.get("scope", MAINT_SCOPE_ALL)
-    author = scheduled.get("author_name") or "администратор"
+    author = scheduled.get("author_name") if scheduled.get("author_signature_version") == 1 else "Техническая поддержка"
     return (
         "🛠 <b>Техработы</b> · ⚠️ начались\n"
         f"{SEP}\n"

@@ -63,6 +63,45 @@ def _check_json_object(path_value: str, field_name: str) -> list[str]:
     return []
 
 
+def _check_state_schema(
+    path_value: str,
+    field_name: str,
+    *,
+    supported_version: int,
+    check_single_owner: bool = False,
+) -> list[str]:
+    path = Path(path_value)
+    if not path.exists():
+        return []
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return []  # Подробную синтаксическую ошибку уже вернёт _check_json_object.
+    if not isinstance(raw, dict):
+        return []
+    errors: list[str] = []
+    try:
+        schema_version = int(raw.get("schema_version", 0) or 0)
+    except (TypeError, ValueError, OverflowError):
+        schema_version = 0
+    if schema_version > supported_version:
+        errors.append(
+            f"{field_name}: версия схемы {schema_version} новее поддерживаемой {supported_version}; "
+            "не запускайте старую версию бота с новыми данными"
+        )
+    if check_single_owner:
+        users = raw.get("authorized_users")
+        if isinstance(users, dict):
+            owners = sum(
+                1
+                for meta in users.values()
+                if isinstance(meta, dict) and meta.get("role") == "admin" and meta.get("admin_level") == "owner"
+            )
+            if owners > 1:
+                errors.append(f"{field_name}: найдено несколько руководителей сервиса")
+    return errors
+
+
 def validate_configuration() -> list[str]:
     from .config import (
         BOT_TOKEN,
@@ -77,6 +116,7 @@ def validate_configuration() -> list[str]:
         SUDO_BIN,
         USER_DATA_PATH,
     )
+    from .constants import IMPORTANT_DATA_SCHEMA_VERSION, USER_DATA_SCHEMA_VERSION
     from .settings import ENV_FILE, SECRETS_ENV_FILE
 
     errors: list[str] = []
@@ -122,6 +162,21 @@ def validate_configuration() -> list[str]:
         errors.extend(_check_private_data_permissions(value, name))
     errors.extend(_check_json_object(USER_DATA_PATH, "USER_DATA_PATH"))
     errors.extend(_check_json_object(IMPORTANT_DATA_PATH, "IMPORTANT_DATA_PATH"))
+    errors.extend(
+        _check_state_schema(
+            USER_DATA_PATH,
+            "USER_DATA_PATH",
+            supported_version=USER_DATA_SCHEMA_VERSION,
+            check_single_owner=True,
+        )
+    )
+    errors.extend(
+        _check_state_schema(
+            IMPORTANT_DATA_PATH,
+            "IMPORTANT_DATA_PATH",
+            supported_version=IMPORTANT_DATA_SCHEMA_VERSION,
+        )
+    )
     if os.name != "nt":
         for path, name in ((ENV_FILE, "ENV_PATH"), (SECRETS_ENV_FILE, "SECRETS_ENV_PATH")):
             if path.exists() and stat.S_IMODE(path.stat().st_mode) & 0o007:
