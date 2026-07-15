@@ -26,9 +26,7 @@ def configure_logging(*, level: str | None = None, use_json: bool | None = None,
     if getattr(root, "_maintbot_configured", False) and not force:
         return
     use_json = (
-        use_json
-        if use_json is not None
-        else os.getenv("LOG_JSON", "").strip().lower() in {"1", "true", "yes", "on"}
+        use_json if use_json is not None else os.getenv("LOG_JSON", "").strip().lower() in {"1", "true", "yes", "on"}
     )
     level = (level if level is not None else os.getenv("LOG_LEVEL", "INFO")).strip().upper() or "INFO"
     handler = logging.StreamHandler()
@@ -43,6 +41,7 @@ def configure_logging(*, level: str | None = None, use_json: bool | None = None,
         root.setLevel("INFO")
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("apscheduler").setLevel(logging.WARNING)
     root._maintbot_configured = True  # type: ignore[attr-defined]
 
 

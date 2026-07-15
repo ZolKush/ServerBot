@@ -1,7 +1,7 @@
 import calendar as _calendar
 import re
 from datetime import date, datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 from uuid import uuid4
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -40,18 +40,18 @@ def _due_thresholds(notified: list[int], remaining_min: int) -> list[int]:
     return [t for t in MAINT_WARN_THRESHOLDS_MIN if t not in sent and remaining_min <= t]
 
 
-def _server_items() -> List[Tuple[str, str]]:
+def _server_items() -> list[tuple[str, str]]:
     return [(k, v.label) for k, v in SERVERS.items()]
 
 
-def _normalize_scope(scope: Optional[str]) -> str:
+def _normalize_scope(scope: str | None) -> str:
     s = (scope or "").strip().lower()
     if s == MAINT_SCOPE_ALL:
         return MAINT_SCOPE_ALL
     return s if s in SERVERS else MAINT_SCOPE_ALL
 
 
-def _scope_label(scope: Optional[str]) -> str:
+def _scope_label(scope: str | None) -> str:
     scope_n = _normalize_scope(scope)
     if scope_n == MAINT_SCOPE_ALL:
         labels = [lbl for _, lbl in _server_items()]
@@ -60,7 +60,7 @@ def _scope_label(scope: Optional[str]) -> str:
     return srv.label if srv else scope_n
 
 
-def _scope_line(scope: Optional[str]) -> str:
+def _scope_line(scope: str | None) -> str:
     scope_n = _normalize_scope(scope)
     if scope_n == MAINT_SCOPE_ALL:
         return f"• Серверы: <b>{html_escape(_scope_label(scope_n))}</b>"
@@ -68,7 +68,7 @@ def _scope_line(scope: Optional[str]) -> str:
 
 
 def scope_kb() -> InlineKeyboardMarkup:
-    rows: List[List[InlineKeyboardButton]] = [
+    rows: list[list[InlineKeyboardButton]] = [
         [InlineKeyboardButton("🌐 Общие техработы", callback_data=f"maint:scope:{MAINT_SCOPE_ALL}")]
     ]
     for key, label in _server_items():
@@ -102,24 +102,33 @@ def maint_mode_kb() -> InlineKeyboardMarkup:
 CAL_NOOP = "maint:cal:noop"
 
 _RU_MONTHS = [
-    "", "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
-    "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь",
+    "",
+    "Январь",
+    "Февраль",
+    "Март",
+    "Апрель",
+    "Май",
+    "Июнь",
+    "Июль",
+    "Август",
+    "Сентябрь",
+    "Октябрь",
+    "Ноябрь",
+    "Декабрь",
 ]
 _RU_WEEKDAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 
 
-def _calendar_grid(
-    year: int, month: int, today: date, horizon: date
-) -> List[List[Tuple[str, str]]]:
+def _calendar_grid(year: int, month: int, today: date, horizon: date) -> list[list[tuple[str, str]]]:
     """Сетка месяца: список недель, каждая — 7 ячеек (подпись, callback_data).
 
     Дни не из текущего месяца, прошедшие дни и дни за горизонтом — некликабельны
     (callback = CAL_NOOP). Кликабельные дни дают callback maint:cal:day:YYYY-MM-DD.
     """
     cal = _calendar.Calendar(firstweekday=0)  # неделя с понедельника
-    weeks: List[List[Tuple[str, str]]] = []
+    weeks: list[list[tuple[str, str]]] = []
     for week in cal.monthdatescalendar(year, month):
-        row: List[Tuple[str, str]] = []
+        row: list[tuple[str, str]] = []
         for d in week:
             if d.month != month:
                 row.append((" ", CAL_NOOP))
@@ -131,11 +140,9 @@ def _calendar_grid(
     return weeks
 
 
-def schedule_calendar_kb(
-    year: int, month: int, *, today: date, horizon_days: int = 365
-) -> InlineKeyboardMarkup:
+def schedule_calendar_kb(year: int, month: int, *, today: date, horizon_days: int = 365) -> InlineKeyboardMarkup:
     horizon = today + timedelta(days=horizon_days)
-    rows: List[List[InlineKeyboardButton]] = [
+    rows: list[list[InlineKeyboardButton]] = [
         [InlineKeyboardButton(f"{_RU_MONTHS[month]} {year}", callback_data=CAL_NOOP)],
         [InlineKeyboardButton(wd, callback_data=CAL_NOOP) for wd in _RU_WEEKDAYS],
     ]
@@ -145,7 +152,7 @@ def schedule_calendar_kb(
     prev_ok = (year, month) > (today.year, today.month)
     next_first = date(year + (1 if month == 12 else 0), 1 if month == 12 else month + 1, 1)
     next_ok = next_first <= horizon
-    nav: List[InlineKeyboardButton] = []
+    nav: list[InlineKeyboardButton] = []
     if prev_ok:
         py, pm = (year - 1, 12) if month == 1 else (year, month - 1)
         nav.append(InlineKeyboardButton("◀", callback_data=f"maint:cal:nav:{py:04d}-{pm:02d}"))
@@ -159,7 +166,7 @@ def schedule_calendar_kb(
     return InlineKeyboardMarkup(rows)
 
 
-def parse_hhmm(text: str) -> Optional[Tuple[int, int]]:
+def parse_hhmm(text: str) -> tuple[int, int] | None:
     m = re.fullmatch(r"\s*(\d{1,3})\s*:\s*([0-5]\d)\s*", text or "")
     if not m:
         return None
@@ -173,7 +180,7 @@ def parse_hhmm(text: str) -> Optional[Tuple[int, int]]:
     return hh, mm
 
 
-def parse_clock_range(text: str) -> Optional[Tuple[int, int, int, int]]:
+def parse_clock_range(text: str) -> tuple[int, int, int, int] | None:
     m = re.fullmatch(r"\s*(\d{1,2})\s*:\s*([0-5]\d)\s*[-–]\s*(\d{1,2})\s*:\s*([0-5]\d)\s*", text or "")
     if not m:
         return None
@@ -212,7 +219,7 @@ def _hhmm_to_minutes(hh: int, mm: int) -> int:
     return max(0, (int(hh) * 60) + int(mm))
 
 
-def _minutes_to_hhmm(total: int) -> Tuple[int, int]:
+def _minutes_to_hhmm(total: int) -> tuple[int, int]:
     total = max(0, int(total))
     return total // 60, total % 60
 
@@ -221,21 +228,24 @@ def _fmt_dt_short(dt: datetime) -> str:
     return dt.astimezone(TZ).strftime("%d.%m.%Y %H:%M")
 
 
-def _build_maint_record(scope: str, urgency: str, hh: int, mm: int, author_id: Optional[int], author_name: str) -> Dict[str, Any]:
+def _build_maint_record(
+    scope: str, urgency: str, hh: int, mm: int, author_id: int | None, author_name: str
+) -> dict[str, Any]:
     now = datetime.now(TZ)
     duration_min = _hhmm_to_minutes(hh, mm)
     expected_end = now + timedelta(minutes=duration_min)
     maint_id = uuid4().hex
-    record: Maintenance = {
+    record: dict[str, Any] = {
         "id": maint_id,
         "active": True,
         "scope": _normalize_scope(scope),
-        "urgency": urgency,  # type: ignore[typeddict-item]
+        "urgency": urgency,
         "duration_min": duration_min,
         "started_at": now.isoformat(),
         "expected_end": expected_end.isoformat(),
         "author_id": author_id,
         "author_name": author_name,
+        "author_signature_version": 1,
         "updated_at": now.isoformat(),
     }
     return record
@@ -245,7 +255,7 @@ def _build_scheduled_maint_record(
     scope: str,
     start_at: datetime,
     end_at: datetime,
-    author_id: Optional[int],
+    author_id: int | None,
     author_name: str,
 ) -> ScheduledMaintenance:
     duration_min = max(1, int((end_at - start_at).total_seconds() // 60))
@@ -260,9 +270,11 @@ def _build_scheduled_maint_record(
         "scheduled_end": end_at.isoformat(),
         "author_id": author_id,
         "author_name": author_name,
+        "author_signature_version": 1,
         "created_at": now.isoformat(),
         "updated_at": now.isoformat(),
         "notified_thresholds": _initial_notified_thresholds(remaining_min),
+        "announced_thresholds": [],
         "notified_start": False,
     }
     return record
@@ -271,7 +283,12 @@ def _build_scheduled_maint_record(
 def _scheduled_to_active_record(scheduled: ScheduledMaintenance) -> Maintenance:
     start_at = datetime.now(TZ)
     duration_min = int(scheduled.get("duration_min", 0) or 0)
-    expected_end = start_at + timedelta(minutes=max(duration_min, 1))
+    try:
+        expected_end = datetime.fromisoformat(str(scheduled.get("scheduled_end") or ""))
+        if expected_end.tzinfo is None:
+            expected_end = expected_end.replace(tzinfo=TZ)
+    except (TypeError, ValueError):
+        expected_end = start_at + timedelta(minutes=max(duration_min, 1))
     record: Maintenance = {
         "id": str(scheduled.get("id") or uuid4().hex),
         "active": True,
@@ -281,7 +298,12 @@ def _scheduled_to_active_record(scheduled: ScheduledMaintenance) -> Maintenance:
         "started_at": start_at.isoformat(),
         "expected_end": expected_end.isoformat(),
         "author_id": scheduled.get("author_id"),
-        "author_name": scheduled.get("author_name") or "администратор",
+        "author_name": (
+            str(scheduled.get("author_name") or "Техническая поддержка")
+            if scheduled.get("author_signature_version") == 1
+            else "Техническая поддержка"
+        ),
+        "author_signature_version": 1,
         "updated_at": start_at.isoformat(),
     }
     return record
@@ -329,7 +351,7 @@ def _scheduled_cancel_confirm_kb(scheduled_id: str) -> InlineKeyboardMarkup:
     )
 
 
-def _maint_panel_text(maint: Dict[str, Any]) -> str:
+def _maint_panel_text(maint: dict[str, Any]) -> str:
     urgency_label = "срочные" if maint.get("urgency") == "urgent" else "плановые"
     duration_min = int(maint.get("duration_min", 0) or 0)
     hh, mm = _minutes_to_hhmm(duration_min)
@@ -360,7 +382,7 @@ def _maint_panel_text(maint: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _scheduled_panel_text(scheduled: Dict[str, Any]) -> str:
+def _scheduled_panel_text(scheduled: dict[str, Any]) -> str:
     scope = scheduled.get("scope", MAINT_SCOPE_ALL)
     try:
         start_dt = datetime.fromisoformat(str(scheduled.get("scheduled_start") or ""))
@@ -383,7 +405,7 @@ def _scheduled_panel_text(scheduled: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _maint_extend_notice(maint: Dict[str, Any], hh: int, mm: int, author: str) -> str:
+def _maint_extend_notice(maint: dict[str, Any], hh: int, mm: int, author: str) -> str:
     expected_end = maint.get("expected_end")
     end_dt = None
     try:
@@ -403,7 +425,7 @@ def _maint_extend_notice(maint: Dict[str, Any], hh: int, mm: int, author: str) -
     )
 
 
-def _maint_end_notice(maint: Dict[str, Any], author: str, ended_at: Optional[datetime] = None) -> str:
+def _maint_end_notice(maint: dict[str, Any], author: str, ended_at: datetime | None = None) -> str:
     if ended_at is None:
         ended_at = datetime.now(TZ)
     scope = maint.get("scope", MAINT_SCOPE_ALL)
@@ -417,18 +439,20 @@ def _maint_end_notice(maint: Dict[str, Any], author: str, ended_at: Optional[dat
     )
 
 
-def _maint_active_reminder_text(maint: Dict[str, Any]) -> str:
+def _maint_active_reminder_text(maint: dict[str, Any]) -> str:
     return "🔔 <b>Напоминание</b>\n" + _maint_panel_text(maint)
 
 
-def _maint_scheduled_soon_notice(scheduled: Dict[str, Any], remaining_min: int) -> str:
+def _maint_scheduled_soon_notice(scheduled: dict[str, Any], remaining_min: int) -> str:
+    start_dt: datetime | None
+    end_dt: datetime | None
     try:
         start_dt = datetime.fromisoformat(str(scheduled.get("scheduled_start") or ""))
         end_dt = datetime.fromisoformat(str(scheduled.get("scheduled_end") or ""))
     except Exception:
         start_dt = end_dt = None
     scope = scheduled.get("scope", MAINT_SCOPE_ALL)
-    author = scheduled.get("author_name") or "администратор"
+    author = scheduled.get("author_name") if scheduled.get("author_signature_version") == 1 else "Техническая поддержка"
     return (
         f"🛠 <b>Техработы</b> · ⏳ начнутся через {html_escape(humanize_until(remaining_min))}\n"
         f"{SEP}\n"
@@ -439,7 +463,7 @@ def _maint_scheduled_soon_notice(scheduled: Dict[str, Any], remaining_min: int) 
     )
 
 
-def _maint_scheduled_cancel_notice(scheduled: Dict[str, Any]) -> str:
+def _maint_scheduled_cancel_notice(scheduled: dict[str, Any]) -> str:
     try:
         start_dt = datetime.fromisoformat(str(scheduled.get("scheduled_start") or ""))
     except Exception:
@@ -454,13 +478,13 @@ def _maint_scheduled_cancel_notice(scheduled: Dict[str, Any]) -> str:
     )
 
 
-def _maint_scheduled_start_notice(scheduled: Dict[str, Any]) -> str:
+def _maint_scheduled_start_notice(scheduled: dict[str, Any]) -> str:
     try:
         end_dt = datetime.fromisoformat(str(scheduled.get("scheduled_end") or ""))
     except Exception:
         end_dt = None
     scope = scheduled.get("scope", MAINT_SCOPE_ALL)
-    author = scheduled.get("author_name") or "администратор"
+    author = scheduled.get("author_name") if scheduled.get("author_signature_version") == 1 else "Техническая поддержка"
     return (
         "🛠 <b>Техработы</b> · ⚠️ начались\n"
         f"{SEP}\n"

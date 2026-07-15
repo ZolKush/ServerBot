@@ -1,28 +1,32 @@
 from __future__ import annotations
 
-import asyncio
 import html
-import random
-from dataclasses import dataclass, field
-from functools import wraps
+from collections.abc import Callable
 from datetime import datetime
-from typing import Any, Callable, Dict, Iterable, List, Optional, Set
+from functools import wraps
+from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatType, ParseMode
-from telegram.error import BadRequest, NetworkError, RetryAfter, TimedOut
+from telegram.error import BadRequest
 from telegram.ext import ContextTypes, ConversationHandler
 
 from ..config import (
-    BROADCAST_MAX_ATTEMPTS,
-    BROADCAST_MAX_CONCURRENCY,
     MENU_MAINT,
+    MENU_REQUESTS,
+    MENU_STAFF_PROFILE,
     MENU_STATUS,
     MENU_SUBSCRIPTION,
     MENU_TICKET,
     MENU_USERS,
     TZ,
     logger,
+)
+from ..staff import (
+    is_lead_or_owner_meta,
+    is_owner_meta,
+    staff_public_signature,
+    staff_title_label,
 )
 from ..storage import authorized_users_snapshot, get_user_meta_copy
 
@@ -85,6 +89,22 @@ def wrap_as_codeblock_html(text: str, limit: int = 3300) -> str:
     return f"<pre><code>{clip_html(text, limit)}</code></pre>"
 
 
+def clip_html_message(text: str, limit: int = 4000) -> str:
+    value = str(text or "")
+    if len(value) <= limit:
+        return value
+    suffix = "\n<i>…сообщение сокращено из-за лимита Telegram</i>"
+    kept: list[str] = []
+    length = 0
+    for line in value.splitlines():
+        extra = len(line) + (1 if kept else 0)
+        if length + extra + len(suffix) > limit:
+            break
+        kept.append(line)
+        length += extra
+    return ("\n".join(kept) + suffix) if kept else html_escape(value[: limit - len(suffix)]) + suffix
+
+
 def now_str() -> str:
     return datetime.now(TZ).strftime("%d.%m.%Y %H:%M:%S")
 
@@ -94,15 +114,15 @@ def format_dt_human(value: Any, *, empty: str = "-", tz_label: str = "по МС�
     if not raw:
         return empty
 
-    dt: Optional[datetime] = None
+    dt: datetime | None = None
     try:
         dt = datetime.fromisoformat(raw)
-    except Exception:
+    except ValueError:
         for fmt in ("%Y-%m-%d %H:%M:%S,%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
             try:
                 dt = datetime.strptime(raw, fmt)
                 break
-            except Exception:
+            except ValueError:
                 continue
 
     if dt is None:
@@ -119,18 +139,19 @@ def is_private(update: Update) -> bool:
     return bool(update.effective_chat and update.effective_chat.type == ChatType.PRIVATE)
 
 
-def get_user_id(update: Update) -> Optional[int]:
+def get_user_id(update: Update) -> int | None:
     u = update.effective_user
     return int(u.id) if u else None
 
 
-def get_user_meta(uid: int) -> Optional[Dict[str, Any]]:
+def get_user_meta(uid: int) -> dict[str, Any] | None:
     return get_user_meta_copy(uid)
 
 
 def is_authorized(update: Update) -> bool:
     uid = get_user_id(update)
-    return bool(uid is not None and get_user_meta_copy(uid) is not None)
+    meta = get_user_meta_copy(uid) if uid is not None else None
+    return bool(meta and meta.get("access_state", "approved") == "approved")
 
 
 def is_enabled(update: Update) -> bool:
@@ -138,7 +159,7 @@ def is_enabled(update: Update) -> bool:
     if uid is None:
         return False
     meta = get_user_meta(uid)
-    return bool(meta and meta.get("enabled", True))
+    return bool(meta and meta.get("access_state", "approved") == "approved" and meta.get("enabled", True))
 
 
 def is_admin(update: Update) -> bool:
@@ -146,21 +167,73 @@ def is_admin(update: Update) -> bool:
     if uid is None:
         return False
     meta = get_user_meta(uid)
-    return bool(meta and meta.get("role") == "admin")
+    return bool(
+        meta
+        and meta.get("role") == "admin"
+        and meta.get("access_state", "approved") == "approved"
+        and meta.get("enabled", True)
+    )
+
+
+def is_owner(update: Update) -> bool:
+    uid = get_user_id(update)
+    return bool(uid is not None and is_owner_meta(get_user_meta(uid)))
+
+
+def is_lead_or_owner(update: Update) -> bool:
+    uid = get_user_id(update)
+    return bool(uid is not None and is_lead_or_owner_meta(get_user_meta(uid)))
+
+
+def has_subscriber_access(meta: dict[str, Any] | None) -> bool:
+    if not meta:
+        return False
+    return bool(meta.get("role") == "admin" or meta.get("service_tier") in {"subscriber", "unlimited_trial"})
+
+
+def staff_signature(update: Update, *, allow_alias: bool = True) -> str:
+    uid = get_user_id(update)
+    return staff_public_signature(get_user_meta(uid) if uid is not None else None, allow_alias=allow_alias)
+
+
+def staff_title(update: Update) -> str:
+    uid = get_user_id(update)
+    return staff_title_label(get_user_meta(uid) if uid is not None else None)
 
 
 async def reply_disabled(update: Update) -> None:
     msg = update.effective_message
     if msg:
-        await msg.reply_text("Вы отключены от этого бота. Обратитесь к администратору напрямую.")
+        meta = get_user_meta(get_user_id(update) or 0) or {}
+        state = str(meta.get("access_state") or "blocked")
+        texts = {
+            "blocked": "🚫 Доступ к боту отключён\n\nВы отключены от данного бота по решению администрации.",
+            "pending": "Заявка на доступ ожидает решения администратора.",
+            "rejected": "Заявка на доступ была отклонена. Вы можете отправить новую позднее.",
+            "logged_out": "Вы вышли из бота. Для возврата отправьте новую заявку на доступ.",
+        }
+        await msg.reply_text(texts.get(state, "Доступ к боту сейчас отключён."))
 
 
 async def reply_need_auth(update: Update) -> None:
     msg = update.effective_message
     if msg:
+        meta = get_user_meta(get_user_id(update) or 0) or {}
+        state = str(meta.get("access_state") or "")
+        if state == "blocked":
+            await reply_disabled(update)
+            return
+        if state == "pending":
+            await msg.reply_text("Заявка на доступ уже отправлена и ожидает решения администратора.")
+            return
+        if meta.get("role") == "admin":
+            await msg.reply_text("Сессия администратора завершена. Войдите снова командой /auth.")
+            return
         await msg.reply_text(
-            "Доступ ограничен. Авторизуйтесь командой:\n<b>/auth пароль</b>",
-            parse_mode=ParseMode.HTML,
+            "Доступ предоставляется после одобрения администратором.",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("🔐 Запросить доступ", callback_data="access:request")]]
+            ),
         )
 
 
@@ -194,7 +267,37 @@ def require_admin(func: Callable[..., Any]) -> Callable[..., Any]:
     return wrapper
 
 
-async def _ensure_access(update: Update, role: Optional[str]) -> bool:
+def require_subscriber(func: Callable[..., Any]) -> Callable[..., Any]:
+    @wraps(func)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args: Any, **kwargs: Any):
+        if not await _ensure_access(update, role="subscriber"):
+            return ConversationHandler.END
+        return await func(update, context, *args, **kwargs)
+
+    return wrapper
+
+
+def require_owner(func: Callable[..., Any]) -> Callable[..., Any]:
+    @wraps(func)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args: Any, **kwargs: Any):
+        if not await _ensure_access(update, role="owner"):
+            return ConversationHandler.END
+        return await func(update, context, *args, **kwargs)
+
+    return wrapper
+
+
+def require_lead(func: Callable[..., Any]) -> Callable[..., Any]:
+    @wraps(func)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args: Any, **kwargs: Any):
+        if not await _ensure_access(update, role="lead"):
+            return ConversationHandler.END
+        return await func(update, context, *args, **kwargs)
+
+    return wrapper
+
+
+async def _ensure_access(update: Update, role: str | None) -> bool:
     if not is_private(update):
         return False
     if not is_authorized(update):
@@ -208,19 +311,39 @@ async def _ensure_access(update: Update, role: Optional[str]) -> bool:
         if msg:
             await msg.reply_text("Доступ только для администратора.")
         return False
+    if role == "subscriber" and not has_subscriber_access(get_user_meta(get_user_id(update) or 0)):
+        msg = update.effective_message
+        if msg:
+            await msg.reply_text(
+                "🔒 Этот раздел доступен подписчикам. Откройте раздел подключения, чтобы запросить тест или купить подписку.",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton(MENU_SUBSCRIPTION, callback_data="menu:subscription")]]
+                ),
+            )
+        return False
+    if role == "owner" and not is_owner(update):
+        msg = update.effective_message
+        if msg:
+            await msg.reply_text("Это действие доступно только руководителю сервиса.")
+        return False
+    if role == "lead" and not is_lead_or_owner(update):
+        msg = update.effective_message
+        if msg:
+            await msg.reply_text("Это действие доступно ведущему инженеру сопровождения или руководителю сервиса.")
+        return False
     return True
 
 
-def display_name_from_meta(meta: Optional[Dict[str, Any]]) -> str:
+def display_name_from_meta(meta: dict[str, Any] | None) -> str:
     if not meta:
         return "пользователь"
-    nick = (meta.get("nickname") or "").strip()
+    nick = str(meta.get("nickname") or "").strip()
     if nick:
         return nick
     uname = meta.get("username")
     if uname:
-        return f"@{uname}"
-    nm = " ".join([x for x in [meta.get("first_name"), meta.get("last_name")] if x])
+        return f"@{str(uname)}"
+    nm = " ".join(str(x) for x in [meta.get("first_name"), meta.get("last_name")] if x)
     if nm.strip():
         return nm.strip()
     uid = meta.get("user_id")
@@ -240,36 +363,50 @@ def display_name(update: Update) -> str:
     return nm if nm else str(u.id)
 
 
-def main_menu_inline_kb_for_admin(is_admin_user: bool) -> InlineKeyboardMarkup:
-    rows: List[List[InlineKeyboardButton]] = [
-        [
-            InlineKeyboardButton(MENU_STATUS, callback_data="menu:status"),
-            InlineKeyboardButton(MENU_SUBSCRIPTION, callback_data="menu:subscription"),
-        ]
-    ]
+def main_menu_inline_kb_for_meta(meta: dict[str, Any] | None) -> InlineKeyboardMarkup:
+    is_admin_user = bool(meta and meta.get("role") == "admin")
+    rows: list[list[InlineKeyboardButton]] = []
+    if has_subscriber_access(meta):
+        rows.append(
+            [
+                InlineKeyboardButton(MENU_STATUS, callback_data="menu:status"),
+                InlineKeyboardButton(MENU_SUBSCRIPTION, callback_data="menu:subscription"),
+            ]
+        )
+    else:
+        rows.append([InlineKeyboardButton(MENU_SUBSCRIPTION, callback_data="menu:subscription")])
     rows.append([InlineKeyboardButton(MENU_TICKET, callback_data="menu:ticket")])
     if is_admin_user:
         rows.append(
             [
                 InlineKeyboardButton(MENU_USERS, callback_data="menu:users"),
+                InlineKeyboardButton(MENU_REQUESTS, callback_data="product:requests"),
+            ]
+        )
+        rows.append(
+            [
                 InlineKeyboardButton(MENU_MAINT, callback_data="menu:maint"),
+                InlineKeyboardButton(MENU_STAFF_PROFILE, callback_data="staff:profile"),
             ]
         )
     rows.append([InlineKeyboardButton("ℹ️ Помощь", callback_data="menu:help")])
     return InlineKeyboardMarkup(rows)
 
 
+def main_menu_inline_kb_for_admin(is_admin_user: bool) -> InlineKeyboardMarkup:
+    meta = {"role": "admin", "service_tier": "subscriber"} if is_admin_user else {"service_tier": "subscriber"}
+    return main_menu_inline_kb_for_meta(meta)
+
+
 def main_menu_inline_kb(update: Update) -> InlineKeyboardMarkup:
-    return main_menu_inline_kb_for_admin(is_admin(update))
+    uid = get_user_id(update)
+    return main_menu_inline_kb_for_meta(get_user_meta(uid) if uid is not None else None)
 
 
 def main_menu_text(is_admin_user: bool, text: str = "Меню:") -> str:
     if text == "Меню:":
-        # Локальный импорт: ui импортирует common, обратная зависимость допустима только в рантайме
-        from .ui import SEP
-
         title = "👑 <b>Админ-панель</b>" if is_admin_user else "👤 <b>Главное меню</b>"
-        return f"{title}\n{SEP}\nВыберите раздел:"
+        return f"{title}\n\nВыберите раздел:"
     return text
 
 
@@ -295,7 +432,7 @@ async def safe_edit_or_reply(
     message: Any,
     text: str,
     *,
-    reply_markup: Optional[InlineKeyboardMarkup] = None,
+    reply_markup: InlineKeyboardMarkup | None = None,
     parse_mode: str = ParseMode.HTML,
 ) -> None:
     """Редактирует сообщение без дубликатов.
@@ -305,6 +442,7 @@ async def safe_edit_or_reply(
     """
     if message is None:
         return
+    text = clip_html_message(text)
     try:
         await message.edit_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
         return
@@ -325,132 +463,34 @@ async def menu_home_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await show_main_menu(update)
 
 
-def _clear_transient_user_context(context: ContextTypes.DEFAULT_TYPE) -> None:
+def clear_transient_user_context(context: ContextTypes.DEFAULT_TYPE) -> None:
+    ud = context.user_data
+    if ud is None:
+        return
     transient_keys = {"selected_uid", "subscription_delivery_mode", "users_all_broadcast_text"}
-    for key in tuple(context.user_data.keys()):
-        if key.startswith("ticket_") or key.startswith("maint_") or key in transient_keys:
-            context.user_data.pop(key, None)
+    for key in tuple(ud.keys()):
+        if key.startswith(("ticket_", "maint_", "product_")) or key in transient_keys:
+            ud.pop(key, None)
 
 
 @require_auth
 async def cancel_to_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    _clear_transient_user_context(context)
+    clear_transient_user_context(context)
     await show_main_menu(update)
     return ConversationHandler.END
 
 
-@dataclass
-class SendErrorInfo:
-    user_id: int
-    error_type: str
-    message: str
-
-
-@dataclass
-class SendManyReport:
-    ok: int = 0
-    fail: int = 0
-    errors: List[SendErrorInfo] = field(default_factory=list)
-
-    def __iter__(self):
-        yield self.ok
-        yield self.fail
-
-
-def _retry_after_seconds(exc: RetryAfter) -> float:
-    ra = getattr(exc, "retry_after", 1)
-    try:
-        return max(0.5, float(ra))
-    except Exception:
-        return 1.0
-
-
-async def send_to_many(
-    context: ContextTypes.DEFAULT_TYPE,
-    user_ids: Iterable[int],
-    text: str,
-    *,
-    reply_markup: Optional[InlineKeyboardMarkup] = None,
-    max_concurrency: Optional[int] = None,
-    max_attempts: Optional[int] = None,
-) -> SendManyReport:
-    if max_concurrency is None:
-        max_concurrency = BROADCAST_MAX_CONCURRENCY
-    if max_attempts is None:
-        max_attempts = BROADCAST_MAX_ATTEMPTS
-    ids = sorted(set(int(uid) for uid in user_ids))
-    if not ids:
-        return SendManyReport()
-    report = SendManyReport()
-    report_lock = asyncio.Lock()
-    queue: asyncio.Queue[int] = asyncio.Queue()
-    for uid in ids:
-        queue.put_nowait(uid)
-
-    async def _send_one(uid: int) -> tuple[bool, Optional[SendErrorInfo]]:
-        last_exc: Optional[Exception] = None
-        for attempt in range(1, max(1, max_attempts) + 1):
-            try:
-                await context.bot.send_message(
-                    chat_id=uid,
-                    text=text,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=reply_markup,
-                )
-                return True, None
-            except RetryAfter as e:
-                last_exc = e
-                if attempt >= max_attempts:
-                    break
-                await asyncio.sleep(_retry_after_seconds(e))
-            except (TimedOut, NetworkError) as e:
-                last_exc = e
-                if attempt >= max_attempts:
-                    break
-                await asyncio.sleep(min(2.0, 0.25 * (2 ** (attempt - 1))) + random.uniform(0.0, 0.2))
-            except Exception as e:
-                last_exc = e
-                break
-        err = SendErrorInfo(
-            user_id=uid,
-            error_type=(last_exc.__class__.__name__ if last_exc else "Error"),
-            message=(str(last_exc).strip() if last_exc else "unknown error"),
-        )
-        return False, err
-
-    async def _worker() -> None:
-        while True:
-            try:
-                uid = queue.get_nowait()
-            except asyncio.QueueEmpty:
-                return
-            ok, err = await _send_one(uid)
-            async with report_lock:
-                if ok:
-                    report.ok += 1
-                else:
-                    report.fail += 1
-                    if err:
-                        report.errors.append(err)
-                        logger.warning("Не удалось отправить пользователю %s: %s: %s", err.user_id, err.error_type, err.message)
-            queue.task_done()
-
-    workers = [asyncio.create_task(_worker()) for _ in range(min(len(ids), max(1, max_concurrency)))]
-    await asyncio.gather(*workers)
-    return report
-
-
-def authorized_ids(role_filter: Optional[str] = None, exclude: Optional[Set[int]] = None) -> List[int]:
+def authorized_ids(role_filter: str | None = None, exclude: set[int] | None = None) -> list[int]:
     exclude = exclude or set()
-    ids: List[int] = []
+    ids: list[int] = []
     for k, meta in authorized_users_snapshot().items():
         try:
             uid = int(meta.get("user_id", k))
-        except Exception:
+        except (TypeError, ValueError, OverflowError):
             continue
         if uid in exclude:
             continue
-        if not bool(meta.get("enabled", True)):
+        if meta.get("access_state", "approved") != "approved" or not bool(meta.get("enabled", True)):
             continue
         if role_filter and meta.get("role") != role_filter:
             continue
@@ -459,7 +499,7 @@ def authorized_ids(role_filter: Optional[str] = None, exclude: Optional[Set[int]
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    _clear_transient_user_context(context)
+    clear_transient_user_context(context)
     msg = update.effective_message
     if msg:
         await msg.reply_text("Действие отменено.")

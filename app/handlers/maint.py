@@ -1,6 +1,6 @@
 import re
 from datetime import date, datetime, timedelta
-from typing import Any, Optional
+from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
@@ -8,21 +8,23 @@ from telegram.error import BadRequest
 from telegram.ext import ContextTypes, ConversationHandler
 
 from ..config import TZ, logger
+from ..services.outbox import message_payload
 from ..storage import (
-    clear_scheduled_maintenance_record,
+    ImportantData,
+    enqueue_important_outbox,
     get_active_maintenance,
     get_scheduled_maintenance,
-    set_maintenance_record,
-    set_scheduled_maintenance_record,
+    make_outbox_event,
     update_important_data,
 )
-from .common import authorized_ids, display_name, get_user_id, html_escape, require_admin, send_to_many
+from .common import authorized_ids, get_user_id, html_escape, require_admin, staff_title
 from .maint_helpers import (
     MAINT_SCOPE_ALL,
     MAINT_WARN_THRESHOLDS_MIN,
     _build_maint_record,
     _build_scheduled_maint_record,
     _due_thresholds,
+    _hhmm_to_minutes,
     _initial_notified_thresholds,
     _maint_active_reminder_text,
     _maint_control_kb,
@@ -39,15 +41,14 @@ from .maint_helpers import (
     _scheduled_panel_text,
     _scheduled_to_active_record,
     _scope_label,
-    format_scheduled_maint,
     format_maint,
+    format_scheduled_maint,
     maint_mode_kb,
     parse_clock_range,
     parse_hhmm,
     schedule_calendar_kb,
     scope_kb,
     urgency_kb,
-    _hhmm_to_minutes,
 )
 
 (
@@ -74,68 +75,47 @@ def _clear_maint_ctx(context: ContextTypes.DEFAULT_TYPE) -> None:
         "maint_panel_msg_id",
         "maint_extend_id",
         "maint_sched_date",
+        "maint_base_scheduled_id",
     ):
         context.user_data.pop(key, None)
 
 
-async def _take_active_maintenance(maint_id: str) -> Optional[dict[str, Any]]:
-    def _take(cfg):
-        current = getattr(cfg, "maintenance", {})
-        if not isinstance(current, dict) or not current.get("active"):
-            return None
-        if str(current.get("id") or "") != str(maint_id):
-            return None
-        prev = dict(current)
-        cfg.maintenance = {}
-        return prev
-
-    taken = await update_important_data(_take)
-    if isinstance(taken, dict):
-        return taken
-    return None
-
-
-async def _take_scheduled_maintenance(sched_id: str) -> Optional[dict[str, Any]]:
-    def _take(cfg):
-        current = getattr(cfg, "scheduled_maintenance", {})
-        if not isinstance(current, dict) or not current.get("id"):
-            return None
-        if str(current.get("id") or "") != str(sched_id):
-            return None
-        prev = dict(current)
-        cfg.scheduled_maintenance = {}
-        return prev
-
-    taken = await update_important_data(_take)
-    return taken if isinstance(taken, dict) else None
-
-
-async def _send_maint_notice_with_admin_copy(
-    context: ContextTypes.DEFAULT_TYPE,
+def _make_maint_notice_event(
+    *,
     author_id: int | None,
     text: str,
-) -> tuple[tuple[int, int], tuple[int, int]]:
+    kind: str,
+) -> tuple[dict[str, Any] | None, int, int]:
     user_ids = authorized_ids(role_filter="user", exclude=set())
     admin_ids = authorized_ids(role_filter="admin", exclude={author_id} if author_id else set())
-    menu_kb = _maint_notice_menu_kb()
-    user_res = await send_to_many(context, user_ids, text, reply_markup=menu_kb) if user_ids else None
-    admin_res = await send_to_many(context, admin_ids, text, reply_markup=menu_kb) if admin_ids else None
-    users_ok = int(user_res.ok) if user_res is not None else 0
-    users_fail = int(user_res.fail) if user_res is not None else 0
-    admins_ok = int(admin_res.ok) if admin_res is not None else 0
-    admins_fail = int(admin_res.fail) if admin_res is not None else 0
-    return (users_ok, users_fail), (admins_ok, admins_fail)
+    recipient_ids = user_ids + admin_ids
+    if not recipient_ids:
+        return None, 0, 0
+    event = make_outbox_event(
+        kind=kind,
+        recipient_ids=recipient_ids,
+        payload=message_payload(
+            text,
+            reply_markup=[[{"text": "🏠 Меню", "callback_data": "menu:home"}]],
+        ),
+    )
+    return event, len(user_ids), len(admin_ids)
 
 
-def _maint_delivery_status(users_ok: int, users_fail: int, admins_ok: int, admins_fail: int) -> str:
+def _enqueue_if_present(cfg: ImportantData, event: dict[str, Any] | None) -> None:
+    if event:
+        enqueue_important_outbox(cfg, event)
+
+
+def _maint_delivery_status(users_count: int, admins_count: int) -> str:
     return (
-        "Статус отправки:\n"
-        f"• Пользователи: ✅ {users_ok}, ❌ {users_fail}\n"
-        f"• Админы (кроме инициатора): ✅ {admins_ok}, ❌ {admins_fail}"
+        "Уведомления сохранены в надёжной очереди:\n"
+        f"• Пользователи: {users_count}\n"
+        f"• Админы (кроме инициатора): {admins_count}"
     )
 
 
-def _maint_menu_text(scheduled: Optional[dict[str, Any]] = None) -> str:
+def _maint_menu_text(scheduled: dict[str, Any] | None = None) -> str:
     lines = [
         "<b>Техработы</b>",
         "",
@@ -197,6 +177,8 @@ async def maint_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not m:
         return ConversationHandler.END
     context.user_data["maint_mode"] = m.group(1)
+    current_schedule = get_scheduled_maintenance() or {}
+    context.user_data["maint_base_scheduled_id"] = str(current_schedule.get("id") or "")
     await q.edit_message_text("Выберите область техработ:", reply_markup=scope_kb())
     return STATE_MAINT_SCOPE
 
@@ -315,27 +297,47 @@ async def maint_duration(update: Update, context: ContextTypes.DEFAULT_TYPE):
     hh, mm = parsed
     scope = _normalize_scope(str(context.user_data.get("maint_scope", MAINT_SCOPE_ALL)))
     urgency = str(context.user_data.get("maint_urgency", "planned"))
-    author = display_name(update)
+    author = staff_title(update)
     author_id = get_user_id(update)
 
-    # Сначала сохраняем запись, потом рассылаем: иначе при сбое сохранения
-    # пользователи получат уведомление о несуществующих техработах.
     maint = _build_maint_record(scope, urgency, hh, mm, author_id, author)
     maint_id = maint.get("id")
-    await set_maintenance_record(maint)
-    if get_scheduled_maintenance():
-        await clear_scheduled_maintenance_record()
-        logger.info("Cleared scheduled maintenance superseded by immediate announce by user_id=%s", author_id)
-    logger.info("Maintenance started by user_id=%s scope=%s urgency=%s duration_min=%s", author_id, scope, urgency, _hhmm_to_minutes(hh, mm))
-
     msg_text = format_maint(scope, urgency, hh, mm, author)
-    (users_ok, users_fail), (admins_ok, admins_fail) = await _send_maint_notice_with_admin_copy(
-        context,
+    event, users_count, admins_count = _make_maint_notice_event(
         author_id=author_id,
         text=msg_text,
+        kind="maintenance_started",
+    )
+    expected_schedule_id = str(context.user_data.get("maint_base_scheduled_id") or "")
+
+    def _start(cfg: ImportantData) -> bool:
+        active = cfg.maintenance if isinstance(cfg.maintenance, dict) else {}
+        if active.get("active"):
+            return False
+        current_schedule = cfg.scheduled_maintenance if isinstance(cfg.scheduled_maintenance, dict) else {}
+        if str(current_schedule.get("id") or "") != expected_schedule_id:
+            return False
+        cfg.maintenance = dict(maint)
+        # Immediate announcement intentionally supersedes a schedule, but both
+        # actions happen under one compare-and-set transaction.
+        cfg.scheduled_maintenance = {}
+        _enqueue_if_present(cfg, event)
+        return True
+
+    if not await update_important_data(_start):
+        if msg:
+            await msg.reply_text("Другой администратор уже запустил техработы. Откройте /maint заново.")
+        _clear_maint_ctx(context)
+        return ConversationHandler.END
+    logger.info(
+        "Maintenance started by user_id=%s scope=%s urgency=%s duration_min=%s",
+        author_id,
+        scope,
+        urgency,
+        _hhmm_to_minutes(hh, mm),
     )
 
-    panel_text = f"{_maint_panel_text(maint)}\n\n{_maint_delivery_status(users_ok, users_fail, admins_ok, admins_fail)}"
+    panel_text = f"{_maint_panel_text(maint)}\n\n{_maint_delivery_status(users_count, admins_count)}"
     panel_chat_id = context.user_data.get("maint_panel_chat_id")
     panel_msg_id = context.user_data.get("maint_panel_msg_id")
     if panel_chat_id and panel_msg_id:
@@ -380,8 +382,13 @@ async def maint_schedule_range(update: Update, context: ContextTypes.DEFAULT_TYP
     except ValueError:
         chosen = now.date()
     start_at = now.replace(
-        year=chosen.year, month=chosen.month, day=chosen.day,
-        hour=sh, minute=sm, second=0, microsecond=0,
+        year=chosen.year,
+        month=chosen.month,
+        day=chosen.day,
+        hour=sh,
+        minute=sm,
+        second=0,
+        microsecond=0,
     )
     end_at = start_at.replace(hour=eh, minute=em)
     if start_at <= now:
@@ -394,10 +401,23 @@ async def maint_schedule_range(update: Update, context: ContextTypes.DEFAULT_TYP
         return STATE_MAINT_SCHEDULE_RANGE
 
     scope = _normalize_scope(str(context.user_data.get("maint_scope", MAINT_SCOPE_ALL)))
-    author = display_name(update)
+    author = staff_title(update)
     author_id = get_user_id(update)
     scheduled = _build_scheduled_maint_record(scope, start_at, end_at, author_id, author)
-    await set_scheduled_maintenance_record(scheduled)
+
+    def _schedule(cfg: ImportantData) -> bool:
+        active = cfg.maintenance if isinstance(cfg.maintenance, dict) else {}
+        existing = cfg.scheduled_maintenance if isinstance(cfg.scheduled_maintenance, dict) else {}
+        if active.get("active") or existing.get("id"):
+            return False
+        cfg.scheduled_maintenance = dict(scheduled)
+        return True
+
+    if not await update_important_data(_schedule):
+        if msg:
+            await msg.reply_text("Другой администратор уже создал план или запустил работы. Откройте /maint заново.")
+        _clear_maint_ctx(context)
+        return ConversationHandler.END
     logger.info(
         "Maintenance scheduled by user_id=%s scope=%s start=%s end=%s",
         author_id,
@@ -408,7 +428,7 @@ async def maint_schedule_range(update: Update, context: ContextTypes.DEFAULT_TYP
 
     panel_text = (
         format_scheduled_maint(scope, start_at, end_at, author)
-        + "\n\nУведомления пользователям будут отправлены за 30 минут и в момент начала."
+        + "\n\nУведомления будут поставлены в очередь за 3 суток, 12 часов и 30 минут, а также в момент начала."
     )
     panel_chat_id = context.user_data.get("maint_panel_chat_id")
     panel_msg_id = context.user_data.get("maint_panel_msg_id")
@@ -477,8 +497,12 @@ async def maint_extend_duration(update: Update, context: ContextTypes.DEFAULT_TY
 
     hh, mm = parsed
     duration_min = _hhmm_to_minutes(hh, mm)
+    author = staff_title(update)
+    author_id = get_user_id(update)
+    users_count = admins_count = 0
 
     def _extend_current(cfg):
+        nonlocal users_count, admins_count
         current = getattr(cfg, "maintenance", {})
         if not isinstance(current, dict) or not current.get("active"):
             raise RuntimeError("maintenance_not_active")
@@ -490,6 +514,13 @@ async def maint_extend_duration(update: Update, context: ContextTypes.DEFAULT_TY
         updated["expected_end"] = (now + timedelta(minutes=duration_min)).isoformat()
         updated["updated_at"] = now.isoformat()
         cfg.maintenance = updated
+        notice = _maint_extend_notice(updated, hh, mm, author)
+        event, users_count, admins_count = _make_maint_notice_event(
+            author_id=author_id,
+            text=notice,
+            kind="maintenance_extended",
+        )
+        _enqueue_if_present(cfg, event)
         return updated
 
     try:
@@ -500,17 +531,10 @@ async def maint_extend_duration(update: Update, context: ContextTypes.DEFAULT_TY
         _clear_maint_ctx(context)
         return ConversationHandler.END
 
-    author = display_name(update)
-    logger.info("Maintenance extended by user_id=%s duration_min=%s maint_id=%s", get_user_id(update), duration_min, maint_id)
-    notice = _maint_extend_notice(maint, hh, mm, author)
-    author_id = get_user_id(update)
-    (users_ok, users_fail), (admins_ok, admins_fail) = await _send_maint_notice_with_admin_copy(
-        context,
-        author_id=author_id,
-        text=notice,
+    logger.info(
+        "Maintenance extended by user_id=%s duration_min=%s maint_id=%s", get_user_id(update), duration_min, maint_id
     )
-
-    panel_text = f"{_maint_panel_text(maint)}\n\n{_maint_delivery_status(users_ok, users_fail, admins_ok, admins_fail)}"
+    panel_text = f"{_maint_panel_text(maint)}\n\n{_maint_delivery_status(users_count, admins_count)}"
     context.user_data.pop("maint_extend_id", None)
     if msg:
         await msg.reply_text(panel_text, parse_mode=ParseMode.HTML, reply_markup=_maint_control_kb(str(maint_id)))
@@ -528,26 +552,40 @@ async def maint_end_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not m:
         return
     maint_id = m.group(1)
-    maint = await _take_active_maintenance(maint_id)
-    if not maint:
+    author = staff_title(update)
+    ended_at = datetime.now(TZ)
+    author_id = get_user_id(update)
+    users_count = admins_count = 0
+
+    def _end(cfg: ImportantData) -> dict[str, Any] | None:
+        nonlocal users_count, admins_count
+        current = cfg.maintenance if isinstance(cfg.maintenance, dict) else {}
+        if not current.get("active") or str(current.get("id") or "") != maint_id:
+            return None
+        previous = dict(current)
+        notice = _maint_end_notice(previous, author, ended_at=ended_at)
+        event, users_count, admins_count = _make_maint_notice_event(
+            author_id=author_id,
+            text=notice,
+            kind="maintenance_ended",
+        )
+        cfg.maintenance = {}
+        reminder_kind = f"maintenance_admin_reminder_{maint_id}"
+        cfg.outbox = {
+            event_id: pending
+            for event_id, pending in cfg.outbox.items()
+            if not (isinstance(pending, dict) and pending.get("kind") == reminder_kind)
+        }
+        _enqueue_if_present(cfg, event)
+        return previous
+
+    maint = await update_important_data(_end)
+    if not isinstance(maint, dict):
         await q.edit_message_text("Техработы не активны или уже завершены.")
         return
 
-    author = display_name(update)
-    ended_at = datetime.now(TZ)
-    notice = _maint_end_notice(maint, author, ended_at=ended_at)
-    author_id = get_user_id(update)
-    (users_ok, users_fail), (admins_ok, admins_fail) = await _send_maint_notice_with_admin_copy(
-        context,
-        author_id=author_id,
-        text=notice,
-    )
-
     logger.info("Maintenance ended by user_id=%s maint_id=%s", get_user_id(update), maint_id)
-    await q.edit_message_text(
-        "✅ Техработы завершены.\n\n"
-        + _maint_delivery_status(users_ok, users_fail, admins_ok, admins_fail)
-    )
+    await q.edit_message_text("✅ Техработы завершены.\n\n" + _maint_delivery_status(users_count, admins_count))
 
 
 @require_admin
@@ -638,23 +676,41 @@ async def maint_sched_cancel_confirm_cb(update: Update, context: ContextTypes.DE
     if not m:
         return
     sched_id = m.group(1)
-    scheduled = await _take_scheduled_maintenance(sched_id)
-    if not scheduled:
+    actor_id = get_user_id(update)
+    users_count = admins_count = 0
+    queued_notice = False
+
+    def _cancel(cfg: ImportantData) -> dict[str, Any] | None:
+        nonlocal users_count, admins_count, queued_notice
+        current = cfg.scheduled_maintenance if isinstance(cfg.scheduled_maintenance, dict) else {}
+        if str(current.get("id") or "") != sched_id:
+            return None
+        previous = dict(current)
+        announced = previous.get("announced_thresholds")
+        already_warned = (
+            bool(announced) or bool(previous.get("notified_start")) or bool(previous.get("notified_before"))
+        )
+        cfg.scheduled_maintenance = {}
+        if already_warned:
+            event, users_count, admins_count = _make_maint_notice_event(
+                author_id=actor_id,
+                text=_maint_scheduled_cancel_notice(previous),
+                kind="maintenance_schedule_cancelled",
+            )
+            _enqueue_if_present(cfg, event)
+            queued_notice = event is not None
+        return previous
+
+    scheduled = await update_important_data(_cancel)
+    if not isinstance(scheduled, dict):
         await q.edit_message_text("Запланированные техработы не найдены или уже неактуальны.")
         return
 
     logger.info("Scheduled maintenance cancelled by user_id=%s sched_id=%s", get_user_id(update), sched_id)
-    notified = scheduled.get("notified_thresholds")
-    already_warned = isinstance(notified, list) and len(notified) > 0 or bool(scheduled.get("notified_before"))
-    if already_warned:
-        notice = _maint_scheduled_cancel_notice(scheduled)
-        author_id = scheduled.get("author_id")
-        (users_ok, users_fail), (admins_ok, admins_fail) = await _send_maint_notice_with_admin_copy(
-            context, author_id=author_id if isinstance(author_id, int) else None, text=notice
-        )
+    if queued_notice:
         await q.edit_message_text(
-            "✅ Запланированные техработы отменены, пользователи уведомлены.\n\n"
-            + _maint_delivery_status(users_ok, users_fail, admins_ok, admins_fail)
+            "✅ Запланированные техработы отменены; уведомление сохранено в очереди.\n\n"
+            + _maint_delivery_status(users_count, admins_count)
         )
     else:
         await q.edit_message_text("✅ Запланированные техработы отменены.")
@@ -669,8 +725,28 @@ async def maint_restart_notify(context: ContextTypes.DEFAULT_TYPE) -> None:
     admin_ids = authorized_ids(role_filter="admin", exclude=set())
     if not admin_ids:
         return
+    maint_id = str(maint.get("id") or "")
+    reminder_kind = f"maintenance_admin_reminder_{maint_id}"
     text = _maint_active_reminder_text(maint) + "\n\nОткройте «/maint» для управления."
-    await send_to_many(context, admin_ids, text, reply_markup=_maint_notice_menu_kb())
+    event = make_outbox_event(
+        kind=reminder_kind,
+        recipient_ids=admin_ids,
+        payload=message_payload(
+            text,
+            reply_markup=[[{"text": "🏠 Меню", "callback_data": "menu:home"}]],
+        ),
+    )
+
+    def _queue_reminder(cfg: ImportantData) -> bool:
+        current = cfg.maintenance if isinstance(cfg.maintenance, dict) else {}
+        if not current.get("active") or str(current.get("id") or "") != maint_id:
+            return False
+        if any(isinstance(pending, dict) and pending.get("kind") == reminder_kind for pending in cfg.outbox.values()):
+            return False
+        enqueue_important_outbox(cfg, event)
+        return True
+
+    await update_important_data(_queue_reminder)
 
 
 async def maint_schedule_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -683,7 +759,14 @@ async def maint_schedule_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
         end_at = datetime.fromisoformat(str(scheduled.get("scheduled_end") or ""))
     except Exception:
         logger.warning("Scheduled maintenance has invalid timestamps, clearing record")
-        await clear_scheduled_maintenance_record()
+        schedule_id = str(scheduled.get("id") or "")
+
+        def _clear_invalid(cfg: ImportantData) -> None:
+            current = cfg.scheduled_maintenance if isinstance(cfg.scheduled_maintenance, dict) else {}
+            if str(current.get("id") or "") == schedule_id:
+                cfg.scheduled_maintenance = {}
+
+        await update_important_data(_clear_invalid)
         return
 
     if start_at.tzinfo is None:
@@ -701,16 +784,34 @@ async def maint_schedule_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
             scheduled.get("id"),
             scheduled.get("scheduled_end"),
         )
-        await clear_scheduled_maintenance_record()
         admin_ids = authorized_ids(role_filter="admin")
-        if admin_ids:
-            await send_to_many(
-                context,
-                admin_ids,
-                "⚠️ <b>Запланированные техработы отменены</b>\n"
-                "Окно работ прошло, пока они не были запущены (бот был недоступен или шли другие работы).",
-                reply_markup=_maint_notice_menu_kb(),
+        announced = scheduled.get("announced_thresholds")
+        users_were_notified = bool(announced) or bool(scheduled.get("notified_before"))
+        user_ids = authorized_ids(role_filter="user") if users_were_notified else []
+        expiry_recipients = sorted(set(admin_ids + user_ids))
+        expiry_event = (
+            make_outbox_event(
+                kind="maintenance_schedule_expired",
+                recipient_ids=expiry_recipients,
+                payload=message_payload(
+                    "⚠️ <b>Запланированные техработы отменены</b>\n"
+                    "Окно работ прошло, пока они не были запущены (бот был недоступен или шли другие работы).",
+                    reply_markup=[[{"text": "🏠 Меню", "callback_data": "menu:home"}]],
+                ),
             )
+            if expiry_recipients
+            else None
+        )
+
+        def _expire(cfg: ImportantData) -> bool:
+            current = cfg.scheduled_maintenance if isinstance(cfg.scheduled_maintenance, dict) else {}
+            if str(current.get("id") or "") != str(scheduled.get("id") or ""):
+                return False
+            cfg.scheduled_maintenance = {}
+            _enqueue_if_present(cfg, expiry_event)
+            return True
+
+        await update_important_data(_expire)
         return
 
     notified_raw = scheduled.get("notified_thresholds")
@@ -725,25 +826,32 @@ async def maint_schedule_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
     due = _due_thresholds(notified, remaining_min)
     if due and now < start_at:
         updated_notified = sorted(set(notified) | set(due))
+        notice = _maint_scheduled_soon_notice(scheduled, remaining_min)
+        author_id = scheduled.get("author_id")
+        event, _users_count, _admins_count = _make_maint_notice_event(
+            author_id=author_id if isinstance(author_id, int) else None,
+            text=notice,
+            kind="maintenance_schedule_warning",
+        )
 
         def _mark_thresholds(cfg):
             cur = dict(getattr(cfg, "scheduled_maintenance", {}) or {})
             if str(cur.get("id") or "") != str(scheduled.get("id") or ""):
                 return None
             cur["notified_thresholds"] = updated_notified
+            announced_raw = cur.get("announced_thresholds")
+            announced = [int(x) for x in announced_raw if isinstance(x, int)] if isinstance(announced_raw, list) else []
+            cur["announced_thresholds"] = sorted(set(announced) | set(due))
             cur.pop("notified_before", None)
             cur["updated_at"] = now.isoformat()
             cfg.scheduled_maintenance = cur
+            _enqueue_if_present(cfg, event)
             return cur
 
-        marked = await update_important_data(_mark_thresholds)
-        if marked:
-            notice = _maint_scheduled_soon_notice(scheduled, remaining_min)
-            author_id = scheduled.get("author_id")
-            await _send_maint_notice_with_admin_copy(
-                context, author_id=author_id if isinstance(author_id, int) else None, text=notice
-            )
-        scheduled = get_scheduled_maintenance() or scheduled
+        updated_schedule = await update_important_data(_mark_thresholds)
+        if not isinstance(updated_schedule, dict):
+            return
+        scheduled = updated_schedule
 
     if now >= start_at and not bool(scheduled.get("notified_start", False)):
         active = get_active_maintenance()
@@ -755,6 +863,14 @@ async def maint_schedule_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             return
 
+        notice = _maint_scheduled_start_notice(scheduled)
+        author_id = scheduled.get("author_id")
+        start_event, _users_count, _admins_count = _make_maint_notice_event(
+            author_id=author_id if isinstance(author_id, int) else None,
+            text=notice,
+            kind="maintenance_schedule_started",
+        )
+
         def _activate_scheduled(cfg):
             cur = dict(getattr(cfg, "scheduled_maintenance", {}) or {})
             if str(cur.get("id") or "") != str(scheduled.get("id") or ""):
@@ -764,14 +880,12 @@ async def maint_schedule_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
                 return None
             cfg.maintenance = _scheduled_to_active_record(cur)
             cfg.scheduled_maintenance = {}
+            _enqueue_if_present(cfg, start_event)
             return dict(cfg.maintenance)
 
         activated = await update_important_data(_activate_scheduled)
         if not activated:
             return
-        notice = _maint_scheduled_start_notice(scheduled)
-        author_id = scheduled.get("author_id")
-        await _send_maint_notice_with_admin_copy(context, author_id=author_id if isinstance(author_id, int) else None, text=notice)
         logger.info(
             "Scheduled maintenance activated id=%s start=%s end=%s",
             scheduled.get("id"),

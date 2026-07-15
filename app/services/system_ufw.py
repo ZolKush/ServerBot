@@ -1,20 +1,29 @@
 import re
-from typing import List, Tuple
 
-from ..config import SUDO_BIN, SUBPROC_SHORT_TIMEOUT, UFW_BIN
+from ..config import PRIVILEGED_HELPER_BIN, SUBPROC_SHORT_TIMEOUT, SUDO_BIN, UFW_BIN
 from .system_process import run_exec
 
 
-def _ufw_candidates() -> List[List[str]]:
-    bases: List[str] = []
+def _parse_ufw_status(out: str) -> str:
+    first = (out.strip().splitlines()[:1] or [""])[0].strip().lower()
+    # ``inactive`` contains ``active``; negative states must always be checked first.
+    if re.search(r"\b(inactive|disabled)\b", first) or any(word in first for word in ("неактив", "отключ", "выключ")):
+        return "inactive"
+    if re.search(r"\b(active|enabled)\b", first) or any(word in first for word in ("актив", "включ")):
+        return "active"
+    return "н/д"
+
+
+def _ufw_candidates() -> list[list[str]]:
+    bases: list[str] = []
     for b in [UFW_BIN, "ufw"]:
         if b and b not in bases:
             bases.append(b)
-    cmds: List[List[str]] = []
+    cmds: list[list[str]] = []
     for b in bases:
         cmds.append([b, "status"])
-        if SUDO_BIN:
-            cmds.append([SUDO_BIN, "-n", b, "status"])
+    if SUDO_BIN and PRIVILEGED_HELPER_BIN:
+        cmds.append([SUDO_BIN, "-n", PRIVILEGED_HELPER_BIN, "ufw-status"])
     return cmds
 
 
@@ -29,18 +38,13 @@ async def ufw_status_basic() -> str:
     if not out:
         return "н/д"
 
-    first = (out.strip().splitlines()[:1] or [""])[0].lower()
-    if "active" in first:
-        return "active"
-    if "inactive" in first:
-        return "inactive"
-    return "н/д"
+    return _parse_ufw_status(out)
 
 
-def _parse_ufw_rules(out: str) -> Tuple[List[str], List[str], List[str]]:
-    allow: List[str] = []
-    deny: List[str] = []
-    reject: List[str] = []
+def _parse_ufw_rules(out: str) -> tuple[list[str], list[str], list[str]]:
+    allow: list[str] = []
+    deny: list[str] = []
+    reject: list[str] = []
 
     lines = [ln.rstrip() for ln in (out or "").splitlines()]
     if not lines:
@@ -73,9 +77,9 @@ def _parse_ufw_rules(out: str) -> Tuple[List[str], List[str], List[str]]:
         elif action.startswith("REJECT"):
             reject.append(item)
 
-    def uniq(xs: List[str]) -> List[str]:
+    def uniq(xs: list[str]) -> list[str]:
         seen: set[str] = set()
-        outl: List[str] = []
+        outl: list[str] = []
         for x in xs:
             if x not in seen:
                 seen.add(x)
@@ -85,7 +89,7 @@ def _parse_ufw_rules(out: str) -> Tuple[List[str], List[str], List[str]]:
     return uniq(allow), uniq(deny), uniq(reject)
 
 
-async def ufw_summary_for_admin() -> Tuple[str, List[str], List[str], List[str]]:
+async def ufw_summary_for_admin() -> tuple[str, list[str], list[str], list[str]]:
     out = ""
     for args in _ufw_candidates():
         rc, o, _ = await run_exec(args, timeout=SUBPROC_SHORT_TIMEOUT)
@@ -96,12 +100,7 @@ async def ufw_summary_for_admin() -> Tuple[str, List[str], List[str], List[str]]
     if not out:
         return "н/д", [], [], []
 
-    status = "н/д"
-    first = (out.strip().splitlines()[:1] or [""])[0].lower()
-    if "active" in first:
-        status = "active"
-    elif "inactive" in first:
-        status = "inactive"
+    status = _parse_ufw_status(out)
 
     allow, deny, reject = _parse_ufw_rules(out)
     return status, allow, deny, reject

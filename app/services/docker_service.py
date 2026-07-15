@@ -1,15 +1,15 @@
 import json
 import logging
 import re
-from typing import Dict, List, Sequence, Set, Tuple
+from collections.abc import Sequence
 
-from ..config import DOCKER_BIN, SUBPROC_MEDIUM_TIMEOUT, SUDO_BIN
+from ..config import DOCKER_BIN, PRIVILEGED_HELPER_BIN, SUBPROC_MEDIUM_TIMEOUT, SUDO_BIN
 from .system_process import run_exec
 
 logger = logging.getLogger("maint-bot")
 
 _CONTAINER_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.\-]{0,62}$")
-_REPORTED_MISSING: Set[str] = set()
+_REPORTED_MISSING: set[str] = set()
 
 
 def is_valid_container_name(name: str) -> bool:
@@ -17,17 +17,25 @@ def is_valid_container_name(name: str) -> bool:
     return bool(nm and _CONTAINER_NAME_RE.fullmatch(nm))
 
 
-def _docker_cmds(*args: str) -> List[List[str]]:
-    bases: List[str] = []
+def _docker_cmds(*args: str) -> list[list[str]]:
+    bases: list[str] = []
     for candidate in [DOCKER_BIN, "/usr/bin/docker", "docker"]:
         if candidate and candidate not in bases:
             bases.append(candidate)
 
-    commands: List[List[str]] = []
+    commands: list[list[str]] = []
     for base in bases:
         commands.append([base, *args])
-        if SUDO_BIN:
-            commands.append([SUDO_BIN, "-n", base, *args])
+    if SUDO_BIN and PRIVILEGED_HELPER_BIN:
+        helper_args: list[str] | None = None
+        if args[:1] == ("ps",):
+            helper_args = ["docker-ps"]
+        elif len(args) == 2 and args[0] == "inspect":
+            helper_args = ["docker-inspect", args[1]]
+        elif len(args) == 4 and args[0:2] == ("logs", "--tail"):
+            helper_args = ["docker-logs", args[3], args[2]]
+        if helper_args:
+            commands.append([SUDO_BIN, "-n", PRIVILEGED_HELPER_BIN, *helper_args])
     return commands
 
 
@@ -48,7 +56,7 @@ def _parse_docker_inspect_json(name: str, out: str) -> str:
         health = ((state.get("Health") or {}).get("Status")) or "-"
         restart_count = c.get("RestartCount")
         ports = ((c.get("NetworkSettings") or {}).get("Ports")) or {}
-        port_items: List[str] = []
+        port_items: list[str] = []
         if isinstance(ports, dict):
             for k, v in ports.items():
                 if v is None:
@@ -58,7 +66,7 @@ def _parse_docker_inspect_json(name: str, out: str) -> str:
                     port_items.append(f"{k}→{b.get('HostIp', '')}:{b.get('HostPort', '')}")
                 else:
                     port_items.append(f"{k}")
-        lines: List[str] = [
+        lines: list[str] = [
             f"Container: {name}",
             f"Image: {image}",
             f"State: {status} (running={running})",
@@ -80,13 +88,13 @@ def _parse_docker_inspect_json(name: str, out: str) -> str:
         return f"inspect parse error: {e}"
 
 
-async def docker_containers(names: Sequence[str]) -> List[Tuple[str, bool, str, str]]:
+async def docker_containers(names: Sequence[str]) -> list[tuple[str, bool, str, str]]:
     rc, out, _ = 127, "", ""
     for cmd in _docker_cmds("ps", "-a", "--format", "{{.Names}}|{{.Status}}"):
         rc, out, _ = await run_exec(cmd, timeout=SUBPROC_MEDIUM_TIMEOUT)
         if rc == 0:
             break
-    info: Dict[str, str] = {}
+    info: dict[str, str] = {}
     if rc != 0:
         return [(n, False, "docker недоступен", "-") for n in names]
     for line in out.splitlines():
@@ -94,7 +102,7 @@ async def docker_containers(names: Sequence[str]) -> List[Tuple[str, bool, str, 
         if len(parts) == 2:
             info[parts[0].strip()] = parts[1].strip()
 
-    result: List[Tuple[str, bool, str, str]] = []
+    result: list[tuple[str, bool, str, str]] = []
     for n in names:
         st = info.get(n)
         if st is None:

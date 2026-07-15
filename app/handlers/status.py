@@ -1,7 +1,8 @@
 import asyncio
 import re
+import time
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple, cast
+from typing import cast
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
@@ -12,8 +13,9 @@ from ..config import (
     DNS_RESOLVERS,
     SERVER_KEY_PATTERN,
     SERVERS,
-    ServerTarget,
+    STATUS_CACHE_TTL_SEC,
     TZ,
+    ServerTarget,
     logger,
 )
 from ..services.docker_service import docker_containers
@@ -35,12 +37,36 @@ from ..storage import (
     set_daily_node_status_cache,
     set_dns_status_cache,
 )
-from .common import html_escape, is_admin, now_str, require_admin, require_auth, ui_error_text, ui_info_text
+from .common import html_escape, is_admin, now_str, require_admin, require_subscriber, ui_error_text, ui_info_text
 from .status_format import format_status_message, format_ufw_message
 from .status_models import DockerContainerView, StatusSnapshot
 
+_STATUS_CACHE: dict[tuple[str, bool], tuple[float, StatusSnapshot]] = {}
+_STATUS_LOCKS: dict[tuple[str, bool], asyncio.Lock] = {}
+_SSH_REFRESH_LOCKS: dict[str, asyncio.Lock] = {}
+_DNS_QUERY_SEMAPHORE: asyncio.Semaphore | None = None
 
-def _server_keys() -> List[str]:
+
+def _get_dns_query_semaphore() -> asyncio.Semaphore:
+    global _DNS_QUERY_SEMAPHORE
+    if _DNS_QUERY_SEMAPHORE is None:
+        _DNS_QUERY_SEMAPHORE = asyncio.Semaphore(16)
+    return _DNS_QUERY_SEMAPHORE
+
+
+def _safe_nonnegative_int(value: object, default: int = 0) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return max(0, default)
+
+
+def _invalidate_status_cache(server_key: str) -> None:
+    for key in [key for key in _STATUS_CACHE if key[0] == server_key]:
+        _STATUS_CACHE.pop(key, None)
+
+
+def _server_keys() -> list[str]:
     return list(SERVERS.keys())
 
 
@@ -49,17 +75,17 @@ def _first_server_key() -> str:
     return keys[0] if keys else "local"
 
 
-def _default_server_target() -> Optional[ServerTarget]:
+def _default_server_target() -> ServerTarget | None:
     return SERVERS.get(_first_server_key())
 
 
-def get_server_target(server_key: Optional[str]) -> Optional[ServerTarget]:
+def get_server_target(server_key: str | None) -> ServerTarget | None:
     key = (server_key or "").strip().lower()
     return SERVERS.get(key) if key else None
 
 
 def _status_pick_kb() -> InlineKeyboardMarkup:
-    rows: List[List[InlineKeyboardButton]] = []
+    rows: list[list[InlineKeyboardButton]] = []
     for key in _server_keys():
         srv = SERVERS[key]
         rows.append([InlineKeyboardButton(f"{_server_flag(srv)} {srv.label}", callback_data=f"status:show:{srv.key}")])
@@ -68,11 +94,7 @@ def _status_pick_kb() -> InlineKeyboardMarkup:
 
 
 def _status_pick_text() -> str:
-    return (
-        "<b>Выберите сервер</b>\n"
-        "Какой статус показать?\n\n"
-        "ℹ️ Нажмите кнопку сервера один раз и подождите загрузку."
-    )
+    return "<b>Выберите сервер</b>\nКакой статус показать?\n\nℹ️ Нажмите кнопку сервера один раз и подождите загрузку."
 
 
 def _server_flag(server: ServerTarget) -> str:
@@ -86,15 +108,19 @@ def _status_actions_kb(
     show_ssh_diag: bool = False,
     show_ssh_refresh: bool = False,
 ) -> InlineKeyboardMarkup:
-    rows: List[List[InlineKeyboardButton]] = []
+    rows: list[list[InlineKeyboardButton]] = []
     rows.append([InlineKeyboardButton("🔄 Обновить", callback_data=f"status:show:{server_key}")])
     rows.append([InlineKeyboardButton("🌐 Обновить DNS статус", callback_data=f"status:dnsrefresh:{server_key}")])
     if admin_mode:
         rows.append([InlineKeyboardButton("🛡️ UFW", callback_data=f"status:ufw:{server_key}")])
     if admin_mode and show_ssh_refresh:
-        rows.append([InlineKeyboardButton("🔧 Обновить disk/UFW по SSH", callback_data=f"status:sshrefresh:{server_key}")])
+        rows.append(
+            [InlineKeyboardButton("🔧 Обновить disk/UFW по SSH", callback_data=f"status:sshrefresh:{server_key}")]
+        )
     if admin_mode and show_ssh_diag:
-        rows.append([InlineKeyboardButton("🔧 Проверить через SSH (только вам)", callback_data=f"status:sshdiag:{server_key}")])
+        rows.append(
+            [InlineKeyboardButton("🔧 Проверить через SSH (только вам)", callback_data=f"status:sshdiag:{server_key}")]
+        )
     if admin_mode:
         rows.append([InlineKeyboardButton("🐳 Docker: inspect/logs", callback_data=f"docker:list:{server_key}")])
         rows.append([InlineKeyboardButton("🛡️ Fail2ban: logs", callback_data=f"f2b:menu:{server_key}")])
@@ -115,17 +141,17 @@ def _confirm_kb(server_key: str, action: str) -> InlineKeyboardMarkup:
     )
 
 
-def _resolve_server_key_from_callback(data: str, prefix: str) -> Optional[str]:
+def _resolve_server_key_from_callback(data: str, prefix: str) -> str | None:
     m = re.fullmatch(prefix + rf":({SERVER_KEY_PATTERN})", data or "")
     return m.group(1) if m else None
 
 
-def _parse_status_ufw_callback(data: str) -> Optional[str]:
+def _parse_status_ufw_callback(data: str) -> str | None:
     m = re.fullmatch(rf"status:ufw:({SERVER_KEY_PATTERN})", data or "")
     return m.group(1) if m else None
 
 
-def _parse_status_dnsrefresh_callback(data: str) -> Optional[str]:
+def _parse_status_dnsrefresh_callback(data: str) -> str | None:
     m = re.fullmatch(rf"status:dnsrefresh:({SERVER_KEY_PATTERN})", data or "")
     return m.group(1) if m else None
 
@@ -138,7 +164,7 @@ def _exc_brief(value: object) -> str:
     return f"{name}: {text}" if text else name
 
 
-@require_auth
+@require_subscriber
 async def cmd_health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     msg = update.effective_message
@@ -168,7 +194,7 @@ async def cmd_health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await msg.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
 
 
-@require_auth
+@require_subscriber
 async def status_pick_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     if not q:
@@ -177,7 +203,7 @@ async def status_pick_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await q.edit_message_text(_status_pick_text(), parse_mode=ParseMode.HTML, reply_markup=_status_pick_kb())
 
 
-@require_auth
+@require_subscriber
 async def status_show_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     if not q:
@@ -222,7 +248,7 @@ async def status_ufw_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     )
 
 
-@require_auth
+@require_subscriber
 async def status_dns_refresh_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     if not q:
@@ -235,6 +261,7 @@ async def status_dns_refresh_cb(update: Update, context: ContextTypes.DEFAULT_TY
         return
     payload = await _build_dns_status_payload_live(server)
     await set_dns_status_cache(server.key, payload)
+    _invalidate_status_cache(server.key)
     logger.info(
         "DNS status refreshed manually for server=%s ok=%s bad=%s unknown=%s total=%s",
         server.key,
@@ -272,7 +299,7 @@ async def _build_status_payload_local(admin_mode: bool, server: ServerTarget):
     if isinstance(ufw_data, Exception):
         ufw_data = ("н/д", [], [], []) if admin_mode else "н/д"
     if admin_mode:
-        ufw_s, allow, deny, reject = cast(Tuple[str, List[str], List[str], List[str]], ufw_data)
+        ufw_s, allow, deny, reject = cast(tuple[str, list[str], list[str], list[str]], ufw_data)
     else:
         ufw_s = str(ufw_data)
         allow, deny, reject = [], [], []
@@ -281,7 +308,20 @@ async def _build_status_payload_local(admin_mode: bool, server: ServerTarget):
 
 async def _build_status_payload_remote(admin_mode: bool, server: ServerTarget):
     try:
-        return await remote_status_bundle(server.ssh_target, server.monitor_containers, admin_mode=admin_mode)
+        result = await remote_status_bundle(server.ssh_target, server.monitor_containers, admin_mode=admin_mode)
+        if result.ok:
+            return result.values()
+        error = result.error or "SSH недоступен"
+        return (
+            "н/д",
+            "н/д",
+            "н/д",
+            [(n, False, f"ошибка: {error}", "-") for n in server.monitor_containers],
+            "н/д",
+            [],
+            [],
+            [],
+        )
     except Exception as e:
         return (
             "н/д",
@@ -295,7 +335,7 @@ async def _build_status_payload_remote(admin_mode: bool, server: ServerTarget):
         )
 
 
-async def _build_dns_status_payload_live(server: ServerTarget) -> Dict[str, object]:
+async def _build_dns_status_payload_live(server: ServerTarget) -> dict[str, object]:
     domains = list(server.check_a_domains)
     if not domains:
         return {
@@ -308,49 +348,46 @@ async def _build_dns_status_payload_live(server: ServerTarget) -> Dict[str, obje
             "details": [],
         }
     expected_ip = (server.expected_a_ip or "").strip()
-    ok = bad = unknown = 0
-    details: List[str] = []
     custom_resolvers_supported = dns_supports_custom_resolver()
-    if custom_resolvers_supported and DNS_RESOLVERS:
-        for dom in domains:
+
+    async def _resolve_limited(domain: str, resolver: str | None) -> list[str]:
+        async with _get_dns_query_semaphore():
+            return await resolve_a_record(domain, resolver=resolver)
+
+    async def _check_domain(dom: str) -> tuple[str, str | None]:
+        if custom_resolvers_supported and DNS_RESOLVERS:
             results = await asyncio.gather(
-                *[resolve_a_record(dom, resolver=r) for r in DNS_RESOLVERS],
+                *[_resolve_limited(dom, resolver) for resolver in DNS_RESOLVERS],
                 return_exceptions=True,
             )
             ip_lists = [r for r in results if isinstance(r, list)]
-            merged: List[str] = []
+            merged: list[str] = []
             for ips in ip_lists:
                 for ip in ips:
                     if ip not in merged:
                         merged.append(ip)
-            if not merged:
-                unknown += 1
-                details.append(f"• <code>{html_escape(dom)}</code>: ⚠️ нет ответа")
-            elif expected_ip and expected_ip not in merged:
-                bad += 1
-                details.append(
-                    f"• <code>{html_escape(dom)}</code>: 🔴 ожидался <code>{html_escape(expected_ip)}</code>, "
-                    f"получено <code>{html_escape(', '.join(merged))}</code>"
-                )
-            else:
-                ok += 1
-    else:
-        for dom in domains:
+        else:
             try:
-                ips = await resolve_a_record(dom, resolver=None)
+                merged = await _resolve_limited(dom, None)
             except Exception:
-                ips = []
-            if not ips:
-                unknown += 1
-                details.append(f"• <code>{html_escape(dom)}</code>: ⚠️ нет ответа")
-            elif expected_ip and expected_ip not in ips:
-                bad += 1
-                details.append(
-                    f"• <code>{html_escape(dom)}</code>: 🔴 ожидался <code>{html_escape(expected_ip)}</code>, "
-                    f"получено <code>{html_escape(', '.join(ips))}</code>"
-                )
-            else:
-                ok += 1
+                merged = []
+        if not merged:
+            return "unknown", f"• <code>{html_escape(dom)}</code>: ⚠️ нет ответа"
+        if expected_ip and expected_ip not in merged:
+            shown = merged[:10]
+            suffix = f", … ещё {len(merged) - len(shown)}" if len(merged) > len(shown) else ""
+            return (
+                "bad",
+                f"• <code>{html_escape(dom)}</code>: 🔴 ожидался <code>{html_escape(expected_ip)}</code>, "
+                f"получено <code>{html_escape(', '.join(shown))}</code>{html_escape(suffix)}",
+            )
+        return "ok", None
+
+    checks = await asyncio.gather(*(_check_domain(domain) for domain in domains))
+    ok = sum(1 for status, _detail in checks if status == "ok")
+    bad = sum(1 for status, _detail in checks if status == "bad")
+    unknown = sum(1 for status, _detail in checks if status == "unknown")
+    details = [detail for _status, detail in checks if detail]
     return {
         "server_key": server.key,
         "updated_at": datetime.now(TZ).isoformat(),
@@ -362,29 +399,31 @@ async def _build_dns_status_payload_live(server: ServerTarget) -> Dict[str, obje
     }
 
 
-def _dns_payload_from_cache_or_empty(server: ServerTarget) -> Dict[str, object]:
+def _dns_payload_from_cache_or_empty(server: ServerTarget) -> dict[str, object]:
     raw = get_dns_status_cache(server.key) or {}
     details = raw.get("details", [])
     if not isinstance(details, list):
         details = []
-    total = int(raw.get("total", 0) or 0)
-    ok = int(raw.get("ok", 0) or 0)
-    bad = int(raw.get("bad", 0) or 0)
-    unknown = int(raw.get("unknown", 0) or 0)
+    total = _safe_nonnegative_int(raw.get("total"))
+    ok = _safe_nonnegative_int(raw.get("ok"))
+    bad = _safe_nonnegative_int(raw.get("bad"))
+    unknown = _safe_nonnegative_int(raw.get("unknown"))
     if total <= 0 and server.check_a_domains:
         return {
             "total": len(server.check_a_domains),
             "ok": 0,
             "bad": 0,
             "unknown": 0,
-            "details": [f"• {html_escape(ui_info_text('DNS статус ещё не обновлялся. Нажмите «Обновить DNS статус».'))}"],
+            "details": [
+                f"• {html_escape(ui_info_text('DNS статус ещё не обновлялся. Нажмите «Обновить DNS статус».'))}"
+            ],
         }
     return {
         "total": total,
         "ok": ok,
         "bad": bad,
         "unknown": unknown,
-        "details": [str(x) for x in details],
+        "details": [str(x)[:500] for x in details],
     }
 
 
@@ -407,7 +446,7 @@ def _format_iso_short(value: object) -> str:
     return dt.strftime("%d.%m %H:%M")
 
 
-def _daily_cache_for(server: ServerTarget) -> Tuple[str, str, str, List[str], List[str], List[str], str, str]:
+def _daily_cache_for(server: ServerTarget) -> tuple[str, str, str, list[str], list[str], list[str], str, str]:
     """
     Возвращает (disk_raw, ufw_state, ufw_updated_text, allow, deny, reject, disk_updated_text, raw_updated_iso).
     Если кэша нет — возвращаем 'н/д' и пустые списки.
@@ -415,21 +454,24 @@ def _daily_cache_for(server: ServerTarget) -> Tuple[str, str, str, List[str], Li
     raw = get_daily_node_status_cache(server.key) or {}
     disk = str(raw.get("disk_raw") or "").strip() or "н/д"
     ufw_state = str(raw.get("ufw_state") or "").strip() or "н/д"
-    allow = [str(x) for x in (raw.get("ufw_allow") or []) if str(x).strip()]
-    deny = [str(x) for x in (raw.get("ufw_deny") or []) if str(x).strip()]
-    reject = [str(x) for x in (raw.get("ufw_reject") or []) if str(x).strip()]
+    allow_raw = raw.get("ufw_allow")
+    deny_raw = raw.get("ufw_deny")
+    reject_raw = raw.get("ufw_reject")
+    allow = [str(x) for x in allow_raw if str(x).strip()] if isinstance(allow_raw, list) else []
+    deny = [str(x) for x in deny_raw if str(x).strip()] if isinstance(deny_raw, list) else []
+    reject = [str(x) for x in reject_raw if str(x).strip()] if isinstance(reject_raw, list) else []
     updated_text = _format_iso_short(raw.get("updated_at"))
     return disk, ufw_state, updated_text, allow, deny, reject, updated_text, str(raw.get("updated_at") or "")
 
 
-async def _ssh_collect_disk_ufw(server: ServerTarget, *, admin_mode: bool) -> Dict[str, object]:
+async def _ssh_collect_disk_ufw_uncached(server: ServerTarget, *, admin_mode: bool) -> dict[str, object]:
     """
     Собирает disk/UFW с конкретной ноды по SSH. Используется и в дневном джобе,
     и в админской ручной кнопке.
     """
     if server.mode == "ssh":
         try:
-            up, mem, disk, cont, ufw_s, allow, deny, reject = await remote_status_bundle(
+            result = await remote_status_bundle(
                 server.ssh_target,
                 server.monitor_containers,
                 admin_mode=True,
@@ -439,6 +481,19 @@ async def _ssh_collect_disk_ufw(server: ServerTarget, *, admin_mode: bool) -> Di
             return {
                 "ok": False,
                 "error": _exc_brief(e),
+                "updated_at": datetime.now(TZ).isoformat(),
+            }
+        if not result.ok:
+            return {
+                "ok": False,
+                "error": result.error or "SSH недоступен",
+                "updated_at": datetime.now(TZ).isoformat(),
+            }
+        up, mem, disk, cont, ufw_s, allow, deny, reject = result.values()
+        if str(disk).strip().lower() in {"", "н/д"}:
+            return {
+                "ok": False,
+                "error": "SSH ответ получен, но чтение диска завершилось ошибкой",
                 "updated_at": datetime.now(TZ).isoformat(),
             }
         return {
@@ -464,10 +519,16 @@ async def _ssh_collect_disk_ufw(server: ServerTarget, *, admin_mode: bool) -> Di
             "updated_at": datetime.now(TZ).isoformat(),
         }
     if isinstance(disk, Exception):
-        disk = "н/д"
+        return {"ok": False, "error": _exc_brief(disk), "updated_at": datetime.now(TZ).isoformat()}
+    if str(disk).strip().lower() in {"", "н/д"}:
+        return {
+            "ok": False,
+            "error": "чтение локального диска завершилось ошибкой",
+            "updated_at": datetime.now(TZ).isoformat(),
+        }
     if isinstance(ufw_data, Exception):
-        ufw_data = ("н/д", [], [], [])
-    ufw_s, allow, deny, reject = cast(Tuple[str, List[str], List[str], List[str]], ufw_data)
+        return {"ok": False, "error": _exc_brief(ufw_data), "updated_at": datetime.now(TZ).isoformat()}
+    ufw_s, allow, deny, reject = cast(tuple[str, list[str], list[str], list[str]], ufw_data)
     return {
         "ok": True,
         "disk_raw": str(disk),
@@ -479,20 +540,26 @@ async def _ssh_collect_disk_ufw(server: ServerTarget, *, admin_mode: bool) -> Di
     }
 
 
+async def _ssh_collect_disk_ufw(server: ServerTarget, *, admin_mode: bool) -> dict[str, object]:
+    lock = _SSH_REFRESH_LOCKS.setdefault(server.key, asyncio.Lock())
+    async with lock:
+        return await _ssh_collect_disk_ufw_uncached(server, admin_mode=admin_mode)
+
+
 async def _build_status_snapshot_mixed(
     update: Update,
     server: ServerTarget,
 ) -> StatusSnapshot:
     admin_mode = is_admin(update)
     snap = await get_metrics_snapshot()
-    node: Optional[NodeMetrics] = snap.get(server.remnawave_uuid)
+    node: NodeMetrics | None = snap.get(server.remnawave_uuid)
 
     dns_payload = _dns_payload_from_cache_or_empty(server)
-    dns_ok = int(dns_payload.get("ok", 0) or 0)
-    dns_bad = int(dns_payload.get("bad", 0) or 0)
-    dns_unknown = int(dns_payload.get("unknown", 0) or 0)
+    dns_ok = _safe_nonnegative_int(dns_payload.get("ok"))
+    dns_bad = _safe_nonnegative_int(dns_payload.get("bad"))
+    dns_unknown = _safe_nonnegative_int(dns_payload.get("unknown"))
     dns_error_details = [str(x) for x in (dns_payload.get("details", []) or [])]
-    dns_total = int(dns_payload.get("total", len(list(server.check_a_domains))) or 0)
+    dns_total = _safe_nonnegative_int(dns_payload.get("total"), len(server.check_a_domains))
 
     daily_disk, daily_ufw, ufw_upd, allow, deny, reject, disk_upd, raw_upd_iso = _daily_cache_for(server)
 
@@ -502,6 +569,8 @@ async def _build_status_snapshot_mixed(
         last_seen_text = snap.fetched_at.strftime("%d.%m %H:%M") if snap.fetched_at else ""
 
     if metrics_error or node is None:
+        if not metrics_error:
+            metrics_error = "Нода не найдена в ответе панели метрик"
         return StatusSnapshot(
             title="🧭 Статус сервера",
             server_label=server.label,
@@ -518,7 +587,7 @@ async def _build_status_snapshot_mixed(
             dns_error_details=dns_error_details,
             admin_mode=admin_mode,
             source_mode="mixed",
-            node_online=None if metrics_error else False,
+            node_online=None,
             online_users=None,
             last_seen_text=last_seen_text or _format_iso_short(raw_upd_iso),
             metrics_error=metrics_error,
@@ -580,7 +649,7 @@ async def _build_status_snapshot_mixed(
     )
 
 
-async def _build_status_snapshot(update: Update, server: ServerTarget) -> StatusSnapshot:
+async def _build_status_snapshot_uncached(update: Update, server: ServerTarget) -> StatusSnapshot:
     if _server_uses_metrics(server):
         return await _build_status_snapshot_mixed(update, server)
 
@@ -591,14 +660,13 @@ async def _build_status_snapshot(update: Update, server: ServerTarget) -> Status
         status_task = _build_status_payload_local(admin_mode, server)
     up, mem, disk, cont, ufw_s, allow, deny, reject = await status_task
     dns_payload = _dns_payload_from_cache_or_empty(server)
-    dns_ok = int(dns_payload.get("ok", 0) or 0)
-    dns_bad = int(dns_payload.get("bad", 0) or 0)
-    dns_unknown = int(dns_payload.get("unknown", 0) or 0)
+    dns_ok = _safe_nonnegative_int(dns_payload.get("ok"))
+    dns_bad = _safe_nonnegative_int(dns_payload.get("bad"))
+    dns_unknown = _safe_nonnegative_int(dns_payload.get("unknown"))
     dns_error_details = [str(x) for x in (dns_payload.get("details", []) or [])]
 
     containers = [
-        DockerContainerView(name=name, is_up=upb, status_text=st, restarts=rst)
-        for name, upb, st, rst in cont
+        DockerContainerView(name=name, is_up=upb, status_text=st, restarts=rst) for name, upb, st, rst in cont
     ]
     return StatusSnapshot(
         title="🧭 Статус сервера",
@@ -610,7 +678,7 @@ async def _build_status_snapshot(update: Update, server: ServerTarget) -> Status
         disk_raw=str(disk),
         ufw_state=str(ufw_s),
         dns_ok_domains=dns_ok,
-        dns_total_domains=int(dns_payload.get("total", len(list(server.check_a_domains))) or 0),
+        dns_total_domains=_safe_nonnegative_int(dns_payload.get("total"), len(server.check_a_domains)),
         dns_bad_domains=dns_bad,
         dns_unknown_domains=dns_unknown,
         dns_error_details=dns_error_details,
@@ -623,7 +691,26 @@ async def _build_status_snapshot(update: Update, server: ServerTarget) -> Status
     )
 
 
-async def _build_status_snapshot_and_server(update: Update, server_key: Optional[str]) -> Tuple[Optional[StatusSnapshot], Optional[ServerTarget]]:
+async def _build_status_snapshot(update: Update, server: ServerTarget) -> StatusSnapshot:
+    cache_key = (server.key, is_admin(update))
+    cached = _STATUS_CACHE.get(cache_key)
+    now = time.monotonic()
+    if cached and now - cached[0] < STATUS_CACHE_TTL_SEC:
+        return cached[1]
+    lock = _STATUS_LOCKS.setdefault(cache_key, asyncio.Lock())
+    async with lock:
+        cached = _STATUS_CACHE.get(cache_key)
+        now = time.monotonic()
+        if cached and now - cached[0] < STATUS_CACHE_TTL_SEC:
+            return cached[1]
+        snapshot = await _build_status_snapshot_uncached(update, server)
+        _STATUS_CACHE[cache_key] = (time.monotonic(), snapshot)
+        return snapshot
+
+
+async def _build_status_snapshot_and_server(
+    update: Update, server_key: str | None
+) -> tuple[StatusSnapshot | None, ServerTarget | None]:
     server = get_server_target(server_key) if server_key else _default_server_target()
     if not server:
         return None, None
@@ -631,27 +718,32 @@ async def _build_status_snapshot_and_server(update: Update, server_key: Optional
 
 
 async def dns_daily_refresh(context: ContextTypes.DEFAULT_TYPE) -> None:
-    for server in SERVERS.values():
-        try:
-            payload = await _build_dns_status_payload_live(server)
-            await set_dns_status_cache(server.key, payload)
-            logger.info(
-                "DNS status refreshed (scheduled) for server=%s ok=%s bad=%s unknown=%s total=%s",
-                server.key,
-                payload.get("ok"),
-                payload.get("bad"),
-                payload.get("unknown"),
-                payload.get("total"),
-            )
-        except Exception:
-            # Do not break the loop if one server fails.
-            logger.exception("DNS status refresh failed for server=%s", server.key)
+    semaphore = asyncio.Semaphore(4)
+
+    async def _refresh(server: ServerTarget) -> None:
+        async with semaphore:
+            try:
+                payload = await _build_dns_status_payload_live(server)
+                await set_dns_status_cache(server.key, payload)
+                _invalidate_status_cache(server.key)
+                logger.info(
+                    "DNS status refreshed (scheduled) for server=%s ok=%s bad=%s unknown=%s total=%s",
+                    server.key,
+                    payload.get("ok"),
+                    payload.get("bad"),
+                    payload.get("unknown"),
+                    payload.get("total"),
+                )
+            except Exception:
+                logger.exception("DNS status refresh failed for server=%s", server.key)
+
+    await asyncio.gather(*(_refresh(server) for server in SERVERS.values()))
 
 
 async def build_status_message(
     update: Update,
-    server_key: Optional[str] = None,
-) -> Tuple[str, Optional[InlineKeyboardMarkup]]:
+    server_key: str | None = None,
+) -> tuple[str, InlineKeyboardMarkup | None]:
     server = get_server_target(server_key) if server_key else _default_server_target()
     if not server:
         if not SERVERS:
@@ -664,9 +756,7 @@ async def build_status_message(
         )
 
     snapshot = await _build_status_snapshot(update, server)
-    show_ssh_diag = snapshot.source_mode == "mixed" and (
-        bool(snapshot.metrics_error) or snapshot.node_online is False
-    )
+    show_ssh_diag = snapshot.source_mode == "mixed" and (bool(snapshot.metrics_error) or snapshot.node_online is False)
     show_ssh_refresh = snapshot.source_mode == "mixed" and snapshot.node_online is True
     markup = _status_actions_kb(
         admin_mode=snapshot.admin_mode,
@@ -677,7 +767,7 @@ async def build_status_message(
     return format_status_message(snapshot), markup
 
 
-@require_auth
+@require_subscriber
 async def dns_back_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     if not q:
@@ -693,10 +783,13 @@ async def dns_back_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 async def daily_node_status_refresh(context: ContextTypes.DEFAULT_TYPE) -> None:
     if BOT_MODE != "mixed":
         return
-    for server in SERVERS.values():
+
+    async def _refresh(server: ServerTarget) -> None:
         try:
             payload = await _ssh_collect_disk_ufw(server, admin_mode=True)
-            await set_daily_node_status_cache(server.key, payload)
+            if payload.get("ok"):
+                await set_daily_node_status_cache(server.key, payload)
+                _invalidate_status_cache(server.key)
             logger.info(
                 "Daily node status refreshed for server=%s ok=%s",
                 server.key,
@@ -704,6 +797,8 @@ async def daily_node_status_refresh(context: ContextTypes.DEFAULT_TYPE) -> None:
             )
         except Exception:
             logger.exception("Daily node status refresh failed for server=%s", server.key)
+
+    await asyncio.gather(*(_refresh(server) for server in SERVERS.values()))
 
 
 @require_admin
@@ -749,7 +844,9 @@ async def status_ssh_refresh_confirm_cb(update: Update, context: ContextTypes.DE
         await q.edit_message_text(ui_error_text("сервер не найден."), reply_markup=_status_pick_kb())
         return
     payload = await _ssh_collect_disk_ufw(server, admin_mode=True)
-    await set_daily_node_status_cache(server.key, payload)
+    if payload.get("ok"):
+        await set_daily_node_status_cache(server.key, payload)
+        _invalidate_status_cache(server.key)
     text, markup = await build_status_message(update, server_key=server.key)
     note = (
         ui_info_text("Disk/UFW обновлены через SSH.")
@@ -786,8 +883,8 @@ async def status_ssh_diag_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=_confirm_kb(server.key, "sshdiag"))
 
 
-def _format_ssh_diag_report(server: ServerTarget, payload: Dict[str, object]) -> str:
-    lines: List[str] = []
+def _format_ssh_diag_report(server: ServerTarget, payload: dict[str, object]) -> str:
+    lines: list[str] = []
     lines.append(f"<b>SSH-диагностика — {html_escape(server.label)}</b>")
     lines.append(f"⏰ Время: <code>{html_escape(now_str())}</code>")
     if not payload.get("ok"):
@@ -804,7 +901,7 @@ def _format_ssh_diag_report(server: ServerTarget, payload: Dict[str, object]) ->
     lines.append(f"🧠 RAM: <b>{html_escape(mem)}</b>")
     lines.append(f"💾 Disk: <b>{html_escape(disk)}</b>")
     lines.append(f"🛡️ UFW: <b>{html_escape(ufw_s)}</b>")
-    cont_items: List[Tuple[str, bool, str]] = []
+    cont_items: list[tuple[str, bool, str]] = []
     if isinstance(cont_raw, list):
         for item in cont_raw:
             if isinstance(item, (list, tuple)) and len(item) >= 3:
@@ -822,16 +919,19 @@ def _format_ssh_diag_report(server: ServerTarget, payload: Dict[str, object]) ->
     return "\n".join(lines)
 
 
-async def _ssh_full_diag(server: ServerTarget) -> Dict[str, object]:
+async def _ssh_full_diag(server: ServerTarget) -> dict[str, object]:
     if server.mode == "ssh":
         try:
-            up, mem, disk, cont, ufw_s, allow, deny, reject = await remote_status_bundle(
+            result = await remote_status_bundle(
                 server.ssh_target,
                 server.monitor_containers,
                 admin_mode=True,
             )
         except Exception as e:
             return {"ok": False, "error": _exc_brief(e)}
+        if not result.ok:
+            return {"ok": False, "error": result.error or "SSH недоступен"}
+        up, mem, disk, cont, ufw_s, allow, deny, reject = result.values()
         return {
             "ok": True,
             "uptime": str(up),

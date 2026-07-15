@@ -1,0 +1,140 @@
+#!/usr/bin/python3
+"""Minimal privileged read-only helper for MaintBot.
+
+Install this file root-owned and non-writable by the service account. The sudoers
+rule may safely allow this one executable because every action and argument is
+validated here and no shell is involved.
+"""
+
+from __future__ import annotations
+
+import base64
+import os
+import re
+import shutil
+import sys
+from pathlib import Path
+from typing import NoReturn
+
+CONTAINER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$")
+PATHS_FILE = Path("/etc/maintbot/fail2ban-paths")
+DEFAULT_LOG_PATHS = {Path("/var/log/fail2ban.log")}
+MAX_TAIL_LINES = 50_000
+MAX_READ_BYTES = 3_000_000
+
+
+def fail(message: str, code: int = 64) -> NoReturn:
+    print(message, file=sys.stderr)
+    raise SystemExit(code)
+
+
+def allowed_log_paths() -> set[Path]:
+    configured: set[Path] = set()
+    if PATHS_FILE.is_file():
+        for raw in PATHS_FILE.read_text(encoding="utf-8").splitlines():
+            value = raw.strip()
+            if value and not value.startswith("#") and Path(value).is_absolute():
+                configured.add(Path(value).resolve(strict=False))
+    return configured or {path.resolve(strict=False) for path in DEFAULT_LOG_PATHS}
+
+
+def checked_log_path(raw: str) -> Path:
+    path = Path(raw)
+    if not path.is_absolute():
+        fail("log path must be absolute")
+    resolved = path.resolve(strict=False)
+    allowed = allowed_log_paths()
+    rotated = any(
+        resolved.parent == base.parent and re.fullmatch(re.escape(base.name) + r"\.\d+", resolved.name)
+        for base in allowed
+    )
+    if resolved not in allowed and not rotated:
+        fail("log path is not allow-listed", 77)
+    return resolved
+
+
+def checked_int(raw: str, minimum: int, maximum: int, label: str) -> int:
+    try:
+        value = int(raw)
+    except ValueError:
+        fail(f"{label} must be an integer")
+    if not minimum <= value <= maximum:
+        fail(f"{label} is out of range")
+    return value
+
+
+def executable(*paths: str) -> str:
+    for candidate in paths:
+        if Path(candidate).is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    found = shutil.which(Path(paths[-1]).name)
+    if found:
+        return found
+    fail(f"executable not found: {paths[-1]}", 69)
+
+
+def exec_command(argv: list[str]) -> NoReturn:
+    os.environ.clear()
+    os.environ.update({"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C", "LC_ALL": "C"})
+    os.umask(0o077)
+    os.execv(argv[0], argv)
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) < 2:
+        fail("missing action")
+    action, args = argv[1], argv[2:]
+
+    if action == "ufw-status" and not args:
+        binary = executable("/usr/sbin/ufw", "/usr/bin/ufw")
+        exec_command([binary, "status"])
+
+    if action == "docker-ps" and not args:
+        binary = executable("/usr/bin/docker", "/usr/local/bin/docker")
+        exec_command([binary, "ps", "-a", "--format", "{{.Names}}|{{.Status}}"])
+
+    if action == "docker-inspect" and len(args) == 1 and CONTAINER_RE.fullmatch(args[0]):
+        binary = executable("/usr/bin/docker", "/usr/local/bin/docker")
+        exec_command([binary, "inspect", args[0]])
+
+    if action == "docker-logs" and len(args) == 2 and CONTAINER_RE.fullmatch(args[0]):
+        lines = checked_int(args[1], 1, 1000, "tail lines")
+        binary = executable("/usr/bin/docker", "/usr/local/bin/docker")
+        exec_command([binary, "logs", "--tail", str(lines), args[0]])
+
+    if action == "file-tail" and len(args) in {2, 3}:
+        path = checked_log_path(args[0])
+        lines = checked_int(args[1], 1, MAX_TAIL_LINES, "tail lines")
+        limit = checked_int(args[2], 1, MAX_READ_BYTES, "tail byte limit") if len(args) == 3 else MAX_READ_BYTES
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - limit), os.SEEK_SET)
+            data = handle.read(limit)
+        chunks = data.splitlines(keepends=True)
+        sys.stdout.buffer.write(b"".join(chunks[-lines:]))
+        return 0
+
+    if action == "file-stat" and len(args) == 1:
+        path = checked_log_path(args[0])
+        stat = path.stat()
+        print(f"{stat.st_size}|{int(stat.st_mtime)}|{stat.st_dev}|{stat.st_ino}")
+        return 0
+
+    if action == "file-read" and len(args) == 3:
+        path = checked_log_path(args[0])
+        offset = checked_int(args[1], 0, 2**63 - 1, "offset")
+        limit = checked_int(args[2], 1, MAX_READ_BYTES, "read limit")
+        with path.open("rb") as handle:
+            handle.seek(offset)
+            data = handle.read(limit)
+        # Text-safe transport lets the unprivileged caller verify that it got
+        # the complete byte range instead of silently advancing a truncated cursor.
+        sys.stdout.buffer.write(base64.b64encode(data))
+        return 0
+
+    fail("unsupported action or invalid arguments")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))
