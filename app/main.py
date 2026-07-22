@@ -17,6 +17,7 @@ from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
     ApplicationBuilder,
+    ApplicationHandlerStop,
     CallbackQueryHandler,
     CommandHandler,
     ConversationHandler,
@@ -47,6 +48,20 @@ from app.config import (
     SERVER_KEY_PATTERN,
     TZ,
     logger,
+)
+from app.handlers.administration import (
+    ADMINISTRATION_CONFIRM,
+    ADMINISTRATION_INPUT,
+    administration_cancel,
+    administration_confirm_cb,
+    administration_help_reset_cb,
+    administration_input_start_cb,
+    administration_service_settings_cb,
+    administration_show_cb,
+    administration_signature_mode_cb,
+    administration_staff_title_apply_cb,
+    administration_staff_title_menu_cb,
+    administration_text_input,
 )
 from app.handlers.auth import (
     access_request_cb,
@@ -111,28 +126,30 @@ from app.handlers.product import (
     PRODUCT_CONFIRM,
     PRODUCT_INPUT,
     abandon_product_flow,
-    owner_panel_cb,
     payment_reported_cb,
     product_cancel,
     product_confirm_cb,
     product_input_start_cb,
     product_manage_user_cb,
     product_manual_reminder_cb,
-    product_profile_cb,
     product_request_action_cb,
     product_request_view_cb,
     product_requests_cb,
     product_text_input,
     product_tier_cb,
-    product_title_apply_cb,
-    product_title_menu_cb,
     purchase_create_cb,
     purchase_show_cb,
     renewal_reported_cb,
-    staff_mode_cb,
-    staff_profile_cb,
     subscription_lifecycle_job,
     trial_request_start_cb,
+)
+from app.handlers.profile import (
+    PROFILE_EMAIL_INPUT,
+    personal_profile_cb,
+    profile_cancel,
+    profile_email_clear_cb,
+    profile_email_start_cb,
+    profile_email_text,
 )
 from app.handlers.status import (
     cmd_health,
@@ -146,6 +163,7 @@ from app.handlers.status import (
     status_ssh_diag_confirm_cb,
     status_ssh_refresh_cb,
     status_ssh_refresh_confirm_cb,
+    status_tls_refresh_cb,
     status_ufw_cb,
 )
 from app.handlers.subscription import connection_show_cb, subscription_show
@@ -197,7 +215,9 @@ from app.handlers.users import (
 from app.services.message_cleanup import MessageCleanupStats, MessageTracker, TrackingExtBot
 from app.services.outbox import process_outbox_job
 from app.services.remnawave_metrics import close_metrics_client
+from app.services.tls_certificates import tls_certificate_check_job
 from app.single_instance import ALREADY_RUNNING_EXIT_CODE, InstanceAlreadyRunning, SingleInstanceLock
+from app.storage import get_user_meta_copy
 
 PRIVATE_TEXT = filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND
 PRIVATE_TICKET_INPUT = (
@@ -222,7 +242,9 @@ _NAVIGATION_COMMANDS = frozenset(
         "cancel",
     }
 )
-_ROOT_NAVIGATION_CALLBACKS = frozenset({"product:requests", "staff:profile"})
+_ROOT_NAVIGATION_CALLBACKS = frozenset(
+    {"product:requests", "administration:show", "staff:profile", "profile:show", "product:profile"}
+)
 
 
 class NavigableConversationHandler(ConversationHandler):
@@ -402,6 +424,17 @@ async def fallback_text(update, context) -> None:
     await msg.reply_text("Не понимаю команду. Используйте /menu для меню или /help для подсказок.")
 
 
+async def blocked_user_guard(update: Update, context) -> None:
+    """Completely ignore every update produced by a blocked account."""
+
+    user = update.effective_user
+    if user is None:
+        return
+    meta = get_user_meta_copy(user.id)
+    if isinstance(meta, dict) and meta.get("access_state") == "blocked":
+        raise ApplicationHandlerStop
+
+
 async def unhandled_callback(update: Update, context) -> None:
     query = update.callback_query
     if query is None:
@@ -496,6 +529,74 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("health", cmd_health, block=False))
     app.add_handler(CommandHandler("subscription", subscription_show))
 
+    administration_conv = _conversation_handler(
+        entry_points=[
+            CallbackQueryHandler(
+                administration_input_start_cb,
+                pattern=(
+                    r"^(administration:input:(alias|help|support_email|payment_bank|payment_recipient|"
+                    r"payment_phone|period_current|period_next)|staff:alias|"
+                    r"product:input:setting_(bank|recipient|phone|current|next))$"
+                ),
+            ),
+        ],
+        states={
+            ADMINISTRATION_INPUT: [MessageHandler(PRIVATE_TEXT, administration_text_input)],
+            ADMINISTRATION_CONFIRM: [
+                CallbackQueryHandler(administration_confirm_cb, pattern=r"^administration:confirm$")
+            ],
+        },
+        fallbacks=[
+            CommandHandler("cancel", administration_cancel),
+            CallbackQueryHandler(administration_cancel, pattern=r"^administration:cancel$"),
+            CallbackQueryHandler(cancel_to_menu_cb, pattern=r"^menu:home$"),
+        ],
+        name="administration_flow",
+        persistent=True,
+    )
+    app.add_handler(administration_conv)
+    app.add_handler(CallbackQueryHandler(administration_show_cb, pattern=r"^(administration:show|staff:profile)$"))
+    app.add_handler(
+        CallbackQueryHandler(
+            administration_signature_mode_cb,
+            pattern=r"^(administration:signature|staff:mode):(title|title_alias)$",
+        )
+    )
+    app.add_handler(
+        CallbackQueryHandler(
+            administration_service_settings_cb,
+            pattern=r"^(administration:settings|product:owner)$",
+        )
+    )
+    app.add_handler(CallbackQueryHandler(administration_help_reset_cb, pattern=r"^administration:help:reset$"))
+    app.add_handler(
+        CallbackQueryHandler(
+            administration_staff_title_menu_cb,
+            pattern=r"^(administration:title|product:titlemenu):\d+$",
+        )
+    )
+    app.add_handler(
+        CallbackQueryHandler(
+            administration_staff_title_apply_cb,
+            pattern=r"^(administration:title|product:title):\d+:[a-z_]+$",
+        )
+    )
+
+    profile_conv = _conversation_handler(
+        entry_points=[CallbackQueryHandler(profile_email_start_cb, pattern=r"^profile:email:edit$")],
+        states={PROFILE_EMAIL_INPUT: [MessageHandler(PRIVATE_TEXT, profile_email_text)]},
+        fallbacks=[
+            CommandHandler("cancel", profile_cancel),
+            CallbackQueryHandler(profile_cancel, pattern=r"^profile:show$"),
+            CallbackQueryHandler(cancel_to_menu_cb, pattern=r"^menu:home$"),
+        ],
+        name="profile_flow",
+        persistent=True,
+    )
+    app.add_handler(profile_conv)
+    app.add_handler(CallbackQueryHandler(personal_profile_cb, pattern=r"^(profile:show|product:profile)$"))
+    app.add_handler(CallbackQueryHandler(profile_email_clear_cb, pattern=r"^profile:email:clear$"))
+
     product_conv = _conversation_handler(
         entry_points=[
             CallbackQueryHandler(trial_request_start_cb, pattern=r"^subscription:trial$"),
@@ -505,7 +606,7 @@ def build_app() -> Application:
             ),
             CallbackQueryHandler(
                 product_input_start_cb,
-                pattern=r"^(staff:alias|product:input:(setting_(bank|recipient|phone|current|next)|massdate|massremind|user_end:\d+|manualpay:\d+))$",
+                pattern=r"^product:input:(massdate|massremind|user_end:\d+|manualpay:\d+)$",
             ),
         ],
         states={
@@ -525,15 +626,9 @@ def build_app() -> Application:
     app.add_handler(CallbackQueryHandler(payment_reported_cb, pattern=r"^subscription:paid:\d+$"))
     app.add_handler(CallbackQueryHandler(renewal_reported_cb, pattern=r"^subscription:renew$"))
     app.add_handler(CallbackQueryHandler(connection_show_cb, pattern=r"^subscription:connection$"))
-    app.add_handler(CallbackQueryHandler(product_profile_cb, pattern=r"^product:profile$"))
     app.add_handler(CallbackQueryHandler(product_requests_cb, pattern=r"^product:requests$"))
     app.add_handler(CallbackQueryHandler(product_request_view_cb, pattern=r"^product:req:view:\d+$"))
-    app.add_handler(CallbackQueryHandler(staff_profile_cb, pattern=r"^staff:profile$"))
-    app.add_handler(CallbackQueryHandler(staff_mode_cb, pattern=r"^staff:mode:(title|title_alias)$"))
-    app.add_handler(CallbackQueryHandler(owner_panel_cb, pattern=r"^product:owner$"))
     app.add_handler(CallbackQueryHandler(product_manage_user_cb, pattern=r"^product:manage:\d+$"))
-    app.add_handler(CallbackQueryHandler(product_title_menu_cb, pattern=r"^product:titlemenu:\d+$"))
-    app.add_handler(CallbackQueryHandler(product_title_apply_cb, pattern=r"^product:title:\d+:[a-z_]+$"))
     app.add_handler(CallbackQueryHandler(product_tier_cb, pattern=r"^product:tier:\d+:(basic|unlimited_trial)$"))
     app.add_handler(CallbackQueryHandler(product_manual_reminder_cb, pattern=r"^product:remind:\d+$"))
 
@@ -621,7 +716,7 @@ def build_app() -> Application:
             ADMIN_PICK: [
                 CallbackQueryHandler(
                     users_pick,
-                    pattern=r"^users:(all|main|back|filter:(all|active|disabled|unpaid|admins)|user:\d+|page:\d+)$",
+                    pattern=r"^users:(all|main|back|filter:(all|active|disabled|unpaid|admins|blocked)|user:\d+|page:\d+)$",
                 ),
             ],
             ADMIN_ALL_MENU: [
@@ -660,7 +755,7 @@ def build_app() -> Application:
     )
     app.add_handler(users_conv)
 
-    conversation_handlers = [product_conv, maint_conv, ticket_conv, users_conv]
+    conversation_handlers = [administration_conv, profile_conv, product_conv, maint_conv, ticket_conv, users_conv]
 
     # /cancel is also processed after the preprocessor has ended every active
     # flow, so a single command cannot leave another hidden conversation behind.
@@ -675,6 +770,9 @@ def build_app() -> Application:
     app.add_handler(CallbackQueryHandler(status_ufw_cb, pattern=rf"^status:ufw:{SERVER_KEY_PATTERN}$", block=False))
     app.add_handler(
         CallbackQueryHandler(status_dns_refresh_cb, pattern=rf"^status:dnsrefresh:{SERVER_KEY_PATTERN}$", block=False)
+    )
+    app.add_handler(
+        CallbackQueryHandler(status_tls_refresh_cb, pattern=rf"^status:tlsrefresh:{SERVER_KEY_PATTERN}$", block=False)
     )
     if BOT_MODE == "mixed":
         app.add_handler(
@@ -800,6 +898,12 @@ def build_app() -> Application:
             first=5,
             name="subscription_lifecycle",
         )
+        app.job_queue.run_repeating(
+            tls_certificate_check_job,
+            interval=6 * 60 * 60,
+            first=10,
+            name="tls_certificate_check",
+        )
         if MESSAGE_CLEANUP_ENABLED:
             app.job_queue.run_repeating(
                 message_cleanup_job,
@@ -822,6 +926,11 @@ def build_app() -> Application:
             conversation_handlers,
             navigation_callback_handlers,
         )
+
+    # Blocked accounts are stopped before tracking, navigation and every command.
+    # No callback acknowledgement is sent: after the final blocking notice the
+    # bot is intentionally completely silent for that account.
+    app.add_handler(TypeHandler(Update, blocked_user_guard), group=-100)
 
     # Group -1 runs before regular handlers. It clears every unfinished flow,
     # then the same update is handled normally in group 0 as a fresh entry point.

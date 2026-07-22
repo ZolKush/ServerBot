@@ -21,6 +21,7 @@ from ..config import (
     TZ,
     logger,
 )
+from ..help_content import render_help_message
 from ..services.outbox import message_payload
 from ..staff import STAFF_TITLE_OWNER, STAFF_TITLE_SUPPORT
 from ..storage import (
@@ -30,6 +31,8 @@ from ..storage import (
     get_user_meta_copy,
     make_outbox_event,
     mutate_user_meta,
+    product_settings_snapshot,
+    suppress_user_outbox_recipient,
     update_user_data,
 )
 from .common import (
@@ -147,27 +150,14 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await reply_disabled(update)
         return
 
-    lines = [
-        "<b>Руководство по диагностике подключения</b>",
-        "",
-        "Если у вас возникли проблемы с подключением, выполните эти шаги до обращения к администраторам:",
-        "",
-        "а. Обновите подписку",
-        "б. Проверьте соединение с каждым сервером",
-        "в. Обновите приложение",
-        "г. Попробуйте включить фрагментирование в настройках",
-        "д. Сбросьте данные приложения и добавьте подписку заново",
-        "е. Если ничего не помогло — создайте тикет в боте",
-    ]
+    text = render_help_message(product_settings_snapshot())
     query = update.callback_query
     message = update.effective_message
     if query and message:
         await query.answer()
-        await query.edit_message_text(
-            "\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=main_menu_inline_kb(update)
-        )
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=main_menu_inline_kb(update))
     elif message:
-        await message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=main_menu_inline_kb(update))
+        await message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=main_menu_inline_kb(update))
 
 
 async def cmd_auth(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -407,14 +397,15 @@ async def access_review_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             "rejected": "❌ Ваша заявка на доступ отклонена.",
             "blocked": "🚫 Доступ к боту отключён\n\nВы отключены от данного бота по решению администрации.",
         }[desired]
-        enqueue_user_outbox(
-            cfg,
-            make_outbox_event(
-                kind=f"access_{desired}",
-                recipient_ids=[target_uid],
-                payload=message_payload(user_text, parse_mode=None),
-            ),
+        notification_event = make_outbox_event(
+            kind=f"access_{desired}",
+            recipient_ids=[target_uid],
+            payload=message_payload(user_text, parse_mode=None),
+            allow_blocked_delivery=desired == "blocked",
         )
+        enqueue_user_outbox(cfg, notification_event)
+        if desired == "blocked":
+            suppress_user_outbox_recipient(cfg, target_uid, keep_event_id=str(notification_event["id"]))
         return "updated", current
 
     outcome, _meta = await update_user_data(_apply)
@@ -483,8 +474,34 @@ async def cmd_owner(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             latest = cfg.authorized_users.get(str(uid))
             if not isinstance(latest, dict) or latest.get("role") != "admin":
                 return "denied"
-            updated = UserData._normalize_user({**latest, "admin_level": "owner", "staff_title": STAFF_TITLE_OWNER})
+            updated = UserData._normalize_user(
+                {
+                    **latest,
+                    "admin_level": "owner",
+                    "staff_title": STAFF_TITLE_OWNER,
+                    "service_tier": "subscriber",
+                    "is_paid": True,
+                    "subscription_end_at": None,
+                    "payment_auto_reminders": {},
+                }
+            )
             cfg.authorized_users[str(uid)] = updated
+            for request_id, request in list(cfg.service_requests.items()):
+                if (
+                    isinstance(request, dict)
+                    and int(request.get("user_id", 0) or 0) == uid
+                    and request.get("kind") in {"purchase", "renewal"}
+                    and request.get("status")
+                    in {"pending", "claimed", "awaiting_link", "requisites_sent", "payment_reported"}
+                ):
+                    cfg.service_requests[request_id] = {
+                        **request,
+                        "status": "cancelled",
+                        "updated_at": datetime.now(TZ).isoformat(),
+                        "decision_reason": "service_manager_billing_exempt",
+                        "claimed_by_id": None,
+                        "claimed_at": None,
+                    }
             append_audit_entry(
                 cfg,
                 action="owner_claimed",

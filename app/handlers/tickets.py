@@ -9,6 +9,7 @@ from telegram.constants import ParseMode
 from telegram.ext import ContextTypes, ConversationHandler
 
 from ..config import TZ, logger
+from ..help_content import render_support_contact
 from ..models import Attachment, Ticket, TicketMessage
 from ..services.outbox import message_payload
 from ..staff import staff_internal_identity, staff_internal_name
@@ -22,6 +23,7 @@ from ..storage import (
     get_user_meta_copy,
     get_user_open_tickets,
     make_outbox_event,
+    product_settings_snapshot,
     update_important_data,
 )
 from .common import (
@@ -278,19 +280,33 @@ def _format_ticket_for_admin(ticket: dict[str, Any], admin_uid: int, *, event_li
     user_name = str(ticket.get("user_name") or "пользователь")[:160]
     user_username = str(ticket.get("user_username") or "").strip()
     user_id = _safe_int(ticket.get("user_id"))
+    user_meta = get_user_meta_copy(user_id) or {}
+    nickname = str(user_meta.get("nickname") or user_name).strip()[:160]
+    telegram_name = " ".join(
+        str(part).strip()
+        for part in (user_meta.get("first_name"), user_meta.get("last_name"))
+        if str(part or "").strip()
+    )
+    user_username = str(user_meta.get("username") or user_username).strip()
+    contact_email = str(user_meta.get("contact_email") or "").strip()
     subject = str(ticket.get("subject") or "-")[:300]
     created_at = format_dt_human(ticket.get("created_at"))
     lines = [
         _ticket_header(ticket),
         SEP,
         f"• Исполнитель: <b>{html_escape(assignee_name)}</b>",
-        f"• Пользователь: <b>{html_escape(user_name)}</b> (<code>{html_escape(str(user_id))}</code>)",
+        f"• Никнейм: <b>{html_escape(nickname)}</b>",
+        f"• ID: <code>{html_escape(str(user_id))}</code>",
         f"• Срочность: {urgency_label(ticket.get('urgency'))}",
         f"• Тема: <code>{html_escape(subject)}</code>",
         f"• Создан: <code>{html_escape(created_at)}</code>",
     ]
     if user_username:
         lines.append(f"• Username: <code>@{html_escape(user_username.lstrip('@'))}</code>")
+    if telegram_name:
+        lines.append(f"• Имя Telegram: <b>{html_escape(telegram_name)}</b>")
+    if contact_email:
+        lines.append(f"• Резервная почта: <code>{html_escape(contact_email)}</code>")
     assignee_id = _safe_int(ticket.get("assignee_id"))
     if assignee_id:
         assignee_meta = get_user_meta_copy(assignee_id)
@@ -325,7 +341,7 @@ def _format_ticket_for_user(ticket: dict[str, Any], *, event_line: str | None = 
     if event_line:
         lines.extend(["", event_line])
     lines.extend([SEP, "🕘 <b>История</b>", _format_ticket_history(ticket, public_view=True)])
-    return "\n".join(lines)
+    return "\n".join(lines) + render_support_contact(product_settings_snapshot())
 
 
 def _build_ticket_record(
@@ -668,16 +684,19 @@ async def ticket_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     _clear_ticket_ctx(context)
     msg = update.effective_message
+    prompt = "<b>Тикет > Тема</b>\n\nВведите тему тикета (кратко).\nДля отмены: /cancel" + render_support_contact(
+        product_settings_snapshot()
+    )
     if q and msg:
         await q.answer()
         await q.edit_message_text(
-            "<b>Тикет > Тема</b>\n\nВведите тему тикета (кратко).\nДля отмены: /cancel",
+            prompt,
             parse_mode=ParseMode.HTML,
             reply_markup=ticket_input_kb(),
         )
     elif msg:
         await msg.reply_text(
-            "<b>Тикет > Тема</b>\n\nВведите тему тикета (кратко).\nДля отмены: /cancel",
+            prompt,
             parse_mode=ParseMode.HTML,
             reply_markup=ticket_input_kb(),
         )

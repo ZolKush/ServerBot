@@ -2,7 +2,13 @@ from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-from ..staff import is_admin_meta, staff_internal_identity, staff_public_signature, staff_title_label
+from ..staff import (
+    is_admin_meta,
+    is_billing_exempt_meta,
+    staff_internal_identity,
+    staff_public_signature,
+    staff_title_label,
+)
 from ..storage import authorized_users_snapshot, get_user_audit_entries
 from .common import clip_html, display_name_from_meta, format_dt_human, get_user_meta, html_escape
 from .subscription import CONNECTION_URL_KEY
@@ -15,7 +21,15 @@ USER_FILTER_ACTIVE = "active"
 USER_FILTER_DISABLED = "disabled"
 USER_FILTER_UNPAID = "unpaid"
 USER_FILTER_ADMINS = "admins"
-USER_FILTERS = (USER_FILTER_ALL, USER_FILTER_ACTIVE, USER_FILTER_DISABLED, USER_FILTER_UNPAID, USER_FILTER_ADMINS)
+USER_FILTER_BLOCKED = "blocked"
+USER_FILTERS = (
+    USER_FILTER_ALL,
+    USER_FILTER_ACTIVE,
+    USER_FILTER_DISABLED,
+    USER_FILTER_UNPAID,
+    USER_FILTER_ADMINS,
+    USER_FILTER_BLOCKED,
+)
 
 
 def _field(value: object, *, limit: int = 160) -> str:
@@ -29,6 +43,7 @@ def users_filter_label(filter_key: str) -> str:
         USER_FILTER_DISABLED: "Отключенные",
         USER_FILTER_UNPAID: "Неоплаченные",
         USER_FILTER_ADMINS: "Админы",
+        USER_FILTER_BLOCKED: "Заблокированные",
     }
     return labels.get(filter_key, labels[USER_FILTER_ALL])
 
@@ -49,7 +64,7 @@ def _filter_buttons(active_filter: str) -> list[list[InlineKeyboardButton]]:
     return [
         [_btn("Все", USER_FILTER_ALL), _btn("Активные", USER_FILTER_ACTIVE)],
         [_btn("Откл.", USER_FILTER_DISABLED), _btn("Неопл.", USER_FILTER_UNPAID)],
-        [_btn("Админы", USER_FILTER_ADMINS)],
+        [_btn("Админы", USER_FILTER_ADMINS), _btn("Заблок.", USER_FILTER_BLOCKED)],
     ]
 
 
@@ -58,12 +73,17 @@ def _passes_filter(meta: dict[str, Any], filter_key: str) -> bool:
     tier = str(meta.get("service_tier") or "basic")
     enabled = bool(meta.get("enabled", True))
     is_paid = bool(meta.get("is_paid", False))
+    state = str(meta.get("access_state") or ("approved" if enabled else "blocked"))
+    if filter_key == USER_FILTER_BLOCKED:
+        return state == "blocked"
+    if state == "blocked":
+        return False
     if filter_key == USER_FILTER_ACTIVE:
-        return enabled
+        return state == "approved" and enabled
     if filter_key == USER_FILTER_DISABLED:
-        return not enabled
+        return state != "approved" or not enabled
     if filter_key == USER_FILTER_UNPAID:
-        return role != "admin" and tier != "unlimited_trial" and not is_paid
+        return not is_billing_exempt_meta(meta) and tier != "unlimited_trial" and not is_paid
     if filter_key == USER_FILTER_ADMINS:
         return role == "admin"
     return True
@@ -208,6 +228,21 @@ def format_user_card(meta: dict[str, Any]) -> str:
         "unlimited_trial": "Безлимитный тестовый доступ",
     }.get(str(meta.get("service_tier") or "basic"), "Неизвестно")
     role_label = "Администратор" if role == "admin" else "Пользователь"
+    billing_exempt = is_billing_exempt_meta(meta)
+    if billing_exempt:
+        tier_label = "Бессрочный оплаченный доступ — руководитель сервиса"
+    payment_label = (
+        "♾️ бессрочно — руководитель сервиса"
+        if billing_exempt
+        else ("⭐ оплачена" if bool(meta.get("is_paid", False)) else "не оплачена")
+    )
+    paid_at_label = "не применяется" if billing_exempt else format_dt_human(meta.get("paid_at"))
+    end_label = "бессрочно" if billing_exempt else format_dt_human(meta.get("subscription_end_at"))
+    auto_reminder_type = {
+        "3d": "за 3 дня",
+        "1d": "за 1 день",
+        "15m": "за 15 минут",
+    }.get(str(meta.get("last_auto_payment_reminder_type") or ""), "-")
     lines = [
         f"👤 <b>{_field(name, limit=240)}</b> · {status_dot} {html_escape(status)}\n"
         f"ID: <code>{_field(uid, limit=32)}</code>\n"
@@ -216,9 +251,9 @@ def format_user_card(meta: dict[str, Any]) -> str:
         f"• Статус: <b>{html_escape(status)}</b>\n"
         f"• Тип: <b>{html_escape(role_label)}</b>\n"
         f"• Уровень: <b>{html_escape(tier_label)}</b>\n"
-        f"• Оплата: <b>{'⭐ оплачена' if bool(meta.get('is_paid', False)) else 'не оплачена'}</b>\n"
-        f"• Оплачено: <code>{_field(format_dt_human(meta.get('paid_at')), limit=120)}</code>\n"
-        f"• Окончание: <code>{_field(format_dt_human(meta.get('subscription_end_at')), limit=120)}</code>\n"
+        f"• Оплата: <b>{payment_label}</b>\n"
+        f"• Оплачено: <code>{_field(paid_at_label, limit=120)}</code>\n"
+        f"• Окончание: <code>{_field(end_label, limit=120)}</code>\n"
         f"• Авторизация: <code>{_field(auth_at_human, limit=120)}</code>\n"
         "\n"
         "🔗 <b>Подключение</b>\n"
@@ -228,12 +263,13 @@ def format_user_card(meta: dict[str, Any]) -> str:
         "\n"
         "🔔 <b>Напоминания</b>\n"
         f"• Автоматическое: <code>{_field(format_dt_human(meta.get('last_auto_payment_reminder_at')), limit=120)}</code>"
-        f" ({_field(meta.get('last_auto_payment_reminder_type'), limit=40)})\n"
+        f" ({_field(auto_reminder_type, limit=40)})\n"
         f"• Ручное: <code>{_field(format_dt_human(meta.get('last_manual_payment_reminder_at')), limit=120)}</code>\n"
         f"• Отправил: <b>{_field(meta.get('last_manual_payment_reminder_by_name'), limit=180)}</b>\n"
         "\n"
         "📇 <b>Профиль</b>\n"
         f"• Ник: <b>{_field(nick, limit=220)}</b>\n"
+        f"• Резервная почта: <code>{_field(meta.get('contact_email'), limit=254)}</code>\n"
         f"• Username: <b>{_field(('@' + uname) if uname else '-', limit=100)}</b>\n"
         f"• Имя: <b>{_field(nm, limit=260)}</b>"
     ]
@@ -241,7 +277,7 @@ def format_user_card(meta: dict[str, Any]) -> str:
         lines.extend(
             [
                 "",
-                "🪪 <b>Профиль сотрудника</b>",
+                "🪪 <b>Сотрудник</b>",
                 f"• Должность: <b>{html_escape(staff_title_label(meta))}</b>",
                 f"• Публичная подпись: <b>{html_escape(staff_public_signature(meta))}</b>",
                 f"• Внутренняя личность: <code>{_field(staff_internal_identity(meta), limit=420)}</code>",

@@ -26,11 +26,13 @@ from ..services.remnawave_metrics import (
     get_metrics_snapshot,
 )
 from ..services.remote_service import (
+    remote_docker_containers,
     remote_status_bundle,
 )
 from ..services.system_dns import dns_supports_custom_resolver, resolve_a_record
 from ..services.system_metrics import check_uptime, disk_root, meminfo
 from ..services.system_ufw import ufw_status_basic, ufw_summary_for_admin
+from ..services.tls_certificates import refresh_tls_certificates, tls_snapshot_for_server
 from ..storage import (
     get_daily_node_status_cache,
     get_dns_status_cache,
@@ -39,7 +41,7 @@ from ..storage import (
 )
 from .common import html_escape, is_admin, now_str, require_admin, require_subscriber, ui_error_text, ui_info_text
 from .status_format import format_status_message, format_ufw_message
-from .status_models import DockerContainerView, StatusSnapshot
+from .status_models import DockerContainerView, StatusSnapshot, TLSCertificateView
 
 _STATUS_CACHE: dict[tuple[str, bool], tuple[float, StatusSnapshot]] = {}
 _STATUS_LOCKS: dict[tuple[str, bool], asyncio.Lock] = {}
@@ -113,6 +115,7 @@ def _status_actions_kb(
     rows.append([InlineKeyboardButton("🌐 Обновить DNS статус", callback_data=f"status:dnsrefresh:{server_key}")])
     if admin_mode:
         rows.append([InlineKeyboardButton("🛡️ UFW", callback_data=f"status:ufw:{server_key}")])
+        rows.append([InlineKeyboardButton("🔐 Обновить TLS", callback_data=f"status:tlsrefresh:{server_key}")])
     if admin_mode and show_ssh_refresh:
         rows.append(
             [InlineKeyboardButton("🔧 Обновить disk/UFW по SSH", callback_data=f"status:sshrefresh:{server_key}")]
@@ -154,6 +157,37 @@ def _parse_status_ufw_callback(data: str) -> str | None:
 def _parse_status_dnsrefresh_callback(data: str) -> str | None:
     m = re.fullmatch(rf"status:dnsrefresh:({SERVER_KEY_PATTERN})", data or "")
     return m.group(1) if m else None
+
+
+def _parse_status_tlsrefresh_callback(data: str) -> str | None:
+    m = re.fullmatch(rf"status:tlsrefresh:({SERVER_KEY_PATTERN})", data or "")
+    return m.group(1) if m else None
+
+
+def _tls_views(server_key: str, *, admin_mode: bool) -> list[TLSCertificateView]:
+    if not admin_mode:
+        return []
+    result: list[TLSCertificateView] = []
+    for item in tls_snapshot_for_server(server_key):
+        try:
+            port = int(item.get("port", 443) or 443)
+            remaining_seconds = int(item.get("remaining_seconds", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        result.append(
+            TLSCertificateView(
+                domain=str(item.get("domain") or "-"),
+                port=port,
+                status=str(item.get("status") or "error"),
+                not_after=str(item.get("not_after") or ""),
+                remaining_seconds=remaining_seconds,
+                hostname_valid=bool(item.get("hostname_valid", False)),
+                trust_valid=bool(item.get("trust_valid", False)),
+                error=str(item.get("error") or ""),
+                checked_at=str(item.get("checked_at") or ""),
+            )
+        )
+    return result
 
 
 def _exc_brief(value: object) -> str:
@@ -273,6 +307,34 @@ async def status_dns_refresh_cb(update: Update, context: ContextTypes.DEFAULT_TY
     text, markup = await build_status_message(update, server_key=server.key)
     await q.edit_message_text(
         text + "\n\n" + ui_info_text("DNS статус обновлён в реальном времени."),
+        parse_mode=ParseMode.HTML,
+        reply_markup=markup,
+    )
+
+
+@require_admin
+async def status_tls_refresh_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    if not q:
+        return
+    server_key = _parse_status_tlsrefresh_callback(q.data or "")
+    if not server_key or not get_server_target(server_key):
+        await q.answer("Сервер не найден.", show_alert=True)
+        return
+    await q.answer("Проверяю TLS-сертификаты...")
+    try:
+        await refresh_tls_certificates()
+    except Exception as exc:
+        logger.exception("Manual TLS certificate refresh failed server=%s", server_key)
+        await q.edit_message_text(
+            ui_error_text(f"не удалось обновить TLS-сертификаты: {_exc_brief(exc)}"),
+            reply_markup=_status_actions_kb(True, server_key),
+        )
+        return
+    _invalidate_status_cache(server_key)
+    text, markup = await build_status_message(update, server_key=server_key)
+    await q.edit_message_text(
+        text + "\n\n" + ui_info_text("TLS-сертификаты обновлены в реальном времени."),
         parse_mode=ParseMode.HTML,
         reply_markup=markup,
     )
@@ -551,7 +613,21 @@ async def _build_status_snapshot_mixed(
     server: ServerTarget,
 ) -> StatusSnapshot:
     admin_mode = is_admin(update)
-    snap = await get_metrics_snapshot()
+    docker_task = (
+        remote_docker_containers(server.ssh_target, server.monitor_containers)
+        if server.mode == "ssh"
+        else docker_containers(server.monitor_containers)
+    )
+    snap, docker_raw = await asyncio.gather(get_metrics_snapshot(), docker_task, return_exceptions=True)
+    if isinstance(snap, Exception):
+        raise snap
+    if isinstance(docker_raw, Exception):
+        docker_raw = [("Docker API", False, f"ошибка: {_exc_brief(docker_raw)}", "-")]
+    containers = [
+        DockerContainerView(name=name, is_up=up, status_text=status, restarts=restarts)
+        for name, up, status, restarts in docker_raw
+    ]
+    tls_certificates = _tls_views(server.key, admin_mode=admin_mode)
     node: NodeMetrics | None = snap.get(server.remnawave_uuid)
 
     dns_payload = _dns_payload_from_cache_or_empty(server)
@@ -585,6 +661,8 @@ async def _build_status_snapshot_mixed(
             dns_bad_domains=dns_bad,
             dns_unknown_domains=dns_unknown,
             dns_error_details=dns_error_details,
+            containers=containers,
+            tls_certificates=tls_certificates,
             admin_mode=admin_mode,
             source_mode="mixed",
             node_online=None,
@@ -593,7 +671,7 @@ async def _build_status_snapshot_mixed(
             metrics_error=metrics_error,
             disk_updated_at_text=disk_upd,
             ufw_updated_at_text=ufw_upd,
-            show_containers_block=False,
+            show_containers_block=True,
         )
 
     if not node.is_online:
@@ -611,6 +689,8 @@ async def _build_status_snapshot_mixed(
             dns_bad_domains=dns_bad,
             dns_unknown_domains=dns_unknown,
             dns_error_details=dns_error_details,
+            containers=containers,
+            tls_certificates=tls_certificates,
             admin_mode=admin_mode,
             source_mode="mixed",
             node_online=False,
@@ -618,7 +698,7 @@ async def _build_status_snapshot_mixed(
             last_seen_text=_format_iso_short(raw_upd_iso),
             disk_updated_at_text=disk_upd,
             ufw_updated_at_text=ufw_upd,
-            show_containers_block=False,
+            show_containers_block=True,
         )
 
     return StatusSnapshot(
@@ -638,6 +718,8 @@ async def _build_status_snapshot_mixed(
         ufw_allow=list(allow),
         ufw_deny=list(deny),
         ufw_reject=list(reject),
+        containers=containers,
+        tls_certificates=tls_certificates,
         admin_mode=admin_mode,
         source_mode="mixed",
         node_online=True,
@@ -645,7 +727,7 @@ async def _build_status_snapshot_mixed(
         last_seen_text="",
         disk_updated_at_text=disk_upd,
         ufw_updated_at_text=ufw_upd,
-        show_containers_block=False,
+        show_containers_block=True,
     )
 
 
@@ -668,6 +750,7 @@ async def _build_status_snapshot_uncached(update: Update, server: ServerTarget) 
     containers = [
         DockerContainerView(name=name, is_up=upb, status_text=st, restarts=rst) for name, upb, st, rst in cont
     ]
+    tls_certificates = _tls_views(server.key, admin_mode=admin_mode)
     return StatusSnapshot(
         title="🧭 Статус сервера",
         server_label=server.label,
@@ -686,6 +769,7 @@ async def _build_status_snapshot_uncached(update: Update, server: ServerTarget) 
         ufw_deny=list(deny),
         ufw_reject=list(reject),
         containers=containers,
+        tls_certificates=tls_certificates,
         admin_mode=admin_mode,
         source_mode="ssh",
     )

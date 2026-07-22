@@ -22,6 +22,7 @@ from .staff import (
     normalize_staff_title,
     staff_public_signature,
 )
+from .validation import normalize_email
 
 T = TypeVar("T")
 ACCESS_STATES = {"pending", "approved", "blocked", "logged_out", "rejected"}
@@ -77,6 +78,11 @@ def _normalize_product_settings(raw: Any = None) -> dict[str, Any]:
         "next_period_end": _optional_text(source.get("next_period_end"), limit=80),
         "period_setup_reminder_for": _optional_text(source.get("period_setup_reminder_for"), limit=80),
         "period_missing_notice_for": _optional_text(source.get("period_missing_notice_for"), limit=80),
+        "help_text": _optional_text(source.get("help_text"), limit=3500),
+        "help_updated_at": _optional_text(source.get("help_updated_at"), limit=80),
+        "help_updated_by_id": _optional_int(source.get("help_updated_by_id")),
+        "help_updated_by_name": _optional_text(source.get("help_updated_by_name"), limit=160),
+        "support_email": normalize_email(source.get("support_email")),
     }
 
 
@@ -199,6 +205,7 @@ def _normalize_outbox(raw: Any) -> dict[str, dict[str, Any]]:
             "completion": copy.deepcopy(raw_event.get("completion"))
             if isinstance(raw_event.get("completion"), dict)
             else {},
+            "allow_blocked_delivery": bool(raw_event.get("allow_blocked_delivery", False)),
         }
     return normalized
 
@@ -209,6 +216,7 @@ def make_outbox_event(
     recipient_ids: list[int] | tuple[int, ...] | set[int],
     payload: dict[str, Any],
     event_id: str | None = None,
+    allow_blocked_delivery: bool = False,
 ) -> dict[str, Any]:
     valid_ids: set[int] = set()
     for raw_uid in recipient_ids:
@@ -228,6 +236,7 @@ def make_outbox_event(
         "kind": str(kind or "message")[:100],
         "created_at": now,
         "payload": copy.deepcopy(payload),
+        "allow_blocked_delivery": bool(allow_blocked_delivery),
         "recipients": {
             str(uid): {
                 "status": "pending",
@@ -262,6 +271,29 @@ def enqueue_important_outbox(cfg: "ImportantData", event: dict[str, Any]) -> dic
         raise ValueError(f"duplicate important outbox event id: {event_id}")
     cfg.outbox[event_id] = clean
     return copy.deepcopy(clean)
+
+
+def suppress_user_outbox_recipient(
+    cfg: "UserData",
+    user_id: int,
+    *,
+    keep_event_id: str | None = None,
+) -> int:
+    """Remove pending user-outbox deliveries for a blocked recipient."""
+
+    uid_text = str(int(user_id))
+    removed = 0
+    for event_id, event in list(cfg.outbox.items()):
+        if event_id == keep_event_id or not isinstance(event, dict):
+            continue
+        recipients = event.get("recipients")
+        if not isinstance(recipients, dict) or uid_text not in recipients:
+            continue
+        recipients.pop(uid_text, None)
+        removed += 1
+        if not recipients:
+            cfg.outbox.pop(event_id, None)
+    return removed
 
 
 def _write_json_atomic_sync(path: str, data: dict[str, Any]) -> None:
@@ -415,6 +447,7 @@ class UserData:
         meta["enabled"] = state == "approved"
         for key, raw_value, limit in (
             ("nickname", meta.get("nickname") or meta.get("nick"), 160),
+            ("contact_email", normalize_email(meta.get("contact_email")), 254),
             ("username", meta.get("username"), 64),
             ("first_name", meta.get("first_name"), 256),
             ("last_name", meta.get("last_name"), 256),
@@ -458,7 +491,7 @@ class UserData:
         display_mode = normalize_staff_display_mode(meta.get("staff_display_mode")) if is_admin else STAFF_DISPLAY_TITLE
         meta["staff_display_mode"] = display_mode if meta["staff_alias"] else STAFF_DISPLAY_TITLE
 
-        tier = "subscriber" if is_admin else str(meta.get("service_tier") or "basic")
+        tier = str(meta.get("service_tier") or ("subscriber" if is_admin else "basic"))
         if tier not in SERVICE_TIERS:
             tier = "basic"
         meta["service_tier"] = tier
@@ -530,6 +563,11 @@ class UserData:
             if isinstance(raw_reminders, dict)
             else {}
         )
+        if is_admin and admin_level == "owner":
+            meta["service_tier"] = "subscriber"
+            meta["is_paid"] = True
+            meta["subscription_end_at"] = None
+            meta["payment_auto_reminders"] = {}
         return meta
 
     @staticmethod
@@ -575,6 +613,36 @@ class UserData:
         service_requests = _normalize_service_requests(raw.get("service_requests"))
         if service_requests:
             request_seq = max(request_seq, max(int(key) for key in service_requests))
+        owner_ids = {
+            int(meta.get("user_id", 0) or 0)
+            for meta in authorized_users.values()
+            if is_owner_meta(meta) and int(meta.get("user_id", 0) or 0) > 0
+        }
+        if owner_ids:
+            migrated_at = datetime.now(timezone.utc).isoformat()
+            for request_id, request in list(service_requests.items()):
+                if (
+                    int(request.get("user_id", 0) or 0) in owner_ids
+                    and request.get("kind") in {"purchase", "renewal"}
+                    and request.get("status")
+                    in {
+                        "pending",
+                        "claimed",
+                        "awaiting_link",
+                        "requisites_sent",
+                        "payment_reported",
+                    }
+                ):
+                    request.update(
+                        {
+                            "status": "cancelled",
+                            "updated_at": migrated_at,
+                            "decision_reason": "service_manager_billing_exempt",
+                            "claimed_by_id": None,
+                            "claimed_at": None,
+                        }
+                    )
+                    service_requests[request_id] = request
         return UserData(
             authorized_users=authorized_users,
             outbox=outbox,
@@ -658,6 +726,63 @@ class UserData:
         )
 
 
+def _normalize_tls_certificates(raw: Any) -> dict[str, dict[str, Any]]:
+    if not isinstance(raw, dict):
+        return {}
+    result: dict[str, dict[str, Any]] = {}
+    for _raw_key, raw_item in raw.items():
+        if not isinstance(raw_item, dict):
+            continue
+        domain = str(raw_item.get("domain") or "").strip().lower().rstrip(".")[:253]
+        if not domain:
+            continue
+        try:
+            port = int(raw_item.get("port", 443) or 443)
+        except (TypeError, ValueError, OverflowError):
+            port = 443
+        if not 1 <= port <= 65535:
+            port = 443
+        status = str(raw_item.get("status") or "unknown")
+        status = {"valid": "ok", "unavailable": "error"}.get(status, status)
+        if status not in {"ok", "expiring", "expired", "invalid", "error", "unknown"}:
+            status = "unknown"
+        raw_servers = raw_item.get("servers")
+        servers = (
+            [str(item).strip()[:64] for item in raw_servers if str(item or "").strip()][:100]
+            if isinstance(raw_servers, list)
+            else []
+        )
+        raw_notified = raw_item.get("notified_levels")
+        notified_levels = (
+            [str(item) for item in raw_notified if str(item) in {"expiring", "expired"}]
+            if isinstance(raw_notified, list)
+            else []
+        )
+        key = f"{domain}:{port}"
+        try:
+            remaining_seconds = int(raw_item.get("remaining_seconds", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            remaining_seconds = 0
+        result[key] = {
+            "domain": domain,
+            "port": port,
+            "servers": list(dict.fromkeys(servers)),
+            "status": status,
+            "checked_at": _optional_text(raw_item.get("checked_at"), limit=80),
+            "not_before": _optional_text(raw_item.get("not_before"), limit=80),
+            "not_after": _optional_text(raw_item.get("not_after"), limit=80),
+            "fingerprint": _optional_text(raw_item.get("fingerprint"), limit=128),
+            "issuer": _optional_text(raw_item.get("issuer"), limit=500),
+            "error": _optional_text(raw_item.get("error"), limit=1000),
+            "hostname_valid": bool(raw_item.get("hostname_valid", False)),
+            "trust_valid": bool(raw_item.get("trust_valid", False)),
+            "remaining_seconds": remaining_seconds,
+            "notified_fingerprint": _optional_text(raw_item.get("notified_fingerprint"), limit=128),
+            "notified_levels": list(dict.fromkeys(notified_levels)),
+        }
+    return result
+
+
 @dataclass
 class ImportantData:
     tickets_seq: int = 0
@@ -668,6 +793,7 @@ class ImportantData:
     daily_node_status: dict[str, Any] = field(default_factory=dict)
     outbox: dict[str, dict[str, Any]] = field(default_factory=dict)
     fail2ban_cursors: dict[str, dict[str, Any]] = field(default_factory=dict)
+    tls_certificates: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     @staticmethod
     def _migrate(raw: dict[str, Any]) -> "ImportantData":
@@ -697,6 +823,7 @@ class ImportantData:
             if isinstance(raw_cursors, dict)
             else {}
         )
+        tls_certificates = _normalize_tls_certificates(raw.get("tls_certificates"))
         return ImportantData(
             tickets_seq=tickets_seq,
             tickets=tickets,
@@ -706,6 +833,7 @@ class ImportantData:
             daily_node_status=daily_node_status,
             outbox=outbox,
             fail2ban_cursors=fail2ban_cursors,
+            tls_certificates=tls_certificates,
         )
 
     @staticmethod
@@ -722,6 +850,7 @@ class ImportantData:
             "daily_node_status",
             "outbox",
             "fail2ban_cursors",
+            "tls_certificates",
         }
         return any(k not in allowed_keys for k in raw)
 
@@ -768,6 +897,7 @@ class ImportantData:
             "daily_node_status": self.daily_node_status,
             "outbox": self.outbox,
             "fail2ban_cursors": self.fail2ban_cursors,
+            "tls_certificates": self.tls_certificates,
         }
         _write_json_atomic_sync(path, payload)
 
@@ -784,6 +914,7 @@ class ImportantData:
                 "daily_node_status": self.daily_node_status,
                 "outbox": self.outbox,
                 "fail2ban_cursors": self.fail2ban_cursors,
+                "tls_certificates": self.tls_certificates,
             },
         )
 
@@ -837,6 +968,7 @@ def _refresh_important_snapshot() -> None:
         "daily_node_status": copy.deepcopy(getattr(IMPORTANT_DATA, "daily_node_status", {}) or {}),
         "outbox": copy.deepcopy(getattr(IMPORTANT_DATA, "outbox", {}) or {}),
         "fail2ban_cursors": copy.deepcopy(getattr(IMPORTANT_DATA, "fail2ban_cursors", {}) or {}),
+        "tls_certificates": copy.deepcopy(getattr(IMPORTANT_DATA, "tls_certificates", {}) or {}),
     }
 
 
@@ -880,6 +1012,7 @@ async def _reload_important_data_from_disk() -> None:
     IMPORTANT_DATA.daily_node_status = copy.deepcopy(latest.daily_node_status)
     IMPORTANT_DATA.outbox = copy.deepcopy(latest.outbox)
     IMPORTANT_DATA.fail2ban_cursors = copy.deepcopy(latest.fail2ban_cursors)
+    IMPORTANT_DATA.tls_certificates = copy.deepcopy(latest.tls_certificates)
 
 
 async def update_user_data(update_fn: Callable[[UserData], T]) -> T:
@@ -937,6 +1070,7 @@ async def update_important_data(update_fn: Callable[[ImportantData], T]) -> T:
             prev_daily_node_status = copy.deepcopy(IMPORTANT_DATA.daily_node_status)
             prev_outbox = copy.deepcopy(IMPORTANT_DATA.outbox)
             prev_fail2ban_cursors = copy.deepcopy(IMPORTANT_DATA.fail2ban_cursors)
+            prev_tls_certificates = copy.deepcopy(IMPORTANT_DATA.tls_certificates)
             try:
                 result = update_fn(IMPORTANT_DATA)
                 await IMPORTANT_DATA.save_async(IMPORTANT_DATA_PATH)
@@ -949,6 +1083,7 @@ async def update_important_data(update_fn: Callable[[ImportantData], T]) -> T:
                 IMPORTANT_DATA.daily_node_status = prev_daily_node_status
                 IMPORTANT_DATA.outbox = prev_outbox
                 IMPORTANT_DATA.fail2ban_cursors = prev_fail2ban_cursors
+                IMPORTANT_DATA.tls_certificates = prev_tls_certificates
                 raise
             _refresh_important_snapshot()
         except UpdateAborted:
@@ -1026,6 +1161,19 @@ def service_requests_snapshot() -> dict[str, dict[str, Any]]:
 
 def product_settings_snapshot() -> dict[str, Any]:
     return copy.deepcopy(USER_PRODUCT_SETTINGS_SNAPSHOT)
+
+
+def tls_certificates_snapshot() -> dict[str, dict[str, Any]]:
+    raw = IMPORTANT_DATA_SNAPSHOT.get("tls_certificates")
+    return copy.deepcopy(raw) if isinstance(raw, dict) else {}
+
+
+async def set_tls_certificates_snapshot(payload: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    def _set(cfg: ImportantData) -> dict[str, dict[str, Any]]:
+        cfg.tls_certificates = _normalize_tls_certificates(payload)
+        return copy.deepcopy(cfg.tls_certificates)
+
+    return await update_important_data(_set)
 
 
 def audit_log_snapshot() -> list[dict[str, Any]]:

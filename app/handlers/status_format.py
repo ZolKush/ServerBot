@@ -1,4 +1,5 @@
 import re
+from datetime import datetime
 
 from .common import html_escape
 from .status_models import StatusSnapshot
@@ -85,18 +86,107 @@ def _dns_detail_line(snapshot: StatusSnapshot) -> str | None:
     return "🌐 DNS: " + ", ".join(parts)
 
 
+def _docker_stats(snapshot: StatusSnapshot) -> dict[str, int | bool]:
+    running = stopped = unhealthy = missing = 0
+    unavailable = False
+    for container in snapshot.containers:
+        status = (container.status_text or "").strip().lower()
+        if "docker недоступен" in status or "ssh ошибка" in status or status.startswith("ошибка:"):
+            unavailable = True
+            continue
+        if status == "не найден":
+            missing += 1
+            continue
+        if container.is_up:
+            running += 1
+        else:
+            stopped += 1
+        if "unhealthy" in status:
+            unhealthy += 1
+    return {
+        "running": running,
+        "stopped": stopped,
+        "unhealthy": unhealthy,
+        "missing": missing,
+        "total": running + stopped,
+        "unavailable": unavailable,
+    }
+
+
 def _docker_chip(snapshot: StatusSnapshot) -> str:
-    if not snapshot.containers:
-        return "🐳 Docker ⚠️"
-    up_count = sum(1 for c in snapshot.containers if c.is_up)
-    total = len(snapshot.containers)
-    emoji = "🟢" if up_count == total else "🔴"
-    return f"🐳 Docker {emoji} {up_count}/{total}"
+    stats = _docker_stats(snapshot)
+    if stats["unavailable"]:
+        return "🐳 Docker ⚠️ н/д"
+    degraded = bool(stats["stopped"] or stats["unhealthy"] or stats["missing"])
+    emoji = "🔴" if degraded else "🟢"
+    result = (
+        f"🐳 Docker {emoji} работают {stats['running']} · остановлены {stats['stopped']} · "
+        f"unhealthy {stats['unhealthy']} · всего {stats['total']}"
+    )
+    if stats["missing"]:
+        result += f" · не найдены {stats['missing']}"
+    return result
 
 
 def _summary_chips_line(snapshot: StatusSnapshot) -> str:
     ufw = f"🛡 UFW {_ufw_emoji(snapshot.ufw_state)}"
-    return f"{_dns_chip(snapshot)}   {ufw}   {_docker_chip(snapshot)}"
+    lines = [f"{_dns_chip(snapshot)}   {ufw}", _docker_chip(snapshot)]
+    if snapshot.admin_mode:
+        lines.append(_tls_chip(snapshot))
+    return "\n".join(lines)
+
+
+def _tls_chip(snapshot: StatusSnapshot) -> str:
+    certificates = snapshot.tls_certificates
+    if not certificates:
+        return "🔐 TLS ⚠️ нет данных"
+    ok = sum(1 for item in certificates if item.status == "ok")
+    critical = sum(1 for item in certificates if item.status in {"expired", "invalid"})
+    warning = len(certificates) - ok - critical
+    emoji = "🔴" if critical else ("⚠️" if warning else "🟢")
+    return f"🔐 TLS {emoji} исправны {ok} · проблемы {critical + warning} · всего {len(certificates)}"
+
+
+def _format_tls_expiry(value: str) -> str:
+    try:
+        parsed = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return value or "н/д"
+    return parsed.strftime("%d.%m.%Y %H:%M %Z").strip()
+
+
+def _tls_block(snapshot: StatusSnapshot) -> list[str]:
+    if not snapshot.admin_mode:
+        return []
+    lines = ["", section("TLS-сертификаты", "🔐")]
+    if not snapshot.tls_certificates:
+        lines.append("⚠️ Сертификаты ещё не проверялись или домены не настроены")
+        return lines
+    for item in snapshot.tls_certificates:
+        emoji = {
+            "ok": "🟢",
+            "expiring": "⚠️",
+            "expired": "🔴",
+            "invalid": "🔴",
+            "error": "⚠️",
+        }.get(item.status, "⚠️")
+        if item.status == "expired":
+            state = "просрочен"
+        elif item.status == "expiring":
+            hours = max(0, int(item.remaining_seconds) // 3600)
+            state = f"истекает через {hours} ч."
+        elif item.status == "invalid":
+            state = "невалиден"
+        elif item.status == "ok":
+            state = "действителен"
+        else:
+            state = "проверка не удалась"
+        lines.append(f"{emoji} <code>{html_escape(item.domain)}:{item.port}</code> — <b>{html_escape(state)}</b>")
+        if item.not_after:
+            lines.append(f"   до <code>{html_escape(_format_tls_expiry(item.not_after))}</code>")
+        if item.error:
+            lines.append(f"   <i>{html_escape(item.error[:300])}</i>")
+    return lines
 
 
 def _dns_error_block(snapshot: StatusSnapshot) -> list[str]:
@@ -131,6 +221,7 @@ def _format_offline_message(snapshot: StatusSnapshot) -> str:
     if dns_line:
         lines.append(dns_line)
     lines.extend(_dns_error_block(snapshot))
+    lines.extend(_tls_block(snapshot))
     lines.append("")
     lines.append(footer_updated(snapshot.now_text))
     return "\n".join(lines)
@@ -150,6 +241,7 @@ def _format_metrics_error_message(snapshot: StatusSnapshot) -> str:
     if dns_line:
         lines.append(dns_line)
     lines.extend(_dns_error_block(snapshot))
+    lines.extend(_tls_block(snapshot))
     lines.extend(["", footer_updated(snapshot.now_text)])
     return "\n".join(lines)
 
@@ -195,16 +287,28 @@ def format_status_message(snapshot: StatusSnapshot) -> str:
         lines.append(f"👥 Онлайн пользователей: <b>{int(snapshot.online_users)}</b>")
 
     lines.extend(_dns_error_block(snapshot))
+    lines.extend(_tls_block(snapshot))
 
     if snapshot.show_containers_block:
         lines.append("")
         lines.append(section("Контейнеры", "🐳"))
         if snapshot.containers:
             for c in snapshot.containers:
-                emoji = "🟢" if c.is_up else "🔴"
-                lines.append(f"{emoji} {html_escape(c.name)}")
+                status = (c.status_text or "н/д").strip()
+                status_lower = status.lower()
+                if (
+                    "unhealthy" in status_lower
+                    or status_lower == "не найден"
+                    or "недоступен" in status_lower
+                    or "ssh ошибка" in status_lower
+                    or status_lower.startswith("ошибка:")
+                ):
+                    emoji = "⚠️"
+                else:
+                    emoji = "🟢" if c.is_up else "🔴"
+                lines.append(f"{emoji} {html_escape(c.name)} — <i>{html_escape(status)}</i>")
         else:
-            lines.append("⚠️ Контейнеры не настроены")
+            lines.append("🟢 Docker доступен, контейнеров нет")
 
     lines.append("")
     lines.append(footer_updated(snapshot.now_text))

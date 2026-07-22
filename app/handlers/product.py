@@ -10,16 +10,13 @@ from telegram.constants import ParseMode
 from telegram.ext import ContextTypes, ConversationHandler
 
 from ..config import TZ, logger
+from ..service_plan import PLAN_MONTHS, PLAN_TOTAL_RUB
 from ..services.outbox import message_payload
 from ..staff import (
-    REGULAR_STAFF_TITLES,
-    STAFF_DISPLAY_TITLE,
-    STAFF_DISPLAY_TITLE_ALIAS,
-    STAFF_TITLE_LABELS,
     is_admin_meta,
+    is_billing_exempt_meta,
     is_lead_or_owner_meta,
     is_owner_meta,
-    normalize_staff_alias,
     staff_internal_identity,
     staff_public_signature,
     staff_title_label,
@@ -56,10 +53,6 @@ from .subscription import (
 )
 
 PRODUCT_INPUT, PRODUCT_CONFIRM = range(2)
-
-PLAN_MONTHS = 3
-PLAN_MONTHLY_RUB = 100
-PLAN_TOTAL_RUB = PLAN_MONTHS * PLAN_MONTHLY_RUB
 REQUEST_CLAIM_TIMEOUT = timedelta(minutes=15)
 ACTIVE_REQUEST_STATUSES = {
     "pending",
@@ -275,6 +268,11 @@ def _real_user_name(meta: dict[str, Any]) -> str:
     return name[:160] or "не указано"
 
 
+def _user_nickname(meta: dict[str, Any]) -> str:
+    nickname = str(meta.get("nickname") or "").strip()
+    return nickname[:160] or _real_user_name(meta)
+
+
 def _request_card(request: dict[str, Any], meta: dict[str, Any]) -> str:
     username = str(meta.get("username") or "").strip().lstrip("@")
     comment = str(request.get("comment") or "").strip()
@@ -282,9 +280,11 @@ def _request_card(request: dict[str, Any], meta: dict[str, Any]) -> str:
         f"📥 <b>{html_escape(_request_kind_label(request.get('kind')))}</b> · #{request.get('id')}",
         "",
         f"• Статус: <b>{html_escape(_request_status_label(request.get('status')))}</b>",
-        f"• Пользователь: <b>{html_escape(_real_user_name(meta))}</b>",
+        f"• Никнейм: <b>{html_escape(_user_nickname(meta))}</b>",
+        f"• Имя Telegram: <b>{html_escape(_real_user_name(meta))}</b>",
         f"• Username: <code>{html_escape('@' + username if username else '-')}</code>",
         f"• Telegram ID: <code>{html_escape(str(meta.get('user_id') or request.get('user_id')))}</code>",
+        f"• Резервная почта: <code>{html_escape(str(meta.get('contact_email') or '-'))}</code>",
         f"• Допущен: <code>{html_escape(_dt_text(meta.get('auth_at')))}</code>",
         f"• Уровень: <b>{html_escape(_service_tier_label(meta.get('service_tier')))}</b>",
         f"• Оплата: <b>{'подтверждена' if meta.get('is_paid') else 'не подтверждена'}</b>",
@@ -394,37 +394,6 @@ def _actor_meta(update: Update) -> dict[str, Any] | None:
     return get_user_meta_copy(uid) if uid is not None else None
 
 
-def _user_profile_text(meta: dict[str, Any]) -> str:
-    username = str(meta.get("username") or "").strip().lstrip("@")
-    lines = [
-        "👤 <b>Профиль</b>",
-        "",
-        f"• Имя: <b>{html_escape(_real_user_name(meta))}</b>",
-        f"• Username: <code>{html_escape('@' + username if username else '-')}</code>",
-        f"• Уровень: <b>{html_escape(_service_tier_label(meta.get('service_tier')))}</b>",
-        f"• Оплата: <b>{'подтверждена' if meta.get('is_paid') else 'не подтверждена'}</b>",
-        f"• Дата оплаты: <code>{html_escape(_dt_text(meta.get('paid_at')))}</code>",
-        f"• Доступ до: <code>{html_escape(_dt_text(meta.get('subscription_end_at')))}</code>",
-        f"• Персональная ссылка: <b>{'назначена' if has_connection(meta) else 'не назначена'}</b>",
-        f"• Тестовый доступ: <b>{'выдавался' if meta.get('trial_issued_at') else 'не выдавался'}</b>",
-    ]
-    return "\n".join(lines)
-
-
-@require_auth
-async def product_profile_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    meta = _actor_meta(update)
-    if not query or not meta:
-        return
-    await query.answer()
-    await query.edit_message_text(
-        _user_profile_text(meta),
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Меню", callback_data="menu:home")]]),
-    )
-
-
 @require_auth
 async def trial_request_start_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
@@ -464,7 +433,7 @@ async def purchase_show_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not query or not meta:
         return
     await query.answer()
-    if meta.get("role") == "admin" or meta.get("service_tier") != "basic":
+    if is_billing_exempt_meta(meta) or meta.get("service_tier") != "basic":
         await query.edit_message_text("Покупка доступна пользователям с базовым доступом.")
         return
     settings = product_settings_snapshot()
@@ -507,13 +476,13 @@ async def purchase_create_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     await query.answer()
     uid = int(actor.get("user_id") or 0)
-    if actor.get("role") == "admin" or actor.get("service_tier") != "basic":
+    if is_billing_exempt_meta(actor) or actor.get("service_tier") != "basic":
         await query.edit_message_text("Заявка больше недоступна для вашего уровня доступа.")
         return
 
     def _create(cfg: UserData) -> tuple[str, int | None]:
         current = cfg.authorized_users.get(str(uid))
-        if not isinstance(current, dict) or current.get("service_tier") != "basic":
+        if not isinstance(current, dict) or is_billing_exempt_meta(current) or current.get("service_tier") != "basic":
             return "denied", None
         existing = _active_request(cfg, user_id=uid, kind="purchase")
         if existing:
@@ -569,7 +538,7 @@ async def product_requests_cb(update: Update, context: ContextTypes.DEFAULT_TYPE
         user_id = int(request.get("user_id", 0) or 0)
         meta = get_user_meta_copy(user_id) or {}
         icon = {"trial": "🧪", "purchase": "💳", "renewal": "🔄"}.get(str(request.get("kind")), "📄")
-        label = f"{icon} #{request_id} {_real_user_name(meta)} · {_request_status_label(request.get('status'))}"
+        label = f"{icon} #{request_id} {_user_nickname(meta)} · {_request_status_label(request.get('status'))}"
         rows.append([InlineKeyboardButton(label[:60], callback_data=f"product:req:view:{request_id}")])
     if not requests:
         lines.extend(["", "Новых заявок нет."])
@@ -812,6 +781,8 @@ def _finalize_payment(
     current = cfg.authorized_users.get(str(uid))
     if not isinstance(current, dict):
         raise ValueError("user_missing")
+    if is_billing_exempt_meta(current):
+        raise ValueError("billing_exempt")
     target = _parse_dt(request.get("target_end_at"))
     if target is None or target <= _now():
         raise ValueError("invalid_target")
@@ -973,7 +944,7 @@ async def product_request_action_cb(update: Update, context: ContextTypes.DEFAUL
             current = cfg.authorized_users.get(str(uid))
             if not isinstance(current, dict):
                 return "missing", request
-            if current.get("role") == "admin" or current.get("service_tier") != "basic":
+            if is_billing_exempt_meta(current) or current.get("service_tier") != "basic":
                 _cancel_active_requests(cfg, user_id=uid, reason="service_tier_changed", kinds={"purchase"})
                 return "tier_changed", request
             target = _parse_dt(request.get("target_end_at"))
@@ -1165,146 +1136,6 @@ async def product_request_action_cb(update: Update, context: ContextTypes.DEFAUL
     return ConversationHandler.END
 
 
-def _staff_profile_text(meta: dict[str, Any]) -> str:
-    mode = (
-        "только должность" if meta.get("staff_display_mode") != STAFF_DISPLAY_TITLE_ALIAS else "должность и псевдоним"
-    )
-    return (
-        "👤 <b>Профиль сотрудника</b>\n\n"
-        f"• Публичная подпись: <b>{html_escape(staff_public_signature(meta))}</b>\n"
-        f"• Должность: <b>{html_escape(staff_title_label(meta))}</b>\n"
-        f"• Псевдоним: <b>{html_escape(str(meta.get('staff_alias') or '-'))}</b>\n"
-        f"• Режим: <b>{html_escape(mode)}</b>\n\n"
-        f"• Внутренняя личность: <code>{html_escape(staff_internal_identity(meta))}</code>"
-    )
-
-
-def _staff_profile_markup(meta: dict[str, Any]) -> InlineKeyboardMarkup:
-    rows = [
-        [InlineKeyboardButton("🏷 Изменить псевдоним", callback_data="staff:alias")],
-        [
-            InlineKeyboardButton("Только должность", callback_data="staff:mode:title"),
-            InlineKeyboardButton("Должность + псевдоним", callback_data="staff:mode:title_alias"),
-        ],
-    ]
-    if is_lead_or_owner_meta(meta):
-        rows.append(
-            [
-                InlineKeyboardButton("📅 Массовая дата", callback_data="product:input:massdate"),
-                InlineKeyboardButton("🔔 Массово напомнить", callback_data="product:input:massremind"),
-            ]
-        )
-    if is_owner_meta(meta):
-        rows.append([InlineKeyboardButton("⚙️ Настройки сервиса", callback_data="product:owner")])
-    rows.append([InlineKeyboardButton("🏠 Меню", callback_data="menu:home")])
-    return InlineKeyboardMarkup(rows)
-
-
-@require_admin
-async def staff_profile_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    actor = _actor_meta(update)
-    if not query or not actor:
-        return
-    await query.answer()
-    await query.edit_message_text(
-        _staff_profile_text(actor),
-        parse_mode=ParseMode.HTML,
-        reply_markup=_staff_profile_markup(actor),
-    )
-
-
-@require_admin
-async def staff_mode_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    actor = _actor_meta(update)
-    if not query or not actor:
-        return
-    match = re.fullmatch(r"staff:mode:(title|title_alias)", query.data or "")
-    if not match:
-        return
-    await query.answer()
-    mode = match.group(1)
-    if mode == STAFF_DISPLAY_TITLE_ALIAS and not actor.get("staff_alias"):
-        await query.edit_message_text(
-            "Сначала задайте псевдоним.",
-            reply_markup=_staff_profile_markup(actor),
-        )
-        return
-    uid = int(actor.get("user_id") or 0)
-    updated = await update_user_data(lambda cfg: _update_staff_mode(cfg, uid=uid, mode=mode))
-    await query.edit_message_text(
-        _staff_profile_text(updated),
-        parse_mode=ParseMode.HTML,
-        reply_markup=_staff_profile_markup(updated),
-    )
-
-
-def _update_staff_mode(cfg: UserData, *, uid: int, mode: str) -> dict[str, Any]:
-    current = cfg.authorized_users.get(str(uid))
-    if not isinstance(current, dict) or current.get("role") != "admin":
-        raise ValueError("admin_missing")
-    old_mode = str(current.get("staff_display_mode") or STAFF_DISPLAY_TITLE)
-    updated = UserData._normalize_user({**current, "staff_display_mode": mode})
-    cfg.authorized_users[str(uid)] = updated
-    append_audit_entry(
-        cfg,
-        action="staff_display_mode_changed",
-        actor_meta=updated,
-        target_user_id=uid,
-        details={"old": old_mode, "new": updated.get("staff_display_mode")},
-    )
-    return updated
-
-
-def _owner_panel_text(settings: dict[str, Any]) -> str:
-    return (
-        "⚙️ <b>Настройки сервиса</b>\n\n"
-        f"• Банк: <b>{html_escape(str(settings.get('payment_bank') or '-'))}</b>\n"
-        f"• Получатель: <b>{html_escape(str(settings.get('payment_recipient') or '-'))}</b>\n"
-        f"• Телефон: <code>{html_escape(str(settings.get('payment_phone') or '-'))}</code>\n"
-        f"• Тариф: <b>{PLAN_TOTAL_RUB} ₽ / {PLAN_MONTHS} месяца</b>\n\n"
-        f"• Текущий период до: <code>{html_escape(_dt_text(settings.get('current_period_end')))}</code>\n"
-        f"• Следующий период до: <code>{html_escape(_dt_text(settings.get('next_period_end')))}</code>\n\n"
-        "Изменение следующего периода не продлевает пользователей автоматически."
-    )
-
-
-def _owner_panel_markup() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton("🏦 Банк", callback_data="product:input:setting_bank"),
-                InlineKeyboardButton("👤 Получатель", callback_data="product:input:setting_recipient"),
-            ],
-            [InlineKeyboardButton("📱 Телефон", callback_data="product:input:setting_phone")],
-            [
-                InlineKeyboardButton("📅 Текущий период", callback_data="product:input:setting_current"),
-                InlineKeyboardButton("⏭ Следующий период", callback_data="product:input:setting_next"),
-            ],
-            [InlineKeyboardButton("⬅️ Профиль сотрудника", callback_data="staff:profile")],
-            [InlineKeyboardButton("🏠 Меню", callback_data="menu:home")],
-        ]
-    )
-
-
-@require_admin
-async def owner_panel_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    actor = _actor_meta(update)
-    if not query or not actor:
-        return
-    await query.answer()
-    if not is_owner_meta(actor):
-        await query.edit_message_text("Доступно только руководителю сервиса.")
-        return
-    await query.edit_message_text(
-        _owner_panel_text(product_settings_snapshot()),
-        parse_mode=ParseMode.HTML,
-        reply_markup=_owner_panel_markup(),
-    )
-
-
 @require_admin
 async def product_manage_user_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
@@ -1321,111 +1152,39 @@ async def product_manage_user_cb(update: Update, context: ContextTypes.DEFAULT_T
         await query.edit_message_text("Пользователь не найден.")
         return
     rows: list[list[InlineKeyboardButton]] = []
-    if is_lead_or_owner_meta(actor):
+    billing_exempt = is_billing_exempt_meta(target)
+    if is_lead_or_owner_meta(actor) and not billing_exempt:
         rows.append(
             [
                 InlineKeyboardButton("📅 Изменить дату", callback_data=f"product:input:user_end:{uid}"),
                 InlineKeyboardButton("🔔 Напомнить", callback_data=f"product:remind:{uid}"),
             ]
         )
-    if is_owner_meta(actor):
+    if is_owner_meta(actor) and not billing_exempt:
         rows.append(
             [InlineKeyboardButton("💰 Подтвердить оплату вручную", callback_data=f"product:input:manualpay:{uid}")]
         )
-        rows.append(
-            [
-                InlineKeyboardButton("Базовый", callback_data=f"product:tier:{uid}:basic"),
-                InlineKeyboardButton("Безлимитный", callback_data=f"product:tier:{uid}:unlimited_trial"),
-            ]
-        )
-        if is_admin_meta(target) and not is_owner_meta(target):
-            rows.append([InlineKeyboardButton("🪪 Изменить должность", callback_data=f"product:titlemenu:{uid}")])
+        if not is_admin_meta(target):
+            rows.append(
+                [
+                    InlineKeyboardButton("Базовый", callback_data=f"product:tier:{uid}:basic"),
+                    InlineKeyboardButton("Безлимитный", callback_data=f"product:tier:{uid}:unlimited_trial"),
+                ]
+            )
+    if is_owner_meta(actor) and is_admin_meta(target) and not is_owner_meta(target):
+        rows.append([InlineKeyboardButton("🪪 Изменить должность", callback_data=f"administration:title:{uid}")])
     rows.append([InlineKeyboardButton("⬅️ Профиль пользователя", callback_data=f"users:user:{uid}")])
     rows.append([InlineKeyboardButton("🏠 Меню", callback_data="menu:home")])
     text = (
         "⚙️ <b>Управление доступом</b>\n\n"
-        f"• Пользователь: <b>{html_escape(_real_user_name(target))}</b>\n"
+        f"• Никнейм: <b>{html_escape(_user_nickname(target))}</b>\n"
+        f"• Имя Telegram: <b>{html_escape(_real_user_name(target))}</b>\n"
         f"• ID: <code>{uid}</code>\n"
         f"• Уровень: <b>{html_escape(_service_tier_label(target.get('service_tier')))}</b>\n"
-        f"• Оплата: <b>{'подтверждена' if target.get('is_paid') else 'не подтверждена'}</b>\n"
-        f"• Доступ до: <code>{html_escape(_dt_text(target.get('subscription_end_at')))}</code>"
+        f"• Оплата: <b>{'бессрочная — руководитель сервиса' if billing_exempt else ('подтверждена' if target.get('is_paid') else 'не подтверждена')}</b>\n"
+        f"• Доступ до: <code>{html_escape('бессрочно' if billing_exempt else _dt_text(target.get('subscription_end_at')))}</code>"
     )
     await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(rows))
-
-
-@require_admin
-async def product_title_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    actor = _actor_meta(update)
-    if not query or not actor:
-        return
-    match = re.fullmatch(r"product:titlemenu:(\d+)", query.data or "")
-    if not match:
-        return
-    await query.answer()
-    if not is_owner_meta(actor):
-        await query.edit_message_text("Доступно только руководителю сервиса.")
-        return
-    uid = int(match.group(1))
-    target = get_user_meta_copy(uid)
-    if not target or not is_admin_meta(target) or is_owner_meta(target):
-        await query.edit_message_text("Должность этого пользователя изменить нельзя.")
-        return
-    rows = [
-        [InlineKeyboardButton(STAFF_TITLE_LABELS[code], callback_data=f"product:title:{uid}:{code}")]
-        for code in REGULAR_STAFF_TITLES
-    ]
-    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"product:manage:{uid}")])
-    await query.edit_message_text(
-        f"🪪 <b>Должность сотрудника</b>\n\nТекущая: <b>{html_escape(staff_title_label(target))}</b>",
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(rows),
-    )
-
-
-@require_admin
-async def product_title_apply_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    actor = _actor_meta(update)
-    if not query or not actor:
-        return
-    match = re.fullmatch(r"product:title:(\d+):([a-z_]+)", query.data or "")
-    if not match:
-        return
-    await query.answer()
-    if not is_owner_meta(actor):
-        await query.edit_message_text("Доступно только руководителю сервиса.")
-        return
-    uid = int(match.group(1))
-    title_code = match.group(2)
-    if title_code not in REGULAR_STAFF_TITLES:
-        await query.edit_message_text("Неизвестная должность.")
-        return
-
-    def _apply(cfg: UserData) -> dict[str, Any] | None:
-        target = cfg.authorized_users.get(str(uid))
-        if not isinstance(target, dict) or not is_admin_meta(target) or is_owner_meta(target):
-            return None
-        old_title = staff_title_label(target)
-        updated = UserData._normalize_user({**target, "staff_title": title_code})
-        cfg.authorized_users[str(uid)] = updated
-        append_audit_entry(
-            cfg,
-            action="staff_title_changed",
-            actor_meta=actor,
-            target_user_id=uid,
-            details={"old": old_title, "new": STAFF_TITLE_LABELS[title_code]},
-        )
-        return updated
-
-    updated = await update_user_data(_apply)
-    if not updated:
-        await query.edit_message_text("Сотрудник не найден.")
-        return
-    await query.edit_message_text(
-        ui_ok_text(f"Должность изменена: {STAFF_TITLE_LABELS[title_code]}"),
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=f"product:manage:{uid}")]]),
-    )
 
 
 @require_admin
@@ -1492,29 +1251,7 @@ async def product_input_start_cb(update: Update, context: ContextTypes.DEFAULT_T
     action = ""
     target_uid: int | None = None
     prompt = ""
-    if data == "staff:alias":
-        action = "staff_alias"
-        prompt = "Введите псевдоним длиной от 2 до 32 символов. Для удаления отправьте один дефис: <code>-</code>"
-    elif data in {
-        "product:input:setting_bank",
-        "product:input:setting_recipient",
-        "product:input:setting_phone",
-        "product:input:setting_current",
-        "product:input:setting_next",
-    }:
-        if not is_owner_meta(actor):
-            await query.answer("Доступно только руководителю сервиса.", show_alert=True)
-            return ConversationHandler.END
-        action = data.removeprefix("product:input:")
-        prompts = {
-            "setting_bank": "Введите название банка:",
-            "setting_recipient": "Введите имя получателя платежа:",
-            "setting_phone": "Введите номер телефона для перевода:",
-            "setting_current": "Введите окончание текущего периода в формате <code>ДД.ММ.ГГГГ ЧЧ:ММ</code>:",
-            "setting_next": "Введите окончание следующего периода в формате <code>ДД.ММ.ГГГГ ЧЧ:ММ</code>:",
-        }
-        prompt = prompts[action]
-    elif data == "product:input:massdate":
+    if data == "product:input:massdate":
         if not is_lead_or_owner_meta(actor):
             await query.answer("Недостаточно прав.", show_alert=True)
             return ConversationHandler.END
@@ -1547,6 +1284,10 @@ async def product_input_start_cb(update: Update, context: ContextTypes.DEFAULT_T
             return ConversationHandler.END
         if action == "manualpay" and not is_owner_meta(actor):
             await query.answer("Оплату подтверждает только руководитель сервиса.", show_alert=True)
+            return ConversationHandler.END
+        target = get_user_meta_copy(target_uid)
+        if action == "manualpay" and is_billing_exempt_meta(target):
+            await query.answer("У руководителя сервиса бессрочный оплаченный доступ.", show_alert=True)
             return ConversationHandler.END
         prompt = (
             "Введите новую дату окончания в формате <code>ДД.ММ.ГГГГ ЧЧ:ММ</code>:"
@@ -1655,7 +1396,7 @@ async def _complete_connection_input(
 
 
 def _is_paid_subscriber(meta: dict[str, Any]) -> bool:
-    return bool(meta.get("role") != "admin" and meta.get("service_tier") == "subscriber" and meta.get("is_paid"))
+    return bool(not is_billing_exempt_meta(meta) and meta.get("service_tier") == "subscriber" and meta.get("is_paid"))
 
 
 def _eligible_paid_subscriber(meta: dict[str, Any]) -> bool:
@@ -1817,72 +1558,6 @@ async def product_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await message.reply_text("Административное действие больше недоступно.")
         return ConversationHandler.END
 
-    if action == "staff_alias":
-        cleaned_alias = " ".join(text.split())
-        if cleaned_alias != "-" and len(cleaned_alias) > 32:
-            await message.reply_text("Псевдоним слишком длинный. Максимум 32 символа.")
-            return PRODUCT_INPUT
-        alias = None if cleaned_alias == "-" else normalize_staff_alias(cleaned_alias)
-        if alias is not None and len(alias) < 2:
-            await message.reply_text("Псевдоним слишком короткий. Минимум 2 символа.")
-            return PRODUCT_INPUT
-        uid = int(actor.get("user_id") or 0)
-
-        def _alias(cfg: UserData) -> dict[str, Any]:
-            current = cfg.authorized_users.get(str(uid))
-            if not isinstance(current, dict) or current.get("role") != "admin":
-                raise ValueError("admin_missing")
-            old_alias = current.get("staff_alias")
-            mode = current.get("staff_display_mode")
-            if alias is None:
-                mode = STAFF_DISPLAY_TITLE
-            updated = UserData._normalize_user({**current, "staff_alias": alias, "staff_display_mode": mode})
-            cfg.authorized_users[str(uid)] = updated
-            append_audit_entry(
-                cfg,
-                action="staff_alias_changed",
-                actor_meta=updated,
-                target_user_id=uid,
-                details={"old": old_alias, "new": alias},
-            )
-            return updated
-
-        updated = await update_user_data(_alias)
-        _clear_product_context(context)
-        await message.reply_text(
-            _staff_profile_text(updated),
-            parse_mode=ParseMode.HTML,
-            reply_markup=_staff_profile_markup(updated),
-        )
-        return ConversationHandler.END
-
-    if action in {"setting_bank", "setting_recipient", "setting_phone"}:
-        if not is_owner_meta(actor):
-            _clear_product_context(context)
-            await message.reply_text("Доступно только руководителю сервиса.")
-            return ConversationHandler.END
-        limits = {"setting_bank": 160, "setting_recipient": 160, "setting_phone": 80}
-        if len(text) > limits[action]:
-            await message.reply_text("Значение слишком длинное.")
-            return PRODUCT_INPUT
-        key = {
-            "setting_bank": "payment_bank",
-            "setting_recipient": "payment_recipient",
-            "setting_phone": "payment_phone",
-        }[action]
-
-        def _setting(cfg: UserData) -> dict[str, Any]:
-            cfg.product_settings[key] = " ".join(text.split())
-            append_audit_entry(cfg, action=f"{key}_changed", actor_meta=actor, details={"value": "обновлено"})
-            return dict(cfg.product_settings)
-
-        settings = await update_user_data(_setting)
-        _clear_product_context(context)
-        await message.reply_text(
-            _owner_panel_text(settings), parse_mode=ParseMode.HTML, reply_markup=_owner_panel_markup()
-        )
-        return ConversationHandler.END
-
     if action == "mass_reminder":
         targets: list[int] = []
         snapshot = authorized_users_snapshot()
@@ -1964,12 +1639,12 @@ async def product_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return PRODUCT_CONFIRM
 
-    if action in {"setting_current", "setting_next", "user_end", "manualpay"}:
+    if action in {"user_end", "manualpay"}:
         target_dt = _parse_input_dt(text)
         if target_dt is None:
             await message.reply_text("Некорректная дата. Используйте ДД.ММ.ГГГГ ЧЧ:ММ.")
             return PRODUCT_INPUT
-        if action in {"setting_current", "setting_next", "manualpay"} and target_dt <= _now():
+        if action == "manualpay" and target_dt <= _now():
             await message.reply_text("Для этого действия дата должна находиться в будущем.")
             return PRODUCT_INPUT
         pending: dict[str, Any] = {"kind": action, "target_end_at": target_dt.isoformat()}
@@ -1986,16 +1661,17 @@ async def product_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 return PRODUCT_INPUT
         if action == "manualpay":
             target = get_user_meta_copy(int(target_uid or 0))
-            if not target or target.get("role") == "admin":
+            if not target:
                 await message.reply_text("Пользователь не найден.")
+                return PRODUCT_INPUT
+            if is_billing_exempt_meta(target):
+                await message.reply_text("У руководителя сервиса бессрочный оплаченный доступ.")
                 return PRODUCT_INPUT
             if not has_connection(target):
                 await message.reply_text("Сначала назначьте пользователю персональную ссылку подключения.")
                 return PRODUCT_INPUT
         data[_CTX_PENDING] = pending
         labels = {
-            "setting_current": "Текущий период",
-            "setting_next": "Следующий период",
             "user_end": "Дата окончания пользователя",
             "manualpay": "Ручное подтверждение оплаты",
         }
@@ -2029,46 +1705,6 @@ async def product_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return ConversationHandler.END
     kind = str(pending.get("kind") or "")
     target_dt = _parse_dt(pending.get("target_end_at"))
-
-    if kind in {"setting_current", "setting_next"}:
-        if not is_owner_meta(actor) or target_dt is None or target_dt <= _now():
-            await query.edit_message_text("Изменение больше недоступно или дата устарела.")
-            _clear_product_context(context)
-            return ConversationHandler.END
-
-        def _period(cfg: UserData) -> tuple[str, dict[str, Any]]:
-            current = _parse_dt(cfg.product_settings.get("current_period_end"))
-            next_end = _parse_dt(cfg.product_settings.get("next_period_end"))
-            if kind == "setting_current" and next_end and target_dt >= next_end:
-                return "order", dict(cfg.product_settings)
-            if kind == "setting_next" and current is None:
-                return "missing_current", dict(cfg.product_settings)
-            if kind == "setting_next" and current and target_dt <= current:
-                return "order", dict(cfg.product_settings)
-            key = "current_period_end" if kind == "setting_current" else "next_period_end"
-            old = cfg.product_settings.get(key)
-            cfg.product_settings[key] = target_dt.isoformat()
-            cfg.product_settings["period_setup_reminder_for"] = None
-            cfg.product_settings["period_missing_notice_for"] = None
-            append_audit_entry(
-                cfg,
-                action=f"{key}_changed",
-                actor_meta=actor,
-                details={"old": old, "new": target_dt.isoformat()},
-            )
-            return "updated", dict(cfg.product_settings)
-
-        outcome, settings = await update_user_data(_period)
-        _clear_product_context(context)
-        if outcome == "order":
-            await query.edit_message_text("Следующий период должен заканчиваться позже текущего.")
-        elif outcome == "missing_current":
-            await query.edit_message_text("Сначала укажите дату окончания текущего периода.")
-        else:
-            await query.edit_message_text(
-                _owner_panel_text(settings), parse_mode=ParseMode.HTML, reply_markup=_owner_panel_markup()
-            )
-        return ConversationHandler.END
 
     if kind == "user_end":
         if not is_lead_or_owner_meta(actor) or target_dt is None:
@@ -2124,8 +1760,10 @@ async def product_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
         def _manual_payment(cfg: UserData) -> tuple[str, dict[str, Any] | None]:
             current = cfg.authorized_users.get(str(uid))
-            if not isinstance(current, dict) or current.get("role") == "admin":
+            if not isinstance(current, dict):
                 return "missing", None
+            if is_billing_exempt_meta(current):
+                return "billing_exempt", current
             if not has_connection(current):
                 return "connection_missing", current
             request = _new_request(
@@ -2143,6 +1781,7 @@ async def product_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
         messages = {
             "updated": "Оплата зарегистрирована, доступ пользователя активирован.",
             "connection_missing": "Сначала назначьте персональную ссылку подключения.",
+            "billing_exempt": "У руководителя сервиса бессрочный оплаченный доступ.",
             "missing": "Пользователь не найден.",
         }
         await query.edit_message_text(
@@ -2278,6 +1917,7 @@ def _automatic_reminder_text(meta: dict[str, Any], settings: dict[str, Any], rem
     heading = {
         "3d": "Срок оплаченного доступа завершится через 3 дня.",
         "1d": "Срок оплаченного доступа завершится через 1 день.",
+        "15m": "‼️ Срок оплаченного доступа завершится менее чем через 15 минут.",
     }[reminder_type]
     target = _payment_target(settings, after=_parse_dt(meta.get("subscription_end_at")) or _now())
     lines = [
@@ -2424,7 +2064,11 @@ async def subscription_lifecycle_job(context: ContextTypes.DEFAULT_TYPE) -> None
             if current.get("access_state") != "approved" or not bool(current.get("enabled", True)):
                 continue
             remaining = end - now
-            reminder_type = "1d" if remaining <= timedelta(days=1) else ("3d" if remaining <= timedelta(days=3) else "")
+            reminder_type = (
+                "15m"
+                if remaining <= timedelta(minutes=15)
+                else ("1d" if remaining <= timedelta(days=1) else ("3d" if remaining <= timedelta(days=3) else ""))
+            )
             if not reminder_type:
                 continue
             reminder_key = f"{end.isoformat()}:{reminder_type}"

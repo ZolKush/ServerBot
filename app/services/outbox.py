@@ -13,7 +13,7 @@ from telegram.constants import ParseMode
 from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter, TimedOut
 
 from ..config import logger
-from ..storage import finalize_outbox_event, mutate_outbox_event, outbox_snapshot
+from ..storage import finalize_outbox_event, get_user_meta_copy, mutate_outbox_event, outbox_snapshot
 from .telegram_rate import extend_flood_gate, retry_after_seconds, wait_flood_gate
 
 _PROCESS_LOCK = asyncio.Lock()
@@ -252,6 +252,25 @@ async def process_outbox(bot) -> int:
                 try:
                     uid = int(uid_text)
                 except (TypeError, ValueError):
+                    continue
+                meta = get_user_meta_copy(uid)
+                if (
+                    isinstance(meta, dict)
+                    and meta.get("access_state") == "blocked"
+                    and not bool(event.get("allow_blocked_delivery", False))
+                ):
+                    updated_event = await mutate_outbox_event(
+                        source,
+                        event_id,
+                        _recipient_mutation(
+                            uid,
+                            status="terminal",
+                            attempts=max(0, int(raw_state.get("attempts", 0) or 0)),
+                            error="delivery suppressed: recipient is blocked",
+                        ),
+                    )
+                    await _finalize_if_done(source, event_id, updated_event)
+                    processed += 1
                     continue
                 try:
                     attempts = max(0, int(raw_state.get("attempts", 0) or 0)) + 1

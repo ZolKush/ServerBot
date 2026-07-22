@@ -10,6 +10,19 @@ class DockerContainerView:
 
 
 @dataclass(frozen=True)
+class TLSCertificateView:
+    domain: str
+    port: int
+    status: str
+    not_after: str = ""
+    remaining_seconds: int = 0
+    hostname_valid: bool = False
+    trust_valid: bool = False
+    error: str = ""
+    checked_at: str = ""
+
+
+@dataclass(frozen=True)
 class StatusSnapshot:
     title: str
     server_label: str
@@ -28,6 +41,7 @@ class StatusSnapshot:
     ufw_deny: list[str] = field(default_factory=list)
     ufw_reject: list[str] = field(default_factory=list)
     containers: list[DockerContainerView] = field(default_factory=list)
+    tls_certificates: list[TLSCertificateView] = field(default_factory=list)
     admin_mode: bool = False
     # mixed-mode (RemnaWave metrics) extras
     source_mode: str = "ssh"  # "ssh" | "mixed"

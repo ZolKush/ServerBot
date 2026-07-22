@@ -17,6 +17,11 @@ def is_valid_container_name(name: str) -> bool:
     return bool(nm and _CONTAINER_NAME_RE.fullmatch(nm))
 
 
+def docker_status_is_running(status: object) -> bool:
+    normalized = str(status or "").strip().lower()
+    return normalized.startswith("up") and "paused" not in normalized
+
+
 def _docker_cmds(*args: str) -> list[list[str]]:
     bases: list[str] = []
     for candidate in [DOCKER_BIN, "/usr/bin/docker", "docker"]:
@@ -96,13 +101,22 @@ async def docker_containers(names: Sequence[str]) -> list[tuple[str, bool, str, 
             break
     info: dict[str, str] = {}
     if rc != 0:
-        return [(n, False, "docker недоступен", "-") for n in names]
+        configured = [n for n in names if n]
+        return [(n, False, "docker недоступен", "-") for n in configured] or [
+            ("Docker API", False, "docker недоступен", "-")
+        ]
     for line in out.splitlines():
         parts = line.split("|", 1)
         if len(parts) == 2:
             info[parts[0].strip()] = parts[1].strip()
 
-    result: list[tuple[str, bool, str, str]] = []
+    # The status screen represents the complete Docker inventory. The configured
+    # list remains useful for detecting an expected container that disappeared,
+    # while containers not listed in MONITOR_CONTAINERS still contribute to the
+    # running/stopped/health totals.
+    result: list[tuple[str, bool, str, str]] = [
+        (container_name, docker_status_is_running(status), status, "-") for container_name, status in info.items()
+    ]
     for n in names:
         st = info.get(n)
         if st is None:
@@ -112,8 +126,6 @@ async def docker_containers(names: Sequence[str]) -> list[tuple[str, bool, str, 
             result.append((n, False, "не найден", "-"))
         else:
             _REPORTED_MISSING.discard(n)
-            up = st.lower().startswith("up")
-            result.append((n, up, st, "-"))
     return result
 
 

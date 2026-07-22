@@ -104,6 +104,28 @@ def is_lead_or_owner_meta(meta: dict[str, Any] | None) -> bool:
     return bool(is_owner_meta(meta) or (is_admin_meta(meta) and staff_title_code(meta) == STAFF_TITLE_LEAD))
 
 
+def can_edit_help_meta(meta: dict[str, Any] | None) -> bool:
+    return bool(
+        is_admin_meta(meta) and staff_title_code(meta) in {STAFF_TITLE_MAINTAINER, STAFF_TITLE_LEAD, STAFF_TITLE_OWNER}
+    )
+
+
+def can_manage_subscription_dates_meta(meta: dict[str, Any] | None) -> bool:
+    return is_lead_or_owner_meta(meta)
+
+
+def can_send_payment_reminders_meta(meta: dict[str, Any] | None) -> bool:
+    return is_lead_or_owner_meta(meta)
+
+
+def can_confirm_payments_meta(meta: dict[str, Any] | None) -> bool:
+    return is_owner_meta(meta)
+
+
+def is_billing_exempt_meta(meta: dict[str, Any] | None) -> bool:
+    return is_owner_meta(meta)
+
+
 __all__ = [
     "REGULAR_STAFF_TITLES",
     "STAFF_DISPLAY_MODES",
@@ -115,7 +137,12 @@ __all__ = [
     "STAFF_TITLE_OWNER",
     "STAFF_TITLE_SUPPORT",
     "STAFF_TITLES",
+    "can_confirm_payments_meta",
+    "can_edit_help_meta",
+    "can_manage_subscription_dates_meta",
+    "can_send_payment_reminders_meta",
     "is_admin_meta",
+    "is_billing_exempt_meta",
     "is_lead_or_owner_meta",
     "is_owner_meta",
     "normalize_staff_alias",

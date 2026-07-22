@@ -21,7 +21,7 @@ from ..config import (
     UFW_BIN,
     logger,
 )
-from .docker_service import _parse_docker_inspect_json
+from .docker_service import _parse_docker_inspect_json, docker_status_is_running
 from .system_fail2ban import Fail2banEvent, FileIdentity, parse_fail2ban_events
 from .system_metrics import _fmt_bytes_binary
 from .system_process import run_exec
@@ -279,7 +279,7 @@ async def remote_status_bundle(
                 "    fi",
             ]
         )
-    docker_block_lines.extend(["  fi", "done"])
+    docker_block_lines.extend(["  fi", "done", 'printf "__MBOT_DOCKER_OK__|%s\\n" "$_docker_done"'])
     docker_block = "\n".join(docker_block_lines)
 
     ufw_block_lines: list[str] = [
@@ -317,7 +317,7 @@ echo {_SEC_DOCKER_STATUS}
         return RemoteStatusBundle(
             ok=False,
             error=error,
-            containers=[(n, False, "ssh ошибка", "-") for n in name_list],
+            containers=[(n, False, "ssh ошибка", "-") for n in name_list] or [("Docker API", False, "ssh ошибка", "-")],
         )
     sec = _split_sections(out)
     up = _parse_uptime_from_proc(sec.get(_SEC_UPTIME, "") or "") or "н/д"
@@ -332,20 +332,25 @@ echo {_SEC_DOCKER_STATUS}
         allow, deny, reject = [], [], []
 
     info: dict[str, str] = {}
+    docker_ok = False
     for line in (sec.get(_SEC_DOCKER_STATUS, "") or "").splitlines():
         p = line.split("|", 1)
         if len(p) == 2:
-            info[p[0].strip()] = p[1].strip()
+            key, value = p[0].strip(), p[1].strip()
+            if key == "__MBOT_DOCKER_OK__":
+                docker_ok = value == "1"
+            elif key:
+                info[key] = value
     cont: list[tuple[str, bool, str, str]] = []
-    if not info:
-        cont = [(n, False, "docker недоступен", "-") for n in name_list]
+    if not docker_ok:
+        cont = [(n, False, "docker недоступен", "-") for n in name_list] or [
+            ("Docker API", False, "docker недоступен", "-")
+        ]
     else:
+        cont.extend((name, docker_status_is_running(status), status, "-") for name, status in info.items())
         for n in name_list:
-            st = info.get(n)
-            if st is None:
+            if n not in info:
                 cont.append((n, False, "не найден", "-"))
-            else:
-                cont.append((n, st.lower().startswith("up"), st, "-"))
     return RemoteStatusBundle(
         ok=True,
         uptime=up,
@@ -357,6 +362,67 @@ echo {_SEC_DOCKER_STATUS}
         ufw_deny=deny,
         ufw_reject=reject,
     )
+
+
+async def remote_docker_containers(
+    ssh_target: str,
+    names: Sequence[str],
+) -> list[tuple[str, bool, str, str]]:
+    """Read the complete remote Docker inventory with one fixed SSH command."""
+
+    name_list = [name for name in names if name]
+    docker_candidates: list[str] = []
+    for candidate in [DOCKER_BIN, "/usr/bin/docker", "docker"]:
+        if candidate and candidate not in docker_candidates:
+            docker_candidates.append(candidate)
+    docker_for_loop = " ".join(shlex.quote(candidate) for candidate in docker_candidates) or '""'
+    lines = [
+        "PATH=/usr/sbin:/usr/bin:/sbin:/bin:$PATH; export PATH",
+        "LC_ALL=C; LANG=C; export LC_ALL LANG",
+        "_docker_done=0",
+        f"for d in {docker_for_loop}; do",
+        '  [ -n "$d" ] || continue',
+        '  if command -v "$d" >/dev/null 2>&1 || [ -x "$d" ]; then',
+        "    if \"$d\" ps -a --format '{{.Names}}|{{.Status}}' 2>/dev/null; then",
+        "      _docker_done=1; break",
+        "    fi",
+    ]
+    if SUDO_BIN and PRIVILEGED_HELPER_BIN:
+        lines.extend(
+            [
+                f"    if {shlex.quote(SUDO_BIN)} -n {shlex.quote(PRIVILEGED_HELPER_BIN)} docker-ps 2>/dev/null; then",
+                "      _docker_done=1; break",
+                "    fi",
+            ]
+        )
+    lines.extend(["  fi", "done", 'printf "__MBOT_DOCKER_OK__|%s\\n" "$_docker_done"'])
+    rc, out, err = await ssh_run_shell(
+        ssh_target,
+        "\n".join(lines),
+        timeout=SUBPROC_MEDIUM_TIMEOUT + 4,
+    )
+    if rc != 0:
+        status = f"ssh ошибка: {(err or '').strip() or rc}"
+        return [(name, False, status, "-") for name in name_list] or [("Docker API", False, status, "-")]
+
+    info: dict[str, str] = {}
+    docker_ok = False
+    for line in out.splitlines():
+        parts = line.split("|", 1)
+        if len(parts) != 2:
+            continue
+        key, value = parts[0].strip(), parts[1].strip()
+        if key == "__MBOT_DOCKER_OK__":
+            docker_ok = value == "1"
+        elif key:
+            info[key] = value
+    if not docker_ok:
+        return [(name, False, "docker недоступен", "-") for name in name_list] or [
+            ("Docker API", False, "docker недоступен", "-")
+        ]
+    result = [(name, docker_status_is_running(status), status, "-") for name, status in info.items()]
+    result.extend((name, False, "не найден", "-") for name in name_list if name not in info)
+    return result
 
 
 async def remote_docker_inspect_summary(ssh_target: str, name: str) -> str:

@@ -12,6 +12,7 @@ from telegram.ext import ContextTypes
 from ..config import TZ
 from ..logging_setup import logger
 from ..services.outbox import document_text_payload, message_payload
+from ..staff import is_billing_exempt_meta
 from ..storage import get_user_meta_copy, service_requests_snapshot
 from .common import (
     format_dt_human,
@@ -141,14 +142,15 @@ def _dashboard_markup(meta: dict[str, Any]) -> Any:
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
     tier = str(meta.get("service_tier") or "basic")
+    billing_exempt = is_billing_exempt_meta(meta)
     rows: list[list[InlineKeyboardButton]] = []
     if has_connection(meta):
         rows.append([InlineKeyboardButton("🔗 Моя ссылка подключения", callback_data="subscription:connection")])
-    if meta.get("role") != "admin" and tier == "basic":
-        if not meta.get("trial_issued_at"):
+    if tier == "basic" and not billing_exempt:
+        if meta.get("role") != "admin" and not meta.get("trial_issued_at"):
             rows.append([InlineKeyboardButton("🧪 Запросить тестовый доступ", callback_data="subscription:trial")])
         rows.append([InlineKeyboardButton("💳 Купить подписку", callback_data="subscription:buy")])
-    elif tier == "subscriber" and meta.get("is_paid"):
+    elif tier == "subscriber" and meta.get("is_paid") and not billing_exempt:
         end_raw = str(meta.get("subscription_end_at") or "")
         end = None
         try:
@@ -161,7 +163,7 @@ def _dashboard_markup(meta: dict[str, Any]) -> Any:
             end = None
         if end and timedelta(0) <= end - datetime.now(TZ) <= timedelta(days=3):
             rows.append([InlineKeyboardButton("✅ Я оплатил продление", callback_data="subscription:renew")])
-    rows.append([InlineKeyboardButton("👤 Профиль", callback_data="product:profile")])
+    rows.append([InlineKeyboardButton("👤 Личный профиль", callback_data="profile:show")])
     rows.append([InlineKeyboardButton("🏠 Меню", callback_data="menu:home")])
     return InlineKeyboardMarkup(rows)
 
@@ -169,17 +171,24 @@ def _dashboard_markup(meta: dict[str, Any]) -> Any:
 def _dashboard_text(meta: dict[str, Any]) -> str:
     uid = int(meta.get("user_id", 0) or 0)
     tier = str(meta.get("service_tier") or "basic")
+    billing_exempt = is_billing_exempt_meta(meta)
     tier_label = {
         "basic": "Базовый доступ",
         "subscriber": "Подписчик",
         "unlimited_trial": "Безлимитный тестовый доступ",
     }.get(tier, tier)
+    payment_text = (
+        "бессрочная — руководитель сервиса"
+        if billing_exempt
+        else ("подтверждена" if meta.get("is_paid") else "не подтверждена")
+    )
+    end_text = "бессрочно" if billing_exempt else format_dt_human(meta.get("subscription_end_at"))
     lines = [
         "🔗 <b>Подключение и подписка</b>",
         "",
-        f"• Уровень: <b>{html_escape(tier_label)}</b>",
-        f"• Оплата: <b>{'подтверждена' if meta.get('is_paid') else 'не подтверждена'}</b>",
-        f"• Доступ до: <code>{html_escape(format_dt_human(meta.get('subscription_end_at')))}</code>",
+        f"• Уровень: <b>{html_escape('Бессрочный оплаченный доступ — руководитель сервиса' if billing_exempt else tier_label)}</b>",
+        f"• Оплата: <b>{html_escape(payment_text)}</b>",
+        f"• Доступ до: <code>{html_escape(end_text)}</code>",
         f"• Персональная ссылка: <b>{'назначена' if has_connection(meta) else 'не назначена'}</b>",
     ]
     for kind, label in (("trial", "Тест"), ("purchase", "Покупка"), ("renewal", "Продление")):
@@ -194,9 +203,18 @@ def _dashboard_text(meta: dict[str, Any]) -> str:
             }.get(status, status)
             lines.append(f"• {label}: <b>{html_escape(status_label)}</b>")
     if tier == "basic":
-        lines.extend(["", "Вы можете запросить тестовый доступ или купить подписку."])
+        lines.extend(
+            [
+                "",
+                "Вы можете купить подписку."
+                if meta.get("role") == "admin"
+                else "Вы можете запросить тестовый доступ или купить подписку.",
+            ]
+        )
     elif tier == "unlimited_trial":
         lines.extend(["", "Для этого уровня оплата и дата окончания не применяются."])
+    elif billing_exempt:
+        lines.extend(["", "Для руководителя сервиса оплата и дата окончания не применяются."])
     return "\n".join(lines)
 
 

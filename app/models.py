@@ -97,6 +97,7 @@ class UserMeta(TypedDict, total=False):
     staff_alias: str | None
     staff_display_mode: str
     nickname: str | None
+    contact_email: str | None
     username: str | None
     first_name: str | None
     last_name: str | None
@@ -106,6 +107,7 @@ class UserMeta(TypedDict, total=False):
     paid_at: str | None
     trial_issued_at: str | None
     last_auto_payment_reminder_at: str | None
+    last_auto_payment_reminder_type: str | None
     last_manual_payment_reminder_at: str | None
     subscription_updated_at: str | None
     subscription_updated_by_id: int | None

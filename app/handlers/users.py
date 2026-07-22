@@ -13,6 +13,7 @@ from ..storage import (
     append_audit_entry,
     enqueue_user_outbox,
     make_outbox_event,
+    suppress_user_outbox_recipient,
     update_user_data,
 )
 from .common import (
@@ -124,7 +125,7 @@ async def users_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ADMIN_ALL_MENU
 
-    m_filter = re.fullmatch(r"users:filter:(all|active|disabled|unpaid|admins)", data)
+    m_filter = re.fullmatch(r"users:filter:(all|active|disabled|unpaid|admins|blocked)", data)
     if m_filter:
         active_filter = _set_users_filter(context, m_filter.group(1))
         await q.edit_message_text(
@@ -372,14 +373,15 @@ async def _action_toggle_apply(update: Update, q, context, uid: int, meta):
             if new_state == "blocked"
             else "✅ Доступ к боту одобрен. Используйте /menu."
         )
-        enqueue_user_outbox(
-            cfg,
-            make_outbox_event(
-                kind=f"access_{new_state}",
-                recipient_ids=[uid],
-                payload=message_payload(notification, parse_mode=None),
-            ),
+        notification_event = make_outbox_event(
+            kind=f"access_{new_state}",
+            recipient_ids=[uid],
+            payload=message_payload(notification, parse_mode=None),
+            allow_blocked_delivery=new_state == "blocked",
         )
+        enqueue_user_outbox(cfg, notification_event)
+        if new_state == "blocked":
+            suppress_user_outbox_recipient(cfg, uid, keep_event_id=str(notification_event["id"]))
         return "updated", updated_meta
 
     outcome, updated = await update_user_data(_apply)

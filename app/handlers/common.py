@@ -12,9 +12,9 @@ from telegram.error import BadRequest
 from telegram.ext import ContextTypes, ConversationHandler
 
 from ..config import (
+    MENU_ADMINISTRATION,
     MENU_MAINT,
     MENU_REQUESTS,
-    MENU_STAFF_PROFILE,
     MENU_STATUS,
     MENU_SUBSCRIPTION,
     MENU_TICKET,
@@ -386,7 +386,7 @@ def main_menu_inline_kb_for_meta(meta: dict[str, Any] | None) -> InlineKeyboardM
         rows.append(
             [
                 InlineKeyboardButton(MENU_MAINT, callback_data="menu:maint"),
-                InlineKeyboardButton(MENU_STAFF_PROFILE, callback_data="staff:profile"),
+                InlineKeyboardButton(MENU_ADMINISTRATION, callback_data="administration:show"),
             ]
         )
     rows.append([InlineKeyboardButton("ℹ️ Помощь", callback_data="menu:help")])
@@ -469,7 +469,7 @@ def clear_transient_user_context(context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     transient_keys = {"selected_uid", "subscription_delivery_mode", "users_all_broadcast_text"}
     for key in tuple(ud.keys()):
-        if key.startswith(("ticket_", "maint_", "product_")) or key in transient_keys:
+        if key.startswith(("ticket_", "maint_", "product_", "administration_", "profile_")) or key in transient_keys:
             ud.pop(key, None)
 
 

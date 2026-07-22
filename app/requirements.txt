@@ -4,6 +4,7 @@ python-dotenv==1.2.2
 aiodns==4.0.4
 httpx==0.28.1
 idna==3.18
+cryptography==49.0.0
 pydantic==2.13.4
 pydantic-settings==2.14.2
 
