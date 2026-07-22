@@ -115,9 +115,11 @@ def _docker_stats(snapshot: StatusSnapshot) -> dict[str, int | bool]:
 
 def _docker_chip(snapshot: StatusSnapshot) -> str:
     stats = _docker_stats(snapshot)
+    degraded = bool(stats["unavailable"] or stats["stopped"] or stats["unhealthy"] or stats["missing"])
+    if not snapshot.admin_mode:
+        return f"🐳 Docker {'🔴' if degraded else '🟢'}"
     if stats["unavailable"]:
         return "🐳 Docker ⚠️ н/д"
-    degraded = bool(stats["stopped"] or stats["unhealthy"] or stats["missing"])
     emoji = "🔴" if degraded else "🟢"
     result = (
         f"🐳 Docker {emoji} работают {stats['running']} · остановлены {stats['stopped']} · "
@@ -289,7 +291,7 @@ def format_status_message(snapshot: StatusSnapshot) -> str:
     lines.extend(_dns_error_block(snapshot))
     lines.extend(_tls_block(snapshot))
 
-    if snapshot.show_containers_block:
+    if snapshot.admin_mode and snapshot.show_containers_block:
         lines.append("")
         lines.append(section("Контейнеры", "🐳"))
         if snapshot.containers:
