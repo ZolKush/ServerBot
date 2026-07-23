@@ -1,0 +1,7 @@
+"""Subscription plan constants and policy helpers."""
+
+PLAN_MONTHS = 3
+PLAN_MONTHLY_RUB = 100
+PLAN_TOTAL_RUB = PLAN_MONTHS * PLAN_MONTHLY_RUB
+
+__all__ = ["PLAN_MONTHLY_RUB", "PLAN_MONTHS", "PLAN_TOTAL_RUB"]

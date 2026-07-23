@@ -1,0 +1,14 @@
+"""Persistent conversation states for user administration."""
+
+(
+    ADMIN_PICK,
+    ADMIN_ALL_MENU,
+    ADMIN_ALL_MSG_TEXT,
+    ADMIN_ALL_MSG_CONFIRM,
+    ADMIN_USER_MENU,
+    ADMIN_USER_MSG_TEXT,
+    ADMIN_USER_NICK_TEXT,
+    ADMIN_USER_CFG_TEXT,
+) = range(8)
+
+MAX_USER_NICK_LEN = 64

@@ -5,6 +5,3 @@ MENU_USERS = "👥 Пользователи"
 MENU_MAINT = "🛠 Техработы"
 MENU_REQUESTS = "📥 Заявки"
 MENU_ADMINISTRATION = "⚙️ Администрирование"
-
-USER_DATA_SCHEMA_VERSION = 4
-IMPORTANT_DATA_SCHEMA_VERSION = 4

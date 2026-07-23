@@ -13,15 +13,24 @@ env.secrets
 # runtime data
 data/
 
+# Python environments, caches, coverage and build output
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+
 .idea/
 __pycache__/
 *.py[cod]
 
-# local-only / dev-only artifacts (not deployed to server)
+# local-only artifacts (not deployed to server)
 app/__main__.py
-app/requirements-dev.txt
-pyproject.toml
-tests/
 docs/
 
 # Claude Code local settings
