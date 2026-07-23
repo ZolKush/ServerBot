@@ -9,7 +9,7 @@ from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes, ConversationHandler
 
-from ..bot.guards import get_user_id, require_admin, staff_title
+from ..bot.guards import get_user_id, require_maintenance, staff_title
 from ..config import TZ, logger
 from ..storage import get_active_maintenance
 from .calendar import parse_hhmm
@@ -24,7 +24,7 @@ from .views import (
 )
 
 
-@require_admin
+@require_maintenance
 async def maint_extend_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not query:
@@ -47,7 +47,7 @@ async def maint_extend_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return STATE_MAINT_EXTEND
 
 
-@require_admin
+@require_maintenance
 async def maint_extend_duration(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message
     parsed = parse_hhmm((message.text if message else "") or "")
@@ -100,7 +100,7 @@ async def maint_extend_duration(update: Update, context: ContextTypes.DEFAULT_TY
     return ConversationHandler.END
 
 
-@require_admin
+@require_maintenance
 async def maint_end_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not query:
@@ -126,7 +126,7 @@ async def maint_end_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-@require_admin
+@require_maintenance
 async def maint_end_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not query:
@@ -148,7 +148,7 @@ async def maint_end_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYP
     )
 
 
-@require_admin
+@require_maintenance
 async def maint_cancel_end_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not query:

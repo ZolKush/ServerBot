@@ -18,6 +18,7 @@ from ..config import (
     MENU_TICKET,
     MENU_USERS,
 )
+from ..users.staff import can_manage_maintenance_meta
 from .guards import get_user_id, get_user_meta, has_subscriber_access, is_admin, require_auth
 
 
@@ -41,12 +42,11 @@ def main_menu_inline_kb_for_meta(meta: dict[str, Any] | None) -> InlineKeyboardM
                 InlineKeyboardButton(MENU_REQUESTS, callback_data="product:requests"),
             ]
         )
-        rows.append(
-            [
-                InlineKeyboardButton(MENU_MAINT, callback_data="menu:maint"),
-                InlineKeyboardButton(MENU_ADMINISTRATION, callback_data="administration:show"),
-            ]
-        )
+        administration_row: list[InlineKeyboardButton] = []
+        if can_manage_maintenance_meta(meta):
+            administration_row.append(InlineKeyboardButton(MENU_MAINT, callback_data="menu:maint"))
+        administration_row.append(InlineKeyboardButton(MENU_ADMINISTRATION, callback_data="administration:show"))
+        rows.append(administration_row)
     rows.append([InlineKeyboardButton("ℹ️ Помощь", callback_data="menu:help")])
     return InlineKeyboardMarkup(rows)
 

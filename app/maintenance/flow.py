@@ -10,7 +10,7 @@ from telegram.constants import ParseMode
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes, ConversationHandler
 
-from ..bot.guards import get_user_id, require_admin, staff_title
+from ..bot.guards import get_user_id, require_maintenance, staff_title
 from ..bot.ui import html_escape
 from ..config import TZ, logger
 from ..storage import get_active_maintenance, get_scheduled_maintenance
@@ -39,7 +39,7 @@ from .views import (
 )
 
 
-@require_admin
+@require_maintenance
 async def maint_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     active = get_active_maintenance()
@@ -88,7 +88,7 @@ async def maint_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return STATE_MAINT_MODE
 
 
-@require_admin
+@require_maintenance
 async def maint_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not query:
@@ -105,7 +105,7 @@ async def maint_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return STATE_MAINT_SCOPE
 
 
-@require_admin
+@require_maintenance
 async def maint_scope(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not query:
@@ -136,7 +136,7 @@ async def maint_scope(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return STATE_MAINT_URGENCY
 
 
-@require_admin
+@require_maintenance
 async def maint_urgency(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not query:
@@ -149,7 +149,7 @@ async def maint_urgency(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return STATE_MAINT_DURATION
 
 
-@require_admin
+@require_maintenance
 async def maint_duration(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message
     parsed = parse_hhmm((message.text if message else "") or "")

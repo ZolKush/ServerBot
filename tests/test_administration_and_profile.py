@@ -11,6 +11,7 @@ from app.users.staff import (
     STAFF_TITLE_SUPPORT,
     can_confirm_payments_meta,
     can_edit_help_meta,
+    can_manage_maintenance_meta,
     can_manage_subscription_dates_meta,
     can_send_payment_reminders_meta,
     is_billing_exempt_meta,
@@ -60,6 +61,11 @@ def test_staff_permission_matrix_matches_administration_policy() -> None:
     assert can_edit_help_meta(engineer)
     assert can_edit_help_meta(lead)
     assert can_edit_help_meta(owner)
+    assert not can_manage_maintenance_meta(support)
+    assert can_manage_maintenance_meta(engineer)
+    assert can_manage_maintenance_meta(lead)
+    assert can_manage_maintenance_meta(owner)
+    assert not can_manage_maintenance_meta(_admin(5, title="unknown"))
     assert not can_manage_subscription_dates_meta(engineer)
     assert can_manage_subscription_dates_meta(lead)
     assert can_manage_subscription_dates_meta(owner)
@@ -91,10 +97,14 @@ def test_administration_buttons_follow_staff_permissions() -> None:
 
 
 def test_main_menu_uses_administration_section_name() -> None:
-    labels = [button.text for row in main_menu_inline_kb_for_meta(_admin(1)).inline_keyboard for button in row]
+    support_menu = main_menu_inline_kb_for_meta(_admin(1))
+    engineer_menu = main_menu_inline_kb_for_meta(_admin(2, title=STAFF_TITLE_MAINTAINER))
+    labels = [button.text for row in support_menu.inline_keyboard for button in row]
 
     assert "⚙️ Администрирование" in labels
     assert "👤 Профиль сотрудника" not in labels
+    assert "menu:maint" not in _callbacks(support_menu)
+    assert "menu:maint" in _callbacks(engineer_menu)
 
 
 def test_help_is_editable_plain_text_with_global_support_contact() -> None:

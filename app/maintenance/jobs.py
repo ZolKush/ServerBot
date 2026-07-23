@@ -6,7 +6,7 @@ from datetime import datetime
 
 from telegram.ext import ContextTypes
 
-from ..bot.guards import authorized_ids
+from ..bot.guards import authorized_ids, maintenance_manager_ids
 from ..config import TZ, logger
 from ..messaging.outbox import message_payload
 from ..storage import get_active_maintenance, get_scheduled_maintenance, make_outbox_event
@@ -30,7 +30,7 @@ async def maint_restart_notify(context: ContextTypes.DEFAULT_TYPE) -> None:
     maintenance = get_active_maintenance()
     if not maintenance or not str(maintenance.get("id", "") or ""):
         return
-    admin_ids = authorized_ids(role_filter="admin", exclude=set())
+    admin_ids = maintenance_manager_ids()
     if not admin_ids:
         return
     maintenance_id = str(maintenance.get("id") or "")

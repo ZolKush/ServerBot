@@ -10,7 +10,7 @@ from telegram.constants import ParseMode
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes, ConversationHandler
 
-from ..bot.guards import get_user_id, require_admin, staff_title
+from ..bot.guards import get_user_id, require_maintenance, staff_title
 from ..bot.ui import html_escape
 from ..config import TZ, logger
 from ..storage import get_scheduled_maintenance
@@ -34,7 +34,7 @@ from .views import (
 )
 
 
-@require_admin
+@require_maintenance
 async def maint_cal_noop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if query:
@@ -42,7 +42,7 @@ async def maint_cal_noop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return STATE_MAINT_SCHEDULE_DATE
 
 
-@require_admin
+@require_maintenance
 async def maint_cal_nav(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not query:
@@ -62,7 +62,7 @@ async def maint_cal_nav(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return STATE_MAINT_SCHEDULE_DATE
 
 
-@require_admin
+@require_maintenance
 async def maint_cal_day(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not query:
@@ -92,7 +92,7 @@ async def maint_cal_day(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return STATE_MAINT_SCHEDULE_RANGE
 
 
-@require_admin
+@require_maintenance
 async def maint_schedule_range(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message
     parsed = parse_clock_range((message.text if message else "") or "")
@@ -181,7 +181,7 @@ async def maint_schedule_range(update: Update, context: ContextTypes.DEFAULT_TYP
     return ConversationHandler.END
 
 
-@require_admin
+@require_maintenance
 async def maint_sched_cancel_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not query:
@@ -203,7 +203,7 @@ async def maint_sched_cancel_cb(update: Update, context: ContextTypes.DEFAULT_TY
     )
 
 
-@require_admin
+@require_maintenance
 async def maint_sched_cancel_back_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not query:
@@ -224,7 +224,7 @@ async def maint_sched_cancel_back_cb(update: Update, context: ContextTypes.DEFAU
     )
 
 
-@require_admin
+@require_maintenance
 async def maint_sched_cancel_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not query:

@@ -13,6 +13,7 @@ from telegram.ext import ContextTypes, ConversationHandler
 from ..config import MENU_SUBSCRIPTION
 from ..storage import authorized_users_snapshot, get_user_meta_copy
 from ..users.staff import (
+    can_manage_maintenance_meta,
     is_lead_or_owner_meta,
     is_owner_meta,
     staff_public_signature,
@@ -184,6 +185,16 @@ def require_lead(func: Callable[..., Any]) -> Callable[..., Any]:
     return wrapper
 
 
+def require_maintenance(func: Callable[..., Any]) -> Callable[..., Any]:
+    @wraps(func)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args: Any, **kwargs: Any):
+        if not await _ensure_access(update, role="maintenance"):
+            return ConversationHandler.END
+        return await func(update, context, *args, **kwargs)
+
+    return wrapper
+
+
 async def _ensure_access(update: Update, role: str | None) -> bool:
     if not is_private(update):
         return False
@@ -214,6 +225,13 @@ async def _ensure_access(update: Update, role: str | None) -> bool:
     if role == "lead" and not is_lead_or_owner(update):
         if message:
             await message.reply_text("Это действие доступно ведущему инженеру сопровождения или руководителю сервиса.")
+        return False
+    if role == "maintenance" and not can_manage_maintenance_meta(get_user_meta(get_user_id(update) or 0)):
+        if message:
+            await message.reply_text(
+                "Техработами могут управлять инженер сопровождения, "
+                "ведущий инженер сопровождения или руководитель сервиса."
+            )
         return False
     return True
 
@@ -263,3 +281,11 @@ def authorized_ids(role_filter: str | None = None, exclude: set[int] | None = No
             continue
         ids.append(uid)
     return sorted(set(ids))
+
+
+def maintenance_manager_ids(exclude: set[int] | None = None) -> list[int]:
+    return [
+        uid
+        for uid in authorized_ids(role_filter="admin", exclude=exclude)
+        if can_manage_maintenance_meta(get_user_meta(uid))
+    ]

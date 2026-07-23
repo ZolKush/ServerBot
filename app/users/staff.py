@@ -112,6 +112,12 @@ def can_edit_help_meta(meta: dict[str, Any] | None) -> bool:
     )
 
 
+def can_manage_maintenance_meta(meta: dict[str, Any] | None) -> bool:
+    return bool(
+        is_admin_meta(meta) and staff_title_code(meta) in {STAFF_TITLE_MAINTAINER, STAFF_TITLE_LEAD, STAFF_TITLE_OWNER}
+    )
+
+
 def can_manage_subscription_dates_meta(meta: dict[str, Any] | None) -> bool:
     return is_lead_or_owner_meta(meta)
 
@@ -141,6 +147,7 @@ __all__ = [
     "STAFF_TITLES",
     "can_confirm_payments_meta",
     "can_edit_help_meta",
+    "can_manage_maintenance_meta",
     "can_manage_subscription_dates_meta",
     "can_send_payment_reminders_meta",
     "is_admin_meta",
