@@ -783,6 +783,33 @@ def _normalize_tls_certificates(raw: Any) -> dict[str, dict[str, Any]]:
     return result
 
 
+def _normalize_docker_status(raw: Any) -> dict[str, dict[str, Any]]:
+    if not isinstance(raw, dict):
+        return {}
+    result: dict[str, dict[str, Any]] = {}
+    for raw_server_key, raw_item in raw.items():
+        server_key = str(raw_server_key or "").strip()[:80]
+        if not server_key or not isinstance(raw_item, dict):
+            continue
+        raw_containers = raw_item.get("containers")
+        containers: list[list[Any]] = []
+        if isinstance(raw_containers, list):
+            for raw_container in raw_containers[:1000]:
+                if not isinstance(raw_container, (list, tuple)) or len(raw_container) < 3:
+                    continue
+                name = _optional_text(raw_container[0], limit=160)
+                if not name:
+                    continue
+                status_text = _optional_text(raw_container[2], limit=1000) or "н/д"
+                restarts = _optional_text(raw_container[3], limit=80) if len(raw_container) >= 4 else None
+                containers.append([name, bool(raw_container[1]), status_text, restarts or "-"])
+        result[server_key] = {
+            "updated_at": _optional_text(raw_item.get("updated_at"), limit=80),
+            "containers": containers,
+        }
+    return result
+
+
 @dataclass
 class ImportantData:
     tickets_seq: int = 0
@@ -794,6 +821,7 @@ class ImportantData:
     outbox: dict[str, dict[str, Any]] = field(default_factory=dict)
     fail2ban_cursors: dict[str, dict[str, Any]] = field(default_factory=dict)
     tls_certificates: dict[str, dict[str, Any]] = field(default_factory=dict)
+    docker_status: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     @staticmethod
     def _migrate(raw: dict[str, Any]) -> "ImportantData":
@@ -824,6 +852,7 @@ class ImportantData:
             else {}
         )
         tls_certificates = _normalize_tls_certificates(raw.get("tls_certificates"))
+        docker_status = _normalize_docker_status(raw.get("docker_status"))
         return ImportantData(
             tickets_seq=tickets_seq,
             tickets=tickets,
@@ -834,6 +863,7 @@ class ImportantData:
             outbox=outbox,
             fail2ban_cursors=fail2ban_cursors,
             tls_certificates=tls_certificates,
+            docker_status=docker_status,
         )
 
     @staticmethod
@@ -851,6 +881,7 @@ class ImportantData:
             "outbox",
             "fail2ban_cursors",
             "tls_certificates",
+            "docker_status",
         }
         return any(k not in allowed_keys for k in raw)
 
@@ -898,6 +929,7 @@ class ImportantData:
             "outbox": self.outbox,
             "fail2ban_cursors": self.fail2ban_cursors,
             "tls_certificates": self.tls_certificates,
+            "docker_status": self.docker_status,
         }
         _write_json_atomic_sync(path, payload)
 
@@ -915,6 +947,7 @@ class ImportantData:
                 "outbox": self.outbox,
                 "fail2ban_cursors": self.fail2ban_cursors,
                 "tls_certificates": self.tls_certificates,
+                "docker_status": self.docker_status,
             },
         )
 
@@ -969,6 +1002,7 @@ def _refresh_important_snapshot() -> None:
         "outbox": copy.deepcopy(getattr(IMPORTANT_DATA, "outbox", {}) or {}),
         "fail2ban_cursors": copy.deepcopy(getattr(IMPORTANT_DATA, "fail2ban_cursors", {}) or {}),
         "tls_certificates": copy.deepcopy(getattr(IMPORTANT_DATA, "tls_certificates", {}) or {}),
+        "docker_status": copy.deepcopy(getattr(IMPORTANT_DATA, "docker_status", {}) or {}),
     }
 
 
@@ -1013,6 +1047,7 @@ async def _reload_important_data_from_disk() -> None:
     IMPORTANT_DATA.outbox = copy.deepcopy(latest.outbox)
     IMPORTANT_DATA.fail2ban_cursors = copy.deepcopy(latest.fail2ban_cursors)
     IMPORTANT_DATA.tls_certificates = copy.deepcopy(latest.tls_certificates)
+    IMPORTANT_DATA.docker_status = copy.deepcopy(latest.docker_status)
 
 
 async def update_user_data(update_fn: Callable[[UserData], T]) -> T:
@@ -1071,6 +1106,7 @@ async def update_important_data(update_fn: Callable[[ImportantData], T]) -> T:
             prev_outbox = copy.deepcopy(IMPORTANT_DATA.outbox)
             prev_fail2ban_cursors = copy.deepcopy(IMPORTANT_DATA.fail2ban_cursors)
             prev_tls_certificates = copy.deepcopy(IMPORTANT_DATA.tls_certificates)
+            prev_docker_status = copy.deepcopy(IMPORTANT_DATA.docker_status)
             try:
                 result = update_fn(IMPORTANT_DATA)
                 await IMPORTANT_DATA.save_async(IMPORTANT_DATA_PATH)
@@ -1084,6 +1120,7 @@ async def update_important_data(update_fn: Callable[[ImportantData], T]) -> T:
                 IMPORTANT_DATA.outbox = prev_outbox
                 IMPORTANT_DATA.fail2ban_cursors = prev_fail2ban_cursors
                 IMPORTANT_DATA.tls_certificates = prev_tls_certificates
+                IMPORTANT_DATA.docker_status = prev_docker_status
                 raise
             _refresh_important_snapshot()
         except UpdateAborted:
@@ -1139,6 +1176,16 @@ def _set_daily_node_status(cfg: ImportantData, server_key: str, payload: dict[st
     return dict(cur[str(server_key)])
 
 
+def _set_docker_status(cfg: ImportantData, server_key: str, payload: dict[str, Any]) -> dict[str, Any]:
+    key = str(server_key)
+    normalized = _normalize_docker_status({key: payload})
+    clean = normalized.get(key, {"updated_at": None, "containers": []})
+    cur = dict(getattr(cfg, "docker_status", {}) or {})
+    cur[key] = clean
+    cfg.docker_status = cur
+    return copy.deepcopy(clean)
+
+
 def _set_ticket(cfg: ImportantData, ticket_id: int, payload: dict[str, Any]) -> dict[str, Any]:
     cur = dict(getattr(cfg, "tickets", {}) or {})
     cur[str(ticket_id)] = dict(payload or {})
@@ -1166,6 +1213,18 @@ def product_settings_snapshot() -> dict[str, Any]:
 def tls_certificates_snapshot() -> dict[str, dict[str, Any]]:
     raw = IMPORTANT_DATA_SNAPSHOT.get("tls_certificates")
     return copy.deepcopy(raw) if isinstance(raw, dict) else {}
+
+
+def get_docker_status_cache(server_key: str) -> dict[str, Any] | None:
+    docker_status = IMPORTANT_DATA_SNAPSHOT.get("docker_status")
+    if not isinstance(docker_status, dict):
+        return None
+    item = docker_status.get(str(server_key))
+    return copy.deepcopy(item) if isinstance(item, dict) else None
+
+
+async def set_docker_status_cache(server_key: str, payload: dict[str, Any]) -> dict[str, Any]:
+    return await update_important_data(lambda cfg: _set_docker_status(cfg, server_key, payload))
 
 
 async def set_tls_certificates_snapshot(payload: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:

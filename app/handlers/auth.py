@@ -419,9 +419,17 @@ async def access_review_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
         await query.answer("Решение сохранено.")
         original_text = str(getattr(query.message, "text_html", "") or "Заявка")
+        post_decision_markup = (
+            InlineKeyboardMarkup(
+                [[InlineKeyboardButton("🚫 Заблокировать пользователя", callback_data=f"access:block:{target_uid}")]]
+            )
+            if action == "reject"
+            else None
+        )
         await query.edit_message_text(
             original_text + f"\n\n<b>Решение:</b> {labels[action]} · {html_escape(actor_public)}",
             parse_mode=ParseMode.HTML,
+            reply_markup=post_decision_markup,
         )
         return
     messages = {

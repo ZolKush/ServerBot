@@ -56,6 +56,7 @@ from .users_constants import (
 from .users_ui import (
     USER_FILTER_ALL,
     USER_FILTERS,
+    confirm_access_kb,
     confirm_toggle_kb,
     format_user_card,
     user_card_kb,
@@ -288,6 +289,7 @@ async def users_all_msg_confirm(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 _USER_ACTION_RE = re.compile(r"^users:(?P<action>toggle|toggleapply|msg|nick|subassign|subsend):(?P<uid>\d+)$")
+_USER_ACCESS_ACTION_RE = re.compile(r"^users:(?P<stage>access|accessapply):(?P<decision>approve|block):(?P<uid>\d+)$")
 
 
 async def _back_to_user_list(q, context):
@@ -312,6 +314,27 @@ async def _resolve_user_or_redirect(q, context, uid: int):
     return None
 
 
+async def _action_access(q, uid: int, meta: dict, *, desired_state: str):
+    if meta.get("role") == "admin":
+        await q.edit_message_text(
+            format_user_card(meta) + "\n\n" + ui_warn_text("доступ администраторов здесь изменять нельзя."),
+            parse_mode=ParseMode.HTML,
+            reply_markup=user_card_kb(uid),
+        )
+        return ADMIN_USER_MENU
+    current_state = str(meta.get("access_state") or ("approved" if meta.get("enabled", True) else "blocked"))
+    if desired_state == "blocked":
+        action = "забанить"
+    else:
+        action = "разбанить" if current_state == "blocked" else "одобрить доступ"
+    await q.edit_message_text(
+        format_user_card(meta) + f"\n\n{ui_warn_text(f'Подтвердите действие: {action}.')}",
+        parse_mode=ParseMode.HTML,
+        reply_markup=confirm_access_kb(uid, desired_state=desired_state, current_state=current_state),
+    )
+    return ADMIN_USER_MENU
+
+
 async def _action_toggle(q, context, uid: int, meta):
     if meta.get("role") == "admin":
         await q.edit_message_text(
@@ -330,7 +353,15 @@ async def _action_toggle(q, context, uid: int, meta):
     return ADMIN_USER_MENU
 
 
-async def _action_toggle_apply(update: Update, q, context, uid: int, meta):
+async def _action_toggle_apply(
+    update: Update,
+    q,
+    context,
+    uid: int,
+    meta,
+    *,
+    desired_state: str | None = None,
+):
     actor_id = get_user_id(update)
     actor_name = display_name(update)
     now = datetime.now(TZ).isoformat()
@@ -345,7 +376,11 @@ async def _action_toggle_apply(update: Update, q, context, uid: int, meta):
         if current.get("role") == "admin":
             return "admin", current
         old_state = str(current.get("access_state") or ("approved" if current.get("enabled", True) else "blocked"))
-        new_state = "blocked" if old_state == "approved" else "approved"
+        new_state = desired_state or ("blocked" if old_state == "approved" else "approved")
+        if new_state not in {"approved", "blocked"}:
+            return "invalid", current
+        if old_state == new_state:
+            return "already", current
         current.update(
             {
                 "access_state": new_state,
@@ -390,6 +425,14 @@ async def _action_toggle_apply(update: Update, q, context, uid: int, meta):
     if outcome == "admin":
         await q.edit_message_text(
             format_user_card(updated) + "\n\n" + ui_warn_text("администраторов банить нельзя."),
+            parse_mode=ParseMode.HTML,
+            reply_markup=user_card_kb(uid),
+        )
+        return ADMIN_USER_MENU
+    if outcome in {"already", "invalid"}:
+        note = "Статус пользователя уже установлен." if outcome == "already" else "Некорректное действие."
+        await q.edit_message_text(
+            format_user_card(updated) + "\n\n" + ui_warn_text(note),
             parse_mode=ParseMode.HTML,
             reply_markup=user_card_kb(uid),
         )
@@ -447,6 +490,24 @@ async def users_user_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "users:back":
         return await _back_to_user_list(q, context)
+
+    access_match = _USER_ACCESS_ACTION_RE.fullmatch(data)
+    if access_match:
+        uid = int(access_match.group("uid"))
+        meta = await _resolve_user_or_redirect(q, context, uid)
+        if meta is None:
+            return ADMIN_PICK
+        desired_state = "approved" if access_match.group("decision") == "approve" else "blocked"
+        if access_match.group("stage") == "access":
+            return await _action_access(q, uid, meta, desired_state=desired_state)
+        return await _action_toggle_apply(
+            update,
+            q,
+            context,
+            uid,
+            meta,
+            desired_state=desired_state,
+        )
 
     m = _USER_ACTION_RE.fullmatch(data)
     if m:

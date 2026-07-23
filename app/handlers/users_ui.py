@@ -179,8 +179,17 @@ def user_card_kb(uid: int) -> InlineKeyboardMarkup:
     ]
 
     if role != "admin":
-        label = "🚫 Забанить" if enabled else ("✅ Разбанить" if state == "blocked" else "✅ Одобрить доступ")
-        rows.append([InlineKeyboardButton(label, callback_data=f"users:toggle:{uid}")])
+        if enabled:
+            rows.append([InlineKeyboardButton("🚫 Забанить", callback_data=f"users:access:block:{uid}")])
+        elif state == "blocked":
+            rows.append([InlineKeyboardButton("✅ Разбанить", callback_data=f"users:access:approve:{uid}")])
+        else:
+            rows.append(
+                [
+                    InlineKeyboardButton("✅ Одобрить доступ", callback_data=f"users:access:approve:{uid}"),
+                    InlineKeyboardButton("🚫 Забанить", callback_data=f"users:access:block:{uid}"),
+                ]
+            )
 
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="users:back")])
     rows.append([InlineKeyboardButton("🏠 Меню", callback_data="menu:home")])
@@ -194,6 +203,27 @@ def confirm_toggle_kb(uid: int, access_state: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton(f"✅ Подтвердить: {action}", callback_data=f"users:toggleapply:{uid}")],
+            [InlineKeyboardButton("⬅️ Назад", callback_data=f"users:user:{uid}")],
+            [InlineKeyboardButton("🏠 Меню", callback_data="menu:home")],
+        ]
+    )
+
+
+def confirm_access_kb(uid: int, *, desired_state: str, current_state: str) -> InlineKeyboardMarkup:
+    if desired_state == "blocked":
+        action = "Забанить"
+        callback_action = "block"
+    else:
+        action = "Разбанить" if current_state == "blocked" else "Одобрить доступ"
+        callback_action = "approve"
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    f"✅ Подтвердить: {action}",
+                    callback_data=f"users:accessapply:{callback_action}:{uid}",
+                )
+            ],
             [InlineKeyboardButton("⬅️ Назад", callback_data=f"users:user:{uid}")],
             [InlineKeyboardButton("🏠 Меню", callback_data="menu:home")],
         ]

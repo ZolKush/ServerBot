@@ -36,8 +36,10 @@ from ..services.tls_certificates import refresh_tls_certificates, tls_snapshot_f
 from ..storage import (
     get_daily_node_status_cache,
     get_dns_status_cache,
+    get_docker_status_cache,
     set_daily_node_status_cache,
     set_dns_status_cache,
+    set_docker_status_cache,
 )
 from .common import html_escape, is_admin, now_str, require_admin, require_subscriber, ui_error_text, ui_info_text
 from .status_format import format_status_message, format_ufw_message
@@ -47,6 +49,8 @@ _STATUS_CACHE: dict[tuple[str, bool], tuple[float, StatusSnapshot]] = {}
 _STATUS_LOCKS: dict[tuple[str, bool], asyncio.Lock] = {}
 _SSH_REFRESH_LOCKS: dict[str, asyncio.Lock] = {}
 _DNS_QUERY_SEMAPHORE: asyncio.Semaphore | None = None
+DOCKER_STATUS_REFRESH_INTERVAL_SEC = 6 * 60 * 60
+DOCKER_STATUS_STARTUP_DELAY_SEC = 15
 
 
 def _get_dns_query_semaphore() -> asyncio.Semaphore:
@@ -61,6 +65,34 @@ def _safe_nonnegative_int(value: object, default: int = 0) -> int:
         return max(0, int(value or 0))
     except (TypeError, ValueError):
         return max(0, default)
+
+
+def _docker_failure_rows(server: ServerTarget, status_text: str) -> list[tuple[str, bool, str, str]]:
+    names = [name for name in server.monitor_containers if name]
+    return [(name, False, status_text, "-") for name in names] or [("Docker API", False, status_text, "-")]
+
+
+def _docker_views_from_cache(server: ServerTarget) -> list[DockerContainerView]:
+    payload = get_docker_status_cache(server.key)
+    raw_containers = payload.get("containers") if isinstance(payload, dict) else None
+    if not isinstance(raw_containers, list):
+        raw_containers = _docker_failure_rows(server, "docker недоступен")
+    result: list[DockerContainerView] = []
+    for item in raw_containers:
+        if not isinstance(item, (list, tuple)) or len(item) < 3:
+            continue
+        name = str(item[0] or "").strip()
+        if not name:
+            continue
+        result.append(
+            DockerContainerView(
+                name=name,
+                is_up=bool(item[1]),
+                status_text=str(item[2] or "н/д"),
+                restarts=str(item[3] if len(item) >= 4 else "-"),
+            )
+        )
+    return result
 
 
 def _invalidate_status_cache(server_key: str) -> None:
@@ -341,11 +373,10 @@ async def status_tls_refresh_cb(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def _build_status_payload_local(admin_mode: bool, server: ServerTarget):
-    up, mem, disk, cont, ufw_data = await asyncio.gather(
+    up, mem, disk, ufw_data = await asyncio.gather(
         check_uptime(),
         meminfo(),
         disk_root(),
-        docker_containers(server.monitor_containers),
         ufw_summary_for_admin() if admin_mode else ufw_status_basic(),
         return_exceptions=True,
     )
@@ -355,9 +386,6 @@ async def _build_status_payload_local(admin_mode: bool, server: ServerTarget):
         mem = "н/д"
     if isinstance(disk, Exception):
         disk = "н/д"
-    if isinstance(cont, Exception):
-        cont_err = _exc_brief(cont)
-        cont = [(n, False, f"ошибка: {cont_err}", "-") for n in server.monitor_containers]
     if isinstance(ufw_data, Exception):
         ufw_data = ("н/д", [], [], []) if admin_mode else "н/д"
     if admin_mode:
@@ -365,12 +393,17 @@ async def _build_status_payload_local(admin_mode: bool, server: ServerTarget):
     else:
         ufw_s = str(ufw_data)
         allow, deny, reject = [], [], []
-    return up, mem, disk, cont, ufw_s, allow, deny, reject
+    return up, mem, disk, [], ufw_s, allow, deny, reject
 
 
 async def _build_status_payload_remote(admin_mode: bool, server: ServerTarget):
     try:
-        result = await remote_status_bundle(server.ssh_target, server.monitor_containers, admin_mode=admin_mode)
+        result = await remote_status_bundle(
+            server.ssh_target,
+            server.monitor_containers,
+            admin_mode=admin_mode,
+            include_docker=False,
+        )
         if result.ok:
             return result.values()
         error = result.error or "SSH недоступен"
@@ -537,6 +570,7 @@ async def _ssh_collect_disk_ufw_uncached(server: ServerTarget, *, admin_mode: bo
                 server.ssh_target,
                 server.monitor_containers,
                 admin_mode=True,
+                include_docker=False,
             )
         except Exception as e:
             logger.warning("SSH refresh failed for server=%s: %s", server.key, _exc_brief(e))
@@ -613,20 +647,8 @@ async def _build_status_snapshot_mixed(
     server: ServerTarget,
 ) -> StatusSnapshot:
     admin_mode = is_admin(update)
-    docker_task = (
-        remote_docker_containers(server.ssh_target, server.monitor_containers)
-        if server.mode == "ssh"
-        else docker_containers(server.monitor_containers)
-    )
-    snap, docker_raw = await asyncio.gather(get_metrics_snapshot(), docker_task, return_exceptions=True)
-    if isinstance(snap, Exception):
-        raise snap
-    if isinstance(docker_raw, Exception):
-        docker_raw = [("Docker API", False, f"ошибка: {_exc_brief(docker_raw)}", "-")]
-    containers = [
-        DockerContainerView(name=name, is_up=up, status_text=status, restarts=restarts)
-        for name, up, status, restarts in docker_raw
-    ]
+    snap = await get_metrics_snapshot()
+    containers = _docker_views_from_cache(server)
     tls_certificates = _tls_views(server.key, admin_mode=admin_mode)
     node: NodeMetrics | None = snap.get(server.remnawave_uuid)
 
@@ -747,9 +769,7 @@ async def _build_status_snapshot_uncached(update: Update, server: ServerTarget) 
     dns_unknown = _safe_nonnegative_int(dns_payload.get("unknown"))
     dns_error_details = [str(x) for x in (dns_payload.get("details", []) or [])]
 
-    containers = [
-        DockerContainerView(name=name, is_up=upb, status_text=st, restarts=rst) for name, upb, st, rst in cont
-    ]
+    containers = _docker_views_from_cache(server)
     tls_certificates = _tls_views(server.key, admin_mode=admin_mode)
     return StatusSnapshot(
         title="🧭 Статус сервера",
@@ -799,6 +819,50 @@ async def _build_status_snapshot_and_server(
     if not server:
         return None, None
     return await _build_status_snapshot(update, server), server
+
+
+async def docker_status_refresh(_context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Refresh the persistent Docker inventory used by every status screen."""
+
+    semaphore = asyncio.Semaphore(4)
+
+    async def _refresh(server: ServerTarget) -> None:
+        async with semaphore:
+            try:
+                containers = (
+                    await remote_docker_containers(server.ssh_target, server.monitor_containers)
+                    if server.mode == "ssh"
+                    else await docker_containers(server.monitor_containers)
+                )
+            except Exception as exc:
+                logger.exception("Docker status refresh failed for server=%s", server.key)
+                containers = _docker_failure_rows(server, f"ошибка: {_exc_brief(exc)}")
+            payload = {
+                "updated_at": datetime.now(TZ).isoformat(),
+                "containers": [
+                    [str(name), bool(is_up), str(status_text), str(restarts)]
+                    for name, is_up, status_text, restarts in containers
+                ],
+            }
+            try:
+                await set_docker_status_cache(server.key, payload)
+            except Exception:
+                logger.exception("Docker status cache write failed for server=%s", server.key)
+                return
+            _invalidate_status_cache(server.key)
+            problem_count = sum(
+                1
+                for _name, is_up, status_text, _restarts in containers
+                if not is_up or "unhealthy" in str(status_text).lower() or str(status_text).lower() == "не найден"
+            )
+            logger.info(
+                "Docker status refreshed for server=%s containers=%s problems=%s",
+                server.key,
+                len(containers),
+                problem_count,
+            )
+
+    await asyncio.gather(*(_refresh(server) for server in SERVERS.values()))
 
 
 async def dns_daily_refresh(context: ContextTypes.DEFAULT_TYPE) -> None:

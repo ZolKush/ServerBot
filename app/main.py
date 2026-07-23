@@ -152,10 +152,13 @@ from app.handlers.profile import (
     profile_email_text,
 )
 from app.handlers.status import (
+    DOCKER_STATUS_REFRESH_INTERVAL_SEC,
+    DOCKER_STATUS_STARTUP_DELAY_SEC,
     cmd_health,
     daily_node_status_refresh,
     dns_back_cb,
     dns_daily_refresh,
+    docker_status_refresh,
     status_dns_refresh_cb,
     status_pick_cb,
     status_show_cb,
@@ -731,7 +734,11 @@ def build_app() -> Application:
             ADMIN_USER_MENU: [
                 CallbackQueryHandler(
                     users_user_menu,
-                    pattern=r"^users:(msg:\d+|nick:\d+|cfg:\d+|subassign:\d+|subsend:\d+|toggle:\d+|toggleapply:\d+|back)$",
+                    pattern=(
+                        r"^users:(msg:\d+|nick:\d+|cfg:\d+|subassign:\d+|subsend:\d+|"
+                        r"toggle:\d+|toggleapply:\d+|access:(approve|block):\d+|"
+                        r"accessapply:(approve|block):\d+|back)$"
+                    ),
                 ),
                 CallbackQueryHandler(users_pick, pattern=r"^users:user:\d+$"),
             ],
@@ -897,6 +904,12 @@ def build_app() -> Application:
             interval=60,
             first=5,
             name="subscription_lifecycle",
+        )
+        app.job_queue.run_repeating(
+            docker_status_refresh,
+            interval=DOCKER_STATUS_REFRESH_INTERVAL_SEC,
+            first=DOCKER_STATUS_STARTUP_DELAY_SEC,
+            name="docker_status_refresh",
         )
         app.job_queue.run_repeating(
             tls_certificate_check_job,

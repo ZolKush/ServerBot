@@ -246,6 +246,7 @@ async def remote_status_bundle(
     names: Sequence[str],
     *,
     admin_mode: bool,
+    include_docker: bool = True,
 ) -> RemoteStatusBundle:
     name_list = [n for n in names if n]
     docker_candidates: list[str] = []
@@ -281,6 +282,7 @@ async def remote_status_bundle(
         )
     docker_block_lines.extend(["  fi", "done", 'printf "__MBOT_DOCKER_OK__|%s\\n" "$_docker_done"'])
     docker_block = "\n".join(docker_block_lines)
+    docker_section = f"echo {_SEC_DOCKER_STATUS}\n{docker_block}" if include_docker else ""
 
     ufw_block_lines: list[str] = [
         f"for u in {ufw_for_loop}; do",
@@ -304,8 +306,7 @@ echo {_SEC_DF}
 df -B1 / 2>/dev/null || true
 echo {_SEC_UFW}
 {ufw_block}
-echo {_SEC_DOCKER_STATUS}
-{docker_block}
+{docker_section}
 """.strip()
     rc, out, err = await ssh_run_shell(
         ssh_target,
@@ -317,7 +318,11 @@ echo {_SEC_DOCKER_STATUS}
         return RemoteStatusBundle(
             ok=False,
             error=error,
-            containers=[(n, False, "ssh ошибка", "-") for n in name_list] or [("Docker API", False, "ssh ошибка", "-")],
+            containers=(
+                [(n, False, "ssh ошибка", "-") for n in name_list] or [("Docker API", False, "ssh ошибка", "-")]
+                if include_docker
+                else []
+            ),
         )
     sec = _split_sections(out)
     up = _parse_uptime_from_proc(sec.get(_SEC_UPTIME, "") or "") or "н/д"
@@ -331,26 +336,27 @@ echo {_SEC_DOCKER_STATUS}
     else:
         allow, deny, reject = [], [], []
 
-    info: dict[str, str] = {}
-    docker_ok = False
-    for line in (sec.get(_SEC_DOCKER_STATUS, "") or "").splitlines():
-        p = line.split("|", 1)
-        if len(p) == 2:
-            key, value = p[0].strip(), p[1].strip()
-            if key == "__MBOT_DOCKER_OK__":
-                docker_ok = value == "1"
-            elif key:
-                info[key] = value
     cont: list[tuple[str, bool, str, str]] = []
-    if not docker_ok:
-        cont = [(n, False, "docker недоступен", "-") for n in name_list] or [
-            ("Docker API", False, "docker недоступен", "-")
-        ]
-    else:
-        cont.extend((name, docker_status_is_running(status), status, "-") for name, status in info.items())
-        for n in name_list:
-            if n not in info:
-                cont.append((n, False, "не найден", "-"))
+    if include_docker:
+        info: dict[str, str] = {}
+        docker_ok = False
+        for line in (sec.get(_SEC_DOCKER_STATUS, "") or "").splitlines():
+            p = line.split("|", 1)
+            if len(p) == 2:
+                key, value = p[0].strip(), p[1].strip()
+                if key == "__MBOT_DOCKER_OK__":
+                    docker_ok = value == "1"
+                elif key:
+                    info[key] = value
+        if not docker_ok:
+            cont = [(n, False, "docker недоступен", "-") for n in name_list] or [
+                ("Docker API", False, "docker недоступен", "-")
+            ]
+        else:
+            cont.extend((name, docker_status_is_running(status), status, "-") for name, status in info.items())
+            for n in name_list:
+                if n not in info:
+                    cont.append((n, False, "не найден", "-"))
     return RemoteStatusBundle(
         ok=True,
         uptime=up,
