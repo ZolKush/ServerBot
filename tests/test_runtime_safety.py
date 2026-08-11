@@ -40,31 +40,9 @@ def test_split_ssh_target_handles_ipv6(target: str, expected: tuple[str, int | N
     assert _split_ssh_target(target) == expected
 
 
-@pytest.mark.parametrize(
-    "field",
-    [
-        "REMOTE_SERVER_FAIL2BAN_LOG_PATHS",
-        "REMOTE_SERVER_FAIL2BAN_ENABLED",
-        "REMOTE_SERVER_FAIL2BAN_TIMEZONES",
-        "REMOTE_SERVER_REMNAWAVE_UUIDS",
-    ],
-)
-def test_per_server_lists_must_match_ssh_target_count(field: str) -> None:
-    values: dict[str, object] = {
-        "REMOTE_SERVER_ENABLED": True,
-        "REMOTE_SERVER_SSH_TARGETS": ["bot@one.example", "bot@two.example"],
-        "REMOTE_SERVER_CODES": ["one", "two"],
-        field: ["single-value"],
-    }
-    if field == "REMOTE_SERVER_FAIL2BAN_ENABLED":
-        values[field] = ["true"]
-    elif field == "REMOTE_SERVER_FAIL2BAN_TIMEZONES":
-        values[field] = ["UTC"]
-    elif field == "REMOTE_SERVER_REMNAWAVE_UUIDS":
-        values[field] = ["00000000-0000-0000-0000-000000000001"]
-
-    with pytest.raises(ValidationError, match=field):
-        AppSettings(**values)
+def test_legacy_positional_server_settings_are_rejected() -> None:
+    with pytest.raises(ValidationError, match="REMOTE_SERVER_SSH_TARGETS"):
+        AppSettings(REMOTE_SERVER_SSH_TARGETS=["bot@one.example"])
 
 
 def test_invalid_secret_is_not_exposed_in_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -100,6 +78,53 @@ def test_equal_admin_and_owner_secrets_are_not_exposed(tmp_path: Path, monkeypat
     assert "OWNER_PASSWORD" in error
 
 
+def test_unknown_secret_key_is_rejected_without_exposing_its_value(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marker = "SECRET_VALUE_MUST_NOT_BE_LOGGED"
+    path = tmp_path / "secrets.env"
+    path.write_text(
+        "BOT_TOKEN=123456:test-token\n"
+        "ADMIN_PASSWORD=admin-password-long-enough\n"
+        "OWNER_PASSWORD=owner-password-long-enough\n"
+        f"OLD_BOT_TOKEN={marker}\n",
+        encoding="utf-8",
+    )
+    for key in ("BOT_TOKEN", "ADMIN_PASSWORD", "OWNER_PASSWORD", "OLD_BOT_TOKEN"):
+        monkeypatch.delenv(key, raising=False)
+
+    with pytest.raises(RuntimeError, match="OLD_BOT_TOKEN") as captured:
+        load_required_secrets(path)
+
+    assert marker not in str(captured.value)
+
+
+def test_remnawave_credentials_must_be_configured_as_a_pair(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "secrets.env"
+    path.write_text(
+        "BOT_TOKEN=123456:test-token\n"
+        "ADMIN_PASSWORD=admin-password-long-enough\n"
+        "OWNER_PASSWORD=owner-password-long-enough\n"
+        "REMNAWAVE_METRICS_USER=metrics-user\n",
+        encoding="utf-8",
+    )
+    for key in (
+        "BOT_TOKEN",
+        "ADMIN_PASSWORD",
+        "OWNER_PASSWORD",
+        "REMNAWAVE_METRICS_USER",
+        "REMNAWAVE_METRICS_PASS",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    with pytest.raises(RuntimeError, match="должны быть заданы вместе"):
+        load_required_secrets(path)
+
+
 def test_app_settings_validation_does_not_expose_dotenv_secrets() -> None:
     secret_marker = "THIS_SECRET_MUST_NEVER_REACH_VALIDATION_LOGS"
 
@@ -119,47 +144,23 @@ def test_app_settings_validation_does_not_expose_dotenv_secrets() -> None:
     assert "input_value" not in error
 
 
-@pytest.mark.parametrize("field", ["TZ", "FAIL2BAN_TIMEZONE"])
-def test_invalid_timezone_is_reported_as_validation_error(field: str) -> None:
+def test_invalid_timezone_is_reported_as_validation_error() -> None:
     with pytest.raises(ValidationError, match="unknown .*timezone"):
-        AppSettings(**{field: "Invalid/Nowhere"})
+        AppSettings(TZ="Invalid/Nowhere")
 
 
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("MESSAGE_RETENTION_HOURS", 0),
-        ("MESSAGE_RETENTION_HOURS", 37),
-        ("MESSAGE_CLEANUP_INTERVAL_SEC", 59),
-        ("MESSAGE_CLEANUP_INTERVAL_SEC", 3601),
+        ("NAVIGATION_RETENTION_HOURS", 0),
+        ("NAVIGATION_RETENTION_HOURS", 37),
+        ("NAVIGATION_CLEANUP_INTERVAL_SEC", 59),
+        ("NAVIGATION_CLEANUP_INTERVAL_SEC", 3601),
     ],
 )
 def test_message_cleanup_settings_stay_inside_telegram_deletion_window(field: str, value: int) -> None:
     with pytest.raises(ValidationError, match=field):
         AppSettings(**{field: value})
-
-
-@pytest.mark.parametrize(
-    ("overrides", "expected"),
-    [
-        ({"SSH_STRICT_HOST_KEY_CHECKING": "accept-new"}, "SSH_STRICT_HOST_KEY_CHECKING"),
-        ({"SSH_KNOWN_HOSTS_FILE": ""}, "SSH_KNOWN_HOSTS_FILE"),
-        ({"SSH_IDENTITY_FILE": ""}, "SSH_IDENTITY_FILE"),
-    ],
-)
-def test_remote_settings_require_strict_explicit_ssh_files(overrides: dict[str, str], expected: str) -> None:
-    values = {
-        "REMOTE_SERVER_ENABLED": True,
-        "REMOTE_SERVER_SSH_TARGETS": ["maintbot@example.com"],
-        "REMOTE_SERVER_CODES": ["remote"],
-        "SSH_STRICT_HOST_KEY_CHECKING": "yes",
-        "SSH_KNOWN_HOSTS_FILE": "/etc/maintbot/ssh/known_hosts",
-        "SSH_IDENTITY_FILE": "/etc/maintbot/ssh/id_ed25519",
-        **overrides,
-    }
-
-    with pytest.raises(ValidationError, match=expected):
-        AppSettings(**values)
 
 
 def test_single_instance_lock_is_first_process_wins(tmp_path: Path) -> None:
@@ -183,7 +184,8 @@ def test_application_builds_with_required_background_jobs() -> None:
     assert application.job_queue is not None
     assert isinstance(application.bot, TrackingExtBot)
     assert application.post_init is not None
-    assert -2 in application.handlers
+    assert -2 not in application.handlers
+    assert {-100, -1}.issubset(application.handlers)
     job_names = {job.name for job in application.job_queue.jobs()}
     assert {
         "fail2ban_digest",
@@ -196,7 +198,9 @@ def test_application_builds_with_required_background_jobs() -> None:
         "ticket_orphan_release",
         "subscription_lifecycle",
         "docker_status_refresh",
+        "tls_certificate_check_startup",
         "tls_certificate_check",
+        "tls_deadline_evaluation",
         "message_cleanup",
     }.issubset(job_names)
     docker_job = next(job for job in application.job_queue.jobs() if job.name == "docker_status_refresh")

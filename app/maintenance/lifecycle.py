@@ -11,6 +11,7 @@ from telegram.ext import ContextTypes, ConversationHandler
 
 from ..bot.guards import get_user_id, require_maintenance, staff_title
 from ..config import TZ, logger
+from ..messaging.message_cleanup import record_navigation_result
 from ..storage import get_active_maintenance
 from .calendar import parse_hhmm
 from .operations import end_maintenance, extend_maintenance
@@ -91,11 +92,12 @@ async def maint_extend_duration(update: Update, context: ContextTypes.DEFAULT_TY
     panel_text = f"{maintenance_panel_text(maintenance)}\n\n{maintenance_delivery_status(users_count, admins_count)}"
     data.pop("maint_extend_id", None)
     if message:
-        await message.reply_text(
+        result = await message.reply_text(
             panel_text,
             parse_mode=ParseMode.HTML,
             reply_markup=maintenance_control_keyboard(str(maintenance_id)),
         )
+        await record_navigation_result(update, result)
     clear_maintenance_context(context)
     return ConversationHandler.END
 

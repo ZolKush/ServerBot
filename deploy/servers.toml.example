@@ -1,0 +1,70 @@
+# Copy to /etc/maintbot/servers.toml and edit as root.
+# Each server is self-contained: adding a node means copying one [servers.*]
+# block instead of editing several position-dependent .env lists.
+version = 1
+
+[servers.main]
+label = "Main server"
+flag = "DE"
+
+[servers.main.connection]
+transport = "local"
+
+[servers.main.monitoring]
+source = "system"
+
+[servers.main.dns]
+expected_a_ip = "192.0.2.10"
+
+[[servers.main.domains]]
+host = "main.example.com"
+checks = ["dns", "tls"]
+tls_primary_port = 443
+tls_fallback_ports = []
+
+[servers.main.docker]
+containers = ["remnawave", "remnawave-db"]
+
+[servers.main.fail2ban]
+enabled = true
+log_path = "/var/log/fail2ban.log"
+timezone = "Europe/Berlin"
+
+
+[servers.nl]
+label = "Netherlands"
+flag = "NL"
+
+[servers.nl.connection]
+transport = "ssh"
+target = "maintbot@server-nl.example:1606"
+
+[servers.nl.monitoring]
+source = "remnawave"
+node_uuid = "00000000-0000-0000-0000-000000000001"
+
+[servers.nl.dns]
+expected_a_ip = "192.0.2.20"
+
+[[servers.nl.domains]]
+host = "nextfiles.example.com"
+checks = ["dns", "tls"]
+tls_primary_port = 443
+tls_fallback_ports = []
+
+# Only this endpoint tries 8443, and only after a transport/TLS-handshake
+# failure on 443. An invalid or expired certificate obtained on 443 is never
+# hidden by the fallback.
+[[servers.nl.domains]]
+host = "zeronet-monitor.embeddedcontrolsinc.com"
+checks = ["dns", "tls"]
+tls_primary_port = 443
+tls_fallback_ports = [8443]
+
+[servers.nl.docker]
+containers = ["remnanode", "remnawave-nginx"]
+
+[servers.nl.fail2ban]
+enabled = true
+log_path = "/var/log/fail2ban.log"
+timezone = "Europe/Amsterdam"

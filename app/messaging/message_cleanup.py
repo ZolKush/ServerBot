@@ -1,4 +1,4 @@
-"""Private-chat message tracking and retention cleanup."""
+"""Opt-in navigation-panel tracking and Telegram cleanup."""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from telegram import Update
 from telegram.constants import ChatType
 from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter, TimedOut
 from telegram.ext import ExtBot
@@ -16,7 +15,8 @@ from telegram.ext import ExtBot
 from ..config import logger
 from .telegram_rate import extend_flood_gate, retry_after_seconds, wait_flood_gate
 
-_REGISTRY_KEY = "maintbot_message_registry_v1"
+_REGISTRY_KEY = "maintbot_navigation_registry_v2"
+_LEGACY_REGISTRY_KEY = "maintbot_message_registry_v1"
 _DELETE_BATCH_SIZE = 100
 # Telegram only accepts deletion of messages younger than 48 hours. Leave a
 # safety margin for clock differences and request latency.
@@ -78,11 +78,11 @@ def _normalize_registry(raw: object) -> dict[str, Any]:
                     messages[str(message_id)] = sent_at
             if messages:
                 chats[str(chat_id)] = {"messages": messages}
-    return {"version": 1, "chats": chats}
+    return {"version": 2, "chats": chats}
 
 
 class MessageTracker:
-    """Tracks private-chat message IDs in PTB's persisted bot_data."""
+    """Tracks only explicitly registered private navigation panels."""
 
     def __init__(self, *, enabled: bool, retention: timedelta) -> None:
         if retention <= timedelta(0) or retention >= _DELETE_MAX_AGE:
@@ -96,6 +96,9 @@ class MessageTracker:
     def bind(self, bot_data: MutableMapping[str, Any]) -> None:
         """Binds the tracker after PTB has restored persistent bot_data."""
 
+        # Version 1 mixed menus with broadcasts, tickets and user messages.
+        # It is intentionally forgotten without deleting anything in Telegram.
+        bot_data.pop(_LEGACY_REGISTRY_KEY, None)
         bot_data[_REGISTRY_KEY] = _normalize_registry(bot_data.get(_REGISTRY_KEY))
         self._bot_data = bot_data
 
@@ -134,47 +137,6 @@ class MessageTracker:
             messages = chat.setdefault("messages", {})
             messages[str(normalized_message_id)] = sent_at
 
-    async def observe_update(self, update: Update) -> None:
-        message = update.effective_message
-        if message is None:
-            return
-        chat = getattr(message, "chat", None)
-        await self.record_message(
-            chat_id=getattr(chat, "id", None),
-            message_id=getattr(message, "message_id", None),
-            message_date=getattr(message, "date", None),
-            chat_type=getattr(chat, "type", None),
-        )
-
-    async def record_api_result(self, endpoint: str, data: dict[str, Any] | None, result: Any) -> None:
-        results = result if isinstance(result, list) else [result]
-        recorded_full_message = False
-        for item in results:
-            if not isinstance(item, dict):
-                continue
-            chat = item.get("chat")
-            if not isinstance(chat, dict):
-                continue
-            recorded_full_message = True
-            await self.record_message(
-                chat_id=chat.get("id"),
-                message_id=item.get("message_id"),
-                message_date=item.get("date"),
-                chat_type=chat.get("type"),
-            )
-        if recorded_full_message or endpoint not in {"copyMessage", "copyMessages"} or not isinstance(data, dict):
-            return
-        chat_id = data.get("chat_id")
-        fallback_results = result if isinstance(result, list) else [result]
-        for item in fallback_results:
-            if isinstance(item, dict):
-                await self.record_message(
-                    chat_id=chat_id,
-                    message_id=item.get("message_id"),
-                    message_date=datetime.now(timezone.utc),
-                    chat_type=ChatType.PRIVATE if isinstance(chat_id, int) and chat_id > 0 else None,
-                )
-
     async def forget_messages(self, chat_id: object, message_ids: Sequence[object]) -> None:
         normalized_chat_id = _integer(chat_id)
         if normalized_chat_id is None:
@@ -202,19 +164,6 @@ class MessageTracker:
             if not messages and isinstance(chats, dict):
                 chats.pop(str(normalized_chat_id), None)
 
-    async def handle_api_result(
-        self,
-        endpoint: str,
-        data: dict[str, Any] | None,
-        result: Any,
-    ) -> None:
-        if result is True and isinstance(data, dict) and endpoint in {"deleteMessage", "deleteMessages"}:
-            raw_ids = data.get("message_ids") if endpoint == "deleteMessages" else [data.get("message_id")]
-            if isinstance(raw_ids, Sequence) and not isinstance(raw_ids, (str, bytes)):
-                await self.forget_messages(data.get("chat_id"), raw_ids)
-            return
-        await self.record_api_result(endpoint, data, result)
-
     async def snapshot(self) -> dict[int, list[int]]:
         async with self._lock:
             registry = self._registry()
@@ -231,7 +180,13 @@ class MessageTracker:
                 result[int(chat_id)] = sorted(int(message_id) for message_id in messages)
             return result
 
-    async def cleanup(self, bot: Any, *, now: datetime | None = None) -> MessageCleanupStats:
+    async def cleanup(
+        self,
+        bot: Any,
+        *,
+        now: datetime | None = None,
+        startup: bool = False,
+    ) -> MessageCleanupStats:
         stats = MessageCleanupStats()
         if not self.enabled or self._cleanup_lock.locked():
             return stats
@@ -262,19 +217,22 @@ class MessageTracker:
                         key=lambda item: (item[1], item[0]),
                     )
                     latest_id = ordered[-1][0]
-                    expired_ids = [
-                        message_id
-                        for message_id, sent_at in ordered
-                        if message_id != latest_id and sent_at <= expiry_cutoff
-                    ]
+                    expired_ids = [message_id for message_id, sent_at in ordered if sent_at <= expiry_cutoff]
                     for message_id in expired_ids:
                         messages.pop(str(message_id), None)
                     stats.expired += len(expired_ids)
+                    if not messages:
+                        chats.pop(chat_id_text, None)
+                        continue
                     candidates = [
                         message_id
                         for message_id, sent_at in ordered
-                        if message_id != latest_id and expiry_cutoff < sent_at <= retention_cutoff
+                        if message_id != latest_id
+                        and expiry_cutoff < sent_at
+                        and (startup or sent_at <= retention_cutoff)
                     ]
+                    if startup and latest_id not in expired_ids:
+                        candidates.append(latest_id)
                     if candidates:
                         plans.append((int(chat_id_text), candidates))
                         stats.candidates += len(candidates)
@@ -290,7 +248,7 @@ class MessageTracker:
                         await extend_flood_gate(delay)
                         stats.failed += len(chunk)
                         logger.warning(
-                            "Message cleanup rate limited chat_id=%s retry_after=%.1f",
+                            "Navigation cleanup rate limited chat_id=%s retry_after=%.1f",
                             chat_id,
                             delay,
                             extra={"user_id": chat_id, "action": "message_cleanup_retry"},
@@ -299,7 +257,7 @@ class MessageTracker:
                     except (Forbidden, BadRequest, TimedOut, NetworkError, OSError) as exc:
                         stats.failed += len(chunk)
                         logger.warning(
-                            "Message cleanup failed chat_id=%s count=%s type=%s",
+                            "Navigation cleanup failed chat_id=%s count=%s type=%s",
                             chat_id,
                             len(chunk),
                             exc.__class__.__name__,
@@ -315,7 +273,7 @@ class MessageTracker:
 
 
 class TrackingExtBot(ExtBot):
-    """ExtBot that records all message-shaped Bot API responses."""
+    """ExtBot carrying an opt-in navigation tracker for UI helpers."""
 
     __slots__ = ("message_tracker",)
     message_tracker: MessageTracker
@@ -324,20 +282,39 @@ class TrackingExtBot(ExtBot):
         super().__init__(token=token)
         object.__setattr__(self, "message_tracker", message_tracker)
 
-    async def _post(
-        self,
-        endpoint: str,
-        data: dict[str, Any] | None = None,
-        **kwargs: Any,
-    ) -> Any:
-        result = await super()._post(endpoint, data, **kwargs)
-        try:
-            await self.message_tracker.handle_api_result(endpoint, data, result)
-        except Exception:
-            # A successfully delivered Telegram message must never be reported as
-            # failed merely because local retention tracking had a problem.
-            logger.exception("Failed to update Telegram message registry endpoint=%s", endpoint)
-        return result
+
+async def record_navigation_message(bot: Any, message: Any) -> None:
+    """Register a panel explicitly; ordinary sends and incoming text stay untouched."""
+
+    tracker = getattr(bot, "message_tracker", None)
+    if not isinstance(tracker, MessageTracker) or message is None:
+        return
+    chat = getattr(message, "chat", None)
+    await tracker.record_message(
+        chat_id=getattr(chat, "id", None),
+        message_id=getattr(message, "message_id", None),
+        message_date=getattr(message, "date", datetime.now(timezone.utc)),
+        chat_type=getattr(chat, "type", None),
+    )
 
 
-__all__ = ["MessageCleanupStats", "MessageTracker", "TrackingExtBot"]
+async def record_navigation_result(update: Any, result: Any) -> None:
+    """Register the message returned by a navigation-panel send or edit."""
+
+    message = result
+    if result is True:
+        query = getattr(update, "callback_query", None)
+        message = getattr(query, "message", None)
+    get_bot = getattr(update, "get_bot", None)
+    if not callable(get_bot):
+        return
+    await record_navigation_message(get_bot(), message)
+
+
+__all__ = [
+    "MessageCleanupStats",
+    "MessageTracker",
+    "TrackingExtBot",
+    "record_navigation_message",
+    "record_navigation_result",
+]

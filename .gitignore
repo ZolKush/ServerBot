@@ -10,6 +10,9 @@ env.secrets
 !env.secrets.example
 !**/env.secrets.example
 
+# environment-specific server inventory (generated from the legacy .env)
+app/servers.toml
+
 # runtime data
 data/
 

@@ -105,9 +105,9 @@ def build_administration_flow() -> NavigableConversationHandler:
             CallbackQueryHandler(
                 administration_input_start_cb,
                 pattern=(
-                    r"^(administration:input:(alias|help|support_email|payment_bank|payment_recipient|"
-                    r"payment_phone|period_current|period_next)|staff:alias|"
-                    r"product:input:setting_(bank|recipient|phone|current|next))$"
+                    r"^(administration:input:(alias|help|support_email|payment_message|"
+                    r"period_current|period_next)|staff:alias|"
+                    r"product:input:setting_(payment|current|next))$"
                 ),
             ),
         ],
@@ -147,7 +147,7 @@ def build_product_flow() -> NavigableConversationHandler:
             CallbackQueryHandler(trial_request_start_cb, pattern=r"^subscription:trial$"),
             CallbackQueryHandler(
                 product_request_action_cb,
-                pattern=r"^product:req:(approve|reject|requisites|confirm|notfound):\d+$",
+                pattern=r"^product:req:(approve|approve24|custom|reject|requisites|confirm|notfound):\d+$",
             ),
             CallbackQueryHandler(
                 product_input_start_cb,
@@ -252,7 +252,7 @@ def build_users_flow() -> NavigableConversationHandler:
                     r"user:\d+|page:\d+)$",
                 ),
             ],
-            ADMIN_ALL_MENU: [CallbackQueryHandler(users_all_menu, pattern=r"^users:(allmsg|back)$")],
+            ADMIN_ALL_MENU: [CallbackQueryHandler(users_all_menu, pattern=r"^users:(allmsg:(all|admins)|back)$")],
             ADMIN_ALL_MSG_TEXT: [MessageHandler(PRIVATE_TEXT, users_all_msg_text)],
             ADMIN_ALL_MSG_CONFIRM: [CallbackQueryHandler(users_all_msg_confirm, pattern=r"^users:(allsend|all|back)$")],
             ADMIN_USER_MENU: [

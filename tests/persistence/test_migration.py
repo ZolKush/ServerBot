@@ -32,6 +32,7 @@ def test_v4_transform_splits_every_domain_without_references(tmp_path: Path) -> 
     assert "enabled" not in account
     assert "service_tier" not in profile
     assert "username" not in account
+    assert transformed.stores["subscriptions.billing_settings"]["payment_message"] is None
 
     tickets = transformed.stores["support.tickets"]
     messages = transformed.stores["support.ticket_messages"]

@@ -9,6 +9,8 @@ from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
 from ...bot.guards import require_admin
+from ...config import logger
+from ...messaging.review_sync import record_review_delivery, review_completion
 from ...storage import get_user_meta_copy, service_requests_snapshot
 from . import state
 from .views import request_card, request_markup, request_status_label, user_nickname
@@ -84,6 +86,26 @@ async def product_request_view_cb(
         parse_mode=ParseMode.HTML,
         reply_markup=request_markup(request, actor),
     )
+    user = update.effective_user
+    message = query.message
+    generation = str(request.get("created_at") or "")
+    if user and message and generation:
+        try:
+            await record_review_delivery(
+                context.bot,
+                review_completion(
+                    scope="service",
+                    target_id=int(request.get("id", 0) or 0),
+                    generation=generation,
+                ),
+                user.id,
+                message,
+            )
+        except Exception:
+            logger.exception(
+                "Could not register manually opened service request card request_id=%s",
+                request.get("id"),
+            )
 
 
 __all__ = ["product_request_view_cb", "product_requests_cb"]

@@ -7,14 +7,14 @@ from typing import Any
 
 from telegram.ext import ContextTypes
 
-from ...bot.ui import html_escape
+from ...bot.ui import clip_html, html_escape
+from ...messaging.review_sync import sync_service_review_messages
 from ...runtime.logging import logger
 from ...storage import UserData, update_user_data
-from ..policy import PLAN_MONTHS, PLAN_TOTAL_RUB
 from . import state
 from .eligibility import is_paid_subscriber
 from .operations import owner_meta_from_config, queue_message
-from .views import payment_profile_ready, payment_target, renewal_markup
+from .views import payment_profile_ready, payment_target, render_payment_template, renewal_markup
 
 
 def automatic_reminder_text(
@@ -36,19 +36,11 @@ def automatic_reminder_text(
         "",
         heading,
         (f"Текущий доступ до: <code>{html_escape(state.datetime_text(meta.get('subscription_end_at')))}</code>"),
-        f"Стоимость продления: <b>{PLAN_TOTAL_RUB} ₽ за {PLAN_MONTHS} месяца</b>",
     ]
     if target:
         lines.append(f"Следующий период до: <code>{html_escape(state.datetime_text(target.isoformat()))}</code>")
     if payment_profile_ready(settings):
-        lines.extend(
-            [
-                "",
-                f"Банк: <b>{html_escape(str(settings.get('payment_bank')))}</b>",
-                (f"Получатель: <b>{html_escape(str(settings.get('payment_recipient')))}</b>"),
-                f"Телефон: <code>{html_escape(str(settings.get('payment_phone')))}</code>",
-            ]
-        )
+        lines.extend(["", clip_html(render_payment_template(settings, access_until=target), limit=2600)])
     if target and payment_profile_ready(settings):
         lines.extend(
             [
@@ -131,8 +123,8 @@ def _release_stale_claims(
     config: UserData,
     *,
     current_time,
-) -> int:
-    released = 0
+) -> list[int]:
+    released: list[int] = []
     for request_id, request in list(config.service_requests.items()):
         if not isinstance(request, dict) or request.get("status") != "awaiting_link":
             continue
@@ -156,7 +148,7 @@ def _release_stale_claims(
                 }
             )
             config.service_requests[request_id] = updated
-            released += 1
+            released.append(int(request.get("id", request_id) or request_id))
     return released
 
 
@@ -253,15 +245,63 @@ def _process_subscribers(
     return reminders, expired
 
 
+def _process_expired_trials(
+    config: UserData,
+    *,
+    current_time,
+) -> int:
+    expired = 0
+    for key, current in list(config.authorized_users.items()):
+        if (
+            not isinstance(current, dict)
+            or current.get("role") == "admin"
+            or current.get("service_tier") != "basic"
+            or current.get("is_paid")
+            or not str(current.get("connection_url") or "").strip()
+        ):
+            continue
+        trial_end = state.parse_datetime(current.get("trial_end_at"))
+        if trial_end is None or current_time < trial_end:
+            continue
+        user_id = int(current.get("user_id", key))
+        config.authorized_users[key] = UserData._normalize_user(
+            {
+                **current,
+                "connection_url": None,
+                "subscription_updated_at": current_time.isoformat(),
+                "subscription_updated_by_id": None,
+                "subscription_updated_by_name": "Система",
+            }
+        )
+        if current.get("access_state") == "approved" and bool(current.get("enabled", True)):
+            queue_message(
+                config,
+                recipient_ids=[user_id],
+                kind="trial_expired",
+                text=(
+                    "🧪 <b>Тестовый доступ завершён</b>\n\n"
+                    "Срок тестовой ссылки истёк, поэтому она удалена из личного раздела. "
+                    "Для продолжения оформите подписку или создайте тикет в поддержку."
+                ),
+                reply_markup=[
+                    [{"text": "💳 Купить подписку", "callback_data": "subscription:buy"}],
+                    [{"text": "🎫 Создать тикет", "callback_data": "menu:ticket"}],
+                ],
+            )
+        expired += 1
+    return expired
+
+
 async def subscription_lifecycle_job(
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
     current_time = state.now()
 
-    def tick(config: UserData) -> dict[str, int]:
+    def tick(config: UserData) -> tuple[dict[str, int], list[int]]:
         counters = {
             "reminders": 0,
             "expired": 0,
+            "trials_expired": 0,
             "released": 0,
             "period_rollover": 0,
         }
@@ -270,17 +310,29 @@ async def subscription_lifecycle_job(
             current_time=current_time,
             counters=counters,
         )
-        counters["released"] = _release_stale_claims(
+        released_request_ids = _release_stale_claims(
             config,
             current_time=current_time,
         )
+        counters["released"] = len(released_request_ids)
         counters["reminders"], counters["expired"] = _process_subscribers(
             config,
             current_time=current_time,
         )
-        return counters
+        counters["trials_expired"] = _process_expired_trials(
+            config,
+            current_time=current_time,
+        )
+        return counters, released_request_ids
 
-    counters = await update_user_data(tick)
+    counters, released_request_ids = await update_user_data(tick)
+    bot = getattr(context, "bot", None)
+    if bot is not None:
+        for request_id in released_request_ids:
+            try:
+                await sync_service_review_messages(bot, request_id)
+            except Exception:
+                logger.exception("Could not synchronize released request cards request_id=%s", request_id)
     if any(counters.values()):
         logger.info(
             "Subscription lifecycle processed: %s",

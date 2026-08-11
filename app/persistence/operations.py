@@ -19,6 +19,7 @@ def make_outbox_event(
     payload: dict[str, Any],
     event_id: str | None = None,
     allow_blocked_delivery: bool = False,
+    completion: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     valid_ids: set[int] = set()
     for raw_uid in recipient_ids:
@@ -38,6 +39,7 @@ def make_outbox_event(
         "created_at": now,
         "payload": copy.deepcopy(payload),
         "allow_blocked_delivery": bool(allow_blocked_delivery),
+        "completion": copy.deepcopy(completion) if isinstance(completion, dict) else {},
         "recipients": {
             str(uid): {
                 "status": "pending",

@@ -27,13 +27,10 @@ async def build_status_message(
         return ui_error_text("Сервер не найден."), keyboard
 
     snapshot = await build_status_snapshot(update, server)
-    show_ssh_diag = snapshot.source_mode == "mixed" and (bool(snapshot.metrics_error) or snapshot.node_online is False)
-    show_ssh_refresh = snapshot.source_mode == "mixed" and snapshot.node_online is True
     keyboard = status_actions_keyboard(
         admin_mode=snapshot.admin_mode,
         server_key=server.key,
-        show_ssh_diag=show_ssh_diag,
-        show_ssh_refresh=show_ssh_refresh,
+        show_ssh_fallback=server.mode == "ssh" and snapshot.source_mode == "mixed" and bool(snapshot.metrics_error),
     )
     return format_status_message(snapshot), keyboard
 

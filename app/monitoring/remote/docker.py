@@ -13,6 +13,7 @@ from ...config import (
 )
 from ..docker.local import _parse_docker_inspect_json
 from ..docker.models import docker_status_is_running
+from ..docker.presentation import normalize_docker_status
 from .transport import ssh_run_exec, ssh_run_shell
 
 
@@ -57,7 +58,8 @@ async def remote_docker_containers(
         timeout=SUBPROC_MEDIUM_TIMEOUT + 4,
     )
     if return_code != 0:
-        status = f"ssh ошибка: {(stderr or '').strip() or return_code}"
+        detail = normalize_docker_status(stderr or return_code)
+        status = normalize_docker_status(f"ssh ошибка: {detail}")
         return [(name, False, status, "-") for name in name_list] or [
             ("Docker API", False, status, "-"),
         ]

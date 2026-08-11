@@ -9,7 +9,12 @@ from app import storage
 from app.bot.menu import main_menu_inline_kb_for_meta
 from app.config import TZ
 from app.persistence.normalization import normalize_product_settings
-from app.subscriptions.connections import connection_outbox_payload, is_valid_connection_url
+from app.subscriptions.connections import (
+    _dashboard_markup,
+    connection_outbox_payload,
+    is_valid_connection_url,
+    trial_access_expired,
+)
 from app.subscriptions.requests import flow_cleanup as product_flow_cleanup
 from app.subscriptions.requests import lifecycle as product_lifecycle
 from app.subscriptions.requests import state as product_state
@@ -134,6 +139,43 @@ async def test_staff_subscription_expiry_preserves_administrator_role(
     assert any(
         event["kind"] == "subscription_expired" and "2" in event["recipients"] for _, event in storage.outbox_snapshot()
     )
+
+
+@pytest.mark.asyncio
+async def test_trial_link_is_removed_at_deadline_and_notification_is_sent_once(
+    isolated_storage: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 7, 15, 12, 0, tzinfo=TZ)
+    monkeypatch.setattr(product_state, "now", lambda: now)
+
+    def _seed(cfg: storage.UserData) -> None:
+        cfg.authorized_users = {
+            "42": _user(
+                42,
+                connection_url="https://connect.test/trial",
+                trial_issued_at=(now - timedelta(hours=24)).isoformat(),
+                trial_end_at=(now - timedelta(seconds=1)).isoformat(),
+                trial_duration_hours=24,
+            )
+        }
+
+    await storage.update_user_data(_seed)
+    before = storage.get_user_meta_copy(42)
+    assert before is not None
+    assert trial_access_expired(before, at=now)
+    assert "subscription:connection" not in _callback_names(_dashboard_markup(before))
+
+    await product_lifecycle.subscription_lifecycle_job(SimpleNamespace())
+    await product_lifecycle.subscription_lifecycle_job(SimpleNamespace())
+
+    expired = storage.get_user_meta_copy(42)
+    assert expired is not None
+    assert expired["connection_url"] is None
+    assert expired["trial_end_at"] == (now - timedelta(seconds=1)).isoformat()
+    events = [event for _, event in storage.outbox_snapshot() if event["kind"] == "trial_expired"]
+    assert len(events) == 1
+    assert "42" in events[0]["recipients"]
 
 
 @pytest.mark.asyncio

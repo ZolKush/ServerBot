@@ -6,6 +6,9 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes, ConversationHandler
 
 from ...bot.menu import main_menu_inline_kb, show_main_menu
+from ...config import logger
+from ...messaging.message_cleanup import record_navigation_result
+from ...messaging.review_sync import sync_service_review_messages
 from ...storage import UserData, update_user_data
 from . import state
 
@@ -22,12 +25,12 @@ async def abandon_product_flow(
         if not request_id or not actor:
             return
 
-        def release(config: UserData) -> None:
+        def release(config: UserData) -> bool:
             request = config.service_requests.get(str(request_id))
             if not isinstance(request, dict) or request.get("status") != "awaiting_link":
-                return
+                return False
             if int(request.get("claimed_by_id", 0) or 0) != int(actor.get("user_id", 0) or 0):
-                return
+                return False
             updated = dict(request)
             updated.update(
                 {
@@ -38,8 +41,19 @@ async def abandon_product_flow(
                 }
             )
             config.service_requests[str(request_id)] = updated
+            return True
 
-        await update_user_data(release)
+        released = await update_user_data(release)
+        bot = getattr(context, "bot", None)
+        if released and bot is not None:
+            try:
+                await sync_service_review_messages(bot, request_id)
+            except Exception:
+                logger.exception(
+                    "Could not synchronize request cards after flow cancellation request_id=%s",
+                    request_id,
+                    extra={"action": "review_card_sync", "request_id": request_id},
+                )
     finally:
         state.clear_request_context(context)
 
@@ -60,10 +74,11 @@ async def product_cancel(
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Меню", callback_data="menu:home")]]),
         )
     elif update.effective_message:
-        await update.effective_message.reply_text(
+        result = await update.effective_message.reply_text(
             "Действие отменено.",
             reply_markup=main_menu_inline_kb(update),
         )
+        await record_navigation_result(update, result)
     return ConversationHandler.END
 
 

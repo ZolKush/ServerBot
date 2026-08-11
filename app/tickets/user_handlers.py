@@ -14,6 +14,7 @@ from ..bot.help import render_support_contact
 from ..bot.menu import show_main_menu
 from ..bot.ui import ui_error_text, ui_ok_text, ui_warn_text
 from ..config import TZ, logger
+from ..messaging.message_cleanup import record_navigation_result
 from ..storage import ImportantData, get_user_open_tickets, product_settings_snapshot
 from .dashboard_handlers import _show_ticket_dashboard
 from .notifications import _queue_admin_full_notifications, _queue_user_notification
@@ -63,17 +64,20 @@ async def ticket_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         keyboard = _ticket_user_kb(ticket, uid)
         if query and message:
             await query.answer()
-            await query.edit_message_text(
+            result = await query.edit_message_text(
                 text,
                 parse_mode=ParseMode.HTML,
                 reply_markup=keyboard,
             )
         elif message:
-            await message.reply_text(
+            result = await message.reply_text(
                 text,
                 parse_mode=ParseMode.HTML,
                 reply_markup=keyboard,
             )
+        else:
+            return ConversationHandler.END
+        await record_navigation_result(update, result)
         return ConversationHandler.END
 
     _clear_ticket_ctx(context)
@@ -83,17 +87,20 @@ async def ticket_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     )
     if query and message:
         await query.answer()
-        await query.edit_message_text(
+        result = await query.edit_message_text(
             prompt,
             parse_mode=ParseMode.HTML,
             reply_markup=ticket_input_kb(),
         )
     elif message:
-        await message.reply_text(
+        result = await message.reply_text(
             prompt,
             parse_mode=ParseMode.HTML,
             reply_markup=ticket_input_kb(),
         )
+    else:
+        return ConversationHandler.END
+    await record_navigation_result(update, result)
     return TICKET_SUBJECT
 
 
@@ -117,14 +124,16 @@ async def ticket_subject(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     edit_field = data.pop("ticket_edit_field", None)
     if edit_field == "subject" and data.get("ticket_text"):
         if message:
-            await message.reply_text(
+            result = await message.reply_text(
                 _ticket_preview_text(context),
                 parse_mode=ParseMode.HTML,
                 reply_markup=ticket_confirm_kb(),
             )
+            await record_navigation_result(update, result)
         return TICKET_CONFIRM
     if message:
-        await message.reply_text("Срочность:", reply_markup=ticket_urgency_kb())
+        result = await message.reply_text("Срочность:", reply_markup=ticket_urgency_kb())
+        await record_navigation_result(update, result)
     return TICKET_URGENCY
 
 
@@ -173,11 +182,12 @@ async def ticket_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         data.pop("ticket_attachment", None)
     data.pop("ticket_edit_field", None)
     if message:
-        await message.reply_text(
+        result = await message.reply_text(
             _ticket_preview_text(context),
             parse_mode=ParseMode.HTML,
             reply_markup=ticket_confirm_kb(),
         )
+        await record_navigation_result(update, result)
     return TICKET_CONFIRM
 
 

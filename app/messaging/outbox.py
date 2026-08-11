@@ -110,50 +110,46 @@ async def _extend_flood_gate(seconds: float) -> None:
     await extend_flood_gate(seconds)
 
 
-async def _deliver(bot, uid: int, payload: dict[str, Any]) -> None:
+async def _deliver(bot, uid: int, payload: dict[str, Any]) -> Any:
     method = str(payload.get("method") or "send_message")
     markup = _markup_from_descriptor(payload.get("reply_markup"))
     await _wait_for_flood_gate()
     if method == "send_message":
-        await bot.send_message(
+        return await bot.send_message(
             chat_id=uid,
             text=str(payload.get("text") or ""),
             parse_mode=str(payload.get("parse_mode") or "") or None,
             reply_markup=markup,
             link_preview_options=LinkPreviewOptions(is_disabled=bool(payload.get("disable_web_page_preview", True))),
         )
-        return
     if method == "send_photo":
-        await bot.send_photo(
+        return await bot.send_photo(
             chat_id=uid,
             photo=str(payload.get("file_id") or ""),
             caption=str(payload.get("caption") or "")[:1024] or None,
             parse_mode=str(payload.get("parse_mode") or "") or None,
             reply_markup=markup,
         )
-        return
     if method == "send_document":
-        await bot.send_document(
+        return await bot.send_document(
             chat_id=uid,
             document=str(payload.get("file_id") or ""),
             caption=str(payload.get("caption") or "")[:1024] or None,
             parse_mode=str(payload.get("parse_mode") or "") or None,
             reply_markup=markup,
         )
-        return
     if method == "send_document_text":
         text = str(payload.get("text") or "")
         if not text or len(text.encode("utf-8")) > 1_000_000:
             raise BadRequest("invalid outbox text document")
         filename = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(payload.get("filename") or "document.txt"))[:100]
-        await bot.send_document(
+        return await bot.send_document(
             chat_id=uid,
             document=InputFile(BytesIO(text.encode("utf-8")), filename=filename or "document.txt"),
             caption=str(payload.get("caption") or "")[:1024] or None,
             parse_mode=str(payload.get("parse_mode") or "") or None,
             reply_markup=markup,
         )
-        return
     raise BadRequest(f"unsupported outbox method: {method}")
 
 
@@ -279,7 +275,7 @@ async def process_outbox(bot) -> int:
                 except (TypeError, ValueError):
                     attempts = 1
                 try:
-                    await _deliver(bot, uid, payload)
+                    delivered_message = await _deliver(bot, uid, payload)
                 except RetryAfter as exc:
                     delay = _retry_after_seconds(exc) + 0.5
                     await _extend_flood_gate(delay)
@@ -338,6 +334,20 @@ async def process_outbox(bot) -> int:
                         _recipient_mutation(uid, status="terminal", attempts=attempts, error=str(exc)),
                     )
                 else:
+                    completion = event.get("completion")
+                    if isinstance(completion, dict) and completion.get("type") == "review_card":
+                        try:
+                            from .review_sync import record_review_delivery
+
+                            await record_review_delivery(bot, completion, uid, delivered_message)
+                        except Exception:
+                            # Delivery already happened. Never resend a card merely because
+                            # recording/editing its synchronization reference failed.
+                            logger.exception(
+                                "Could not record review-card delivery event=%s recipient=%s",
+                                event_id,
+                                uid,
+                            )
                     updated_event = await mutate_outbox_event(
                         source,
                         event_id,

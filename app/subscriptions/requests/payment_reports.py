@@ -10,6 +10,9 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from ...bot.guards import require_auth
+from ...messaging.review_refs import review_completion
+from ...messaging.review_sync import sync_service_review_messages
+from ...runtime.logging import logger
 from ...storage import UserData, update_user_data
 from . import state
 from .operations import (
@@ -83,10 +86,21 @@ async def payment_reported_cb(update: Update, context: ContextTypes.DEFAULT_TYPE
                     ],
                     [{"text": "👤 Профиль", "callback_data": f"users:user:{user_id}"}],
                 ],
+                completion=review_completion(
+                    scope="service",
+                    target_id=request_id,
+                    generation=str(updated.get("created_at") or ""),
+                ),
             )
         return "reported"
 
     outcome = await update_user_data(report)
+    bot = getattr(context, "bot", None)
+    if bot is not None and outcome in {"reported", "already", "stale"}:
+        try:
+            await sync_service_review_messages(bot, request_id)
+        except Exception:
+            logger.exception("Could not synchronize payment request cards request_id=%s", request_id)
     texts = {
         "reported": "✅ Информация об оплате отправлена руководителю сервиса. Ожидайте подтверждения.",
         "already": "Оплата уже ожидает проверки руководителем сервиса.",
@@ -159,6 +173,11 @@ async def renewal_reported_cb(update: Update, context: ContextTypes.DEFAULT_TYPE
                     ],
                     [{"text": "👤 Профиль", "callback_data": f"users:user:{user_id}"}],
                 ],
+                completion=review_completion(
+                    scope="service",
+                    target_id=request_id,
+                    generation=str(request.get("created_at") or ""),
+                ),
             )
         return "created", request_id
 

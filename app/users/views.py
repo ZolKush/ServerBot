@@ -95,7 +95,7 @@ def users_list_kb(active_filter: str = USER_FILTER_ALL, page: int = 0) -> Inline
 
     buttons: list[list[InlineKeyboardButton]] = []
     buttons.extend(_filter_buttons(active_filter))
-    buttons.append([InlineKeyboardButton("📣 Рассылка всем", callback_data="users:all")])
+    buttons.append([InlineKeyboardButton("📣 Рассылка", callback_data="users:all")])
 
     items: list[tuple[str, bool, bool, str, str, int, str]] = []
     for k, meta in authorized_users_snapshot().items():
@@ -145,17 +145,19 @@ def users_list_kb(active_filter: str = USER_FILTER_ALL, page: int = 0) -> Inline
 def users_all_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("✉️ Подготовить рассылку", callback_data="users:allmsg")],
+            [InlineKeyboardButton("👥 Всем активным", callback_data="users:allmsg:all")],
+            [InlineKeyboardButton("👑 Только администраторам", callback_data="users:allmsg:admins")],
             [InlineKeyboardButton("⬅️ Назад", callback_data="users:back")],
             [InlineKeyboardButton("🏠 Меню", callback_data="menu:home")],
         ]
     )
 
 
-def users_all_confirm_kb() -> InlineKeyboardMarkup:
+def users_all_confirm_kb(audience: str = "all") -> InlineKeyboardMarkup:
+    label = "✅ Отправить администраторам" if audience == "admins" else "✅ Отправить всем"
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("✅ Отправить всем", callback_data="users:allsend")],
+            [InlineKeyboardButton(label, callback_data="users:allsend")],
             [InlineKeyboardButton("⬅️ Назад", callback_data="users:all")],
             [InlineKeyboardButton("🏠 Меню", callback_data="menu:home")],
         ]

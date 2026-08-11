@@ -1,5 +1,4 @@
 import re
-from datetime import datetime
 
 from ...bot.ui import (
     SEP,
@@ -11,9 +10,9 @@ from ...bot.ui import (
     section,
     used_total_percent,
 )
+from ..docker.presentation import main_docker_problem_lines
 from .models import StatusSnapshot
-
-MAX_DNS_DETAIL_LINES = 10
+from .summary import dns_detail_line, dns_failure_block, summary_chips_line, tls_failure_block
 
 
 def _normalize_memory_display(raw: str) -> str:
@@ -62,155 +61,6 @@ def _ufw_emoji(state: str) -> str:
     return "⚠️"
 
 
-def _dns_chip(snapshot: StatusSnapshot) -> str:
-    total = int(snapshot.dns_total_domains or 0)
-    ok = int(snapshot.dns_ok_domains or 0)
-    bad = int(snapshot.dns_bad_domains or 0)
-    unknown = int(snapshot.dns_unknown_domains or 0)
-    if total <= 0:
-        return "🌐 DNS ⚠️"
-    if ok == 0 and bad == 0 and unknown == 0:
-        return "🌐 DNS ⚠️"
-    emoji = "🟢" if (bad == 0 and unknown == 0) else ("🔴" if bad else "⚠️")
-    return f"🌐 DNS {emoji} {ok}/{total}"
-
-
-def _dns_detail_line(snapshot: StatusSnapshot) -> str | None:
-    total = int(snapshot.dns_total_domains or 0)
-    ok = int(snapshot.dns_ok_domains or 0)
-    bad = int(snapshot.dns_bad_domains or 0)
-    unknown = int(snapshot.dns_unknown_domains or 0)
-    if total <= 0:
-        return "🌐 DNS: проверка не настроена"
-    if ok == 0 and bad == 0 and unknown == 0:
-        return f"🌐 DNS: нет свежих данных ({total} доменов)"
-    if bad == 0 and unknown == 0:
-        return None
-    parts = []
-    if bad:
-        parts.append(f"ошибки: {bad}")
-    if unknown:
-        parts.append(f"нет ответа: {unknown}")
-    return "🌐 DNS: " + ", ".join(parts)
-
-
-def _docker_stats(snapshot: StatusSnapshot) -> dict[str, int | bool]:
-    running = stopped = unhealthy = missing = 0
-    unavailable = False
-    for container in snapshot.containers:
-        status = (container.status_text or "").strip().lower()
-        if "docker недоступен" in status or "ssh ошибка" in status or status.startswith("ошибка:"):
-            unavailable = True
-            continue
-        if status == "не найден":
-            missing += 1
-            continue
-        if container.is_up:
-            running += 1
-        else:
-            stopped += 1
-        if "unhealthy" in status:
-            unhealthy += 1
-    return {
-        "running": running,
-        "stopped": stopped,
-        "unhealthy": unhealthy,
-        "missing": missing,
-        "total": running + stopped,
-        "unavailable": unavailable,
-    }
-
-
-def _docker_chip(snapshot: StatusSnapshot) -> str:
-    stats = _docker_stats(snapshot)
-    degraded = bool(stats["unavailable"] or stats["stopped"] or stats["unhealthy"] or stats["missing"])
-    if not snapshot.admin_mode:
-        return f"🐳 Docker {'🔴' if degraded else '🟢'}"
-    if stats["unavailable"]:
-        return "🐳 Docker ⚠️ н/д"
-    emoji = "🔴" if degraded else "🟢"
-    result = (
-        f"🐳 Docker {emoji} работают {stats['running']} · остановлены {stats['stopped']} · "
-        f"unhealthy {stats['unhealthy']} · всего {stats['total']}"
-    )
-    if stats["missing"]:
-        result += f" · не найдены {stats['missing']}"
-    return result
-
-
-def _summary_chips_line(snapshot: StatusSnapshot) -> str:
-    ufw = f"🛡 UFW {_ufw_emoji(snapshot.ufw_state)}"
-    lines = [f"{_dns_chip(snapshot)}   {ufw}", _docker_chip(snapshot)]
-    if snapshot.admin_mode:
-        lines.append(_tls_chip(snapshot))
-    return "\n".join(lines)
-
-
-def _tls_chip(snapshot: StatusSnapshot) -> str:
-    certificates = snapshot.tls_certificates
-    if not certificates:
-        return "🔐 TLS ⚠️ нет данных"
-    ok = sum(1 for item in certificates if item.status == "ok")
-    critical = sum(1 for item in certificates if item.status in {"expired", "invalid"})
-    warning = len(certificates) - ok - critical
-    emoji = "🔴" if critical else ("⚠️" if warning else "🟢")
-    return f"🔐 TLS {emoji} исправны {ok} · проблемы {critical + warning} · всего {len(certificates)}"
-
-
-def _format_tls_expiry(value: str) -> str:
-    try:
-        parsed = datetime.fromisoformat(value)
-    except (TypeError, ValueError):
-        return value or "н/д"
-    return parsed.strftime("%d.%m.%Y %H:%M %Z").strip()
-
-
-def _tls_block(snapshot: StatusSnapshot) -> list[str]:
-    if not snapshot.admin_mode:
-        return []
-    lines = ["", section("TLS-сертификаты", "🔐")]
-    if not snapshot.tls_certificates:
-        lines.append("⚠️ Сертификаты ещё не проверялись или домены не настроены")
-        return lines
-    for item in snapshot.tls_certificates:
-        emoji = {
-            "ok": "🟢",
-            "expiring": "⚠️",
-            "expired": "🔴",
-            "invalid": "🔴",
-            "error": "⚠️",
-        }.get(item.status, "⚠️")
-        if item.status == "expired":
-            state = "просрочен"
-        elif item.status == "expiring":
-            hours = max(0, int(item.remaining_seconds) // 3600)
-            state = f"истекает через {hours} ч."
-        elif item.status == "invalid":
-            state = "невалиден"
-        elif item.status == "ok":
-            state = "действителен"
-        else:
-            state = "проверка не удалась"
-        lines.append(f"{emoji} <code>{html_escape(item.domain)}:{item.port}</code> — <b>{html_escape(state)}</b>")
-        if item.not_after:
-            lines.append(f"   до <code>{html_escape(_format_tls_expiry(item.not_after))}</code>")
-        if item.error:
-            lines.append(f"   <i>{html_escape(item.error[:300])}</i>")
-    return lines
-
-
-def _dns_error_block(snapshot: StatusSnapshot) -> list[str]:
-    if not snapshot.dns_error_details:
-        return []
-    lines: list[str] = ["", section("DNS — проблемы", "🌐")]
-    details = list(snapshot.dns_error_details)
-    lines.extend(details[:MAX_DNS_DETAIL_LINES])
-    hidden = len(details) - MAX_DNS_DETAIL_LINES
-    if hidden > 0:
-        lines.append(f"… ещё {hidden}")
-    return lines
-
-
 def _suffix_updated(text: str) -> str:
     s = (text or "").strip()
     if not s:
@@ -226,12 +76,12 @@ def _format_offline_message(snapshot: StatusSnapshot) -> str:
     if snapshot.last_seen_text:
         lines.append(f"Последнее обновление: <code>{html_escape(snapshot.last_seen_text)}</code>")
     lines.append(SEP)
-    lines.append(_summary_chips_line(snapshot))
-    dns_line = _dns_detail_line(snapshot)
+    lines.append(summary_chips_line(snapshot, ufw_emoji=_ufw_emoji(snapshot.ufw_state)))
+    dns_line = dns_detail_line(snapshot)
     if dns_line:
         lines.append(dns_line)
-    lines.extend(_dns_error_block(snapshot))
-    lines.extend(_tls_block(snapshot))
+    lines.extend(dns_failure_block(snapshot))
+    lines.extend(tls_failure_block(snapshot))
     lines.append("")
     lines.append(footer_updated(snapshot.now_text))
     return "\n".join(lines)
@@ -246,12 +96,12 @@ def _format_metrics_error_message(snapshot: StatusSnapshot) -> str:
     ]
     if snapshot.last_seen_text:
         lines.append(f"Последнее успешное обновление: <code>{html_escape(snapshot.last_seen_text)}</code>")
-    lines.extend([SEP, _summary_chips_line(snapshot)])
-    dns_line = _dns_detail_line(snapshot)
+    lines.extend([SEP, summary_chips_line(snapshot, ufw_emoji=_ufw_emoji(snapshot.ufw_state))])
+    dns_line = dns_detail_line(snapshot)
     if dns_line:
         lines.append(dns_line)
-    lines.extend(_dns_error_block(snapshot))
-    lines.extend(_tls_block(snapshot))
+    lines.extend(dns_failure_block(snapshot))
+    lines.extend(tls_failure_block(snapshot))
     lines.extend(["", footer_updated(snapshot.now_text)])
     return "\n".join(lines)
 
@@ -282,9 +132,9 @@ def format_status_message(snapshot: StatusSnapshot) -> str:
 
     lines.append(f"Аптайм: <b>{html_escape(snapshot.uptime_text)}</b>")
     lines.append(SEP)
-    lines.append(_summary_chips_line(snapshot))
+    lines.append(summary_chips_line(snapshot, ufw_emoji=_ufw_emoji(snapshot.ufw_state)))
 
-    dns_line = _dns_detail_line(snapshot)
+    dns_line = dns_detail_line(snapshot)
     if dns_line:
         lines.append(dns_line)
 
@@ -296,29 +146,16 @@ def format_status_message(snapshot: StatusSnapshot) -> str:
     if snapshot.admin_mode and snapshot.online_users is not None:
         lines.append(f"👥 Онлайн пользователей: <b>{int(snapshot.online_users)}</b>")
 
-    lines.extend(_dns_error_block(snapshot))
-    lines.extend(_tls_block(snapshot))
+    lines.extend(dns_failure_block(snapshot))
+    lines.extend(tls_failure_block(snapshot))
 
-    if snapshot.admin_mode and snapshot.show_containers_block:
+    problem_lines = (
+        main_docker_problem_lines(snapshot.containers) if snapshot.admin_mode and snapshot.show_containers_block else []
+    )
+    if problem_lines:
         lines.append("")
-        lines.append(section("Контейнеры", "🐳"))
-        if snapshot.containers:
-            for c in snapshot.containers:
-                status = (c.status_text or "н/д").strip()
-                status_lower = status.lower()
-                if (
-                    "unhealthy" in status_lower
-                    or status_lower == "не найден"
-                    or "недоступен" in status_lower
-                    or "ssh ошибка" in status_lower
-                    or status_lower.startswith("ошибка:")
-                ):
-                    emoji = "⚠️"
-                else:
-                    emoji = "🟢" if c.is_up else "🔴"
-                lines.append(f"{emoji} {html_escape(c.name)} — <i>{html_escape(status)}</i>")
-        else:
-            lines.append("🟢 Docker доступен, контейнеров нет")
+        lines.append(section("Контейнеры — проблемы", "🐳"))
+        lines.extend(problem_lines)
 
     lines.append("")
     lines.append(footer_updated(snapshot.now_text))

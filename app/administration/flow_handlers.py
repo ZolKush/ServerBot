@@ -10,7 +10,9 @@ from telegram.ext import ContextTypes, ConversationHandler
 from ..bot.guards import get_user_id, require_admin
 from ..bot.ui import html_escape
 from ..config import TZ
+from ..messaging.message_cleanup import record_navigation_result
 from ..storage import get_user_meta_copy
+from ..subscriptions.requests.views import PAYMENT_MESSAGE_MAX_LENGTH
 from ..users.staff import (
     can_edit_help_meta,
     is_owner_meta,
@@ -19,9 +21,8 @@ from ..users.staff import (
 from ..users.validation import normalize_email
 from .dates import datetime_text, parse_datetime, parse_input_datetime
 from .operations import (
-    PaymentSetting,
     PeriodKind,
-    change_payment_setting,
+    change_payment_message,
     change_staff_alias,
     change_support_email,
     save_billing_period,
@@ -108,11 +109,12 @@ async def administration_text_input(
             alias=alias,
         )
         clear_flow_state(context)
-        await message.reply_text(
+        result = await message.reply_text(
             administration_text(updated),
             parse_mode=ParseMode.HTML,
             reply_markup=administration_markup(updated),
         )
+        await record_navigation_result(update, result)
         return ConversationHandler.END
 
     if action == "help":
@@ -124,11 +126,12 @@ async def administration_text_input(
             await message.reply_text("Инструкция слишком длинная. Максимум 3500 символов.")
             return ADMINISTRATION_INPUT
         set_pending_change(context, {"kind": "help", "value": text})
-        await message.reply_text(
+        result = await message.reply_text(
             "📝 <b>Предварительный просмотр инструкции</b>\n\n" + html_escape(text),
             parse_mode=ParseMode.HTML,
             reply_markup=confirmation_markup(save_label="✅ Сохранить"),
         )
+        await record_navigation_result(update, result)
         return ADMINISTRATION_CONFIRM
 
     if action == "support_email":
@@ -142,38 +145,30 @@ async def administration_text_input(
             return ADMINISTRATION_INPUT
         settings = await change_support_email(actor=actor, email=email)
         clear_flow_state(context)
-        await message.reply_text(
+        result = await message.reply_text(
             service_settings_text(settings, actor),
             parse_mode=ParseMode.HTML,
             reply_markup=service_settings_markup(actor),
         )
+        await record_navigation_result(update, result)
         return ConversationHandler.END
 
-    if action in {"payment_bank", "payment_recipient", "payment_phone"}:
+    if action == "payment_message":
         if not is_owner_meta(actor):
             clear_flow_state(context)
             await message.reply_text("Доступно только руководителю сервиса.")
             return ConversationHandler.END
-        limits = {
-            "payment_bank": 160,
-            "payment_recipient": 160,
-            "payment_phone": 80,
-        }
-        if len(text) > limits[action]:
-            await message.reply_text("Значение слишком длинное.")
+        if len(text) > PAYMENT_MESSAGE_MAX_LENGTH:
+            await message.reply_text(f"Сообщение слишком длинное. Максимум {PAYMENT_MESSAGE_MAX_LENGTH} символов.")
             return ADMINISTRATION_INPUT
-        settings = await change_payment_setting(
-            actor=actor,
-            key=cast(PaymentSetting, action),
-            value=" ".join(text.split()),
-        )
-        clear_flow_state(context)
-        await message.reply_text(
-            service_settings_text(settings, actor),
+        set_pending_change(context, {"kind": "payment_message", "value": text})
+        result = await message.reply_text(
+            "💳 <b>Предварительный просмотр сообщения оплаты</b>\n\n" + html_escape(text),
             parse_mode=ParseMode.HTML,
-            reply_markup=service_settings_markup(actor),
+            reply_markup=confirmation_markup(save_label="✅ Сохранить"),
         )
-        return ConversationHandler.END
+        await record_navigation_result(update, result)
+        return ADMINISTRATION_CONFIRM
 
     if action in {"period_current", "period_next"}:
         if not is_owner_meta(actor):
@@ -188,11 +183,12 @@ async def administration_text_input(
             context,
             {"kind": action, "target_end_at": target.isoformat()},
         )
-        await message.reply_text(
+        result = await message.reply_text(
             f"Новое значение: <code>{html_escape(datetime_text(target.isoformat()))}</code>\n\nПодтвердите изменение.",
             parse_mode=ParseMode.HTML,
             reply_markup=confirmation_markup(),
         )
+        await record_navigation_result(update, result)
         return ADMINISTRATION_CONFIRM
 
     clear_flow_state(context)
@@ -231,6 +227,13 @@ async def administration_confirm_cb(
             value=value,
             changed_at=datetime.now(TZ),
         )
+    elif kind == "payment_message":
+        value = str(pending.get("value") or "").strip()
+        if not is_owner_meta(actor) or not value or len(value) > PAYMENT_MESSAGE_MAX_LENGTH:
+            await query.edit_message_text("Изменение больше недоступно или текст некорректен.")
+            clear_flow_state(context)
+            return ConversationHandler.END
+        settings = await change_payment_message(actor=actor, value=value)
     elif kind in {"period_current", "period_next"}:
         target = parse_datetime(pending.get("target_end_at"))
         if not is_owner_meta(actor) or target is None or target <= datetime.now(TZ):

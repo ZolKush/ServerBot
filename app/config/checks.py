@@ -125,6 +125,7 @@ def validate_configuration() -> list[str]:
         INSTANCE_LOCK_PATH,
         PRIVILEGED_HELPER_BIN,
         PTB_PERSISTENCE_PATH,
+        SERVER_INVENTORY_FILE,
         SERVERS,
         SSH_IDENTITY_FILE,
         SSH_KNOWN_HOSTS_FILE,
@@ -138,6 +139,7 @@ def validate_configuration() -> list[str]:
         errors.append("BOT_TOKEN: значение не похоже на токен Telegram")
     if not SERVERS:
         errors.append("не настроено ни одного сервера")
+    errors.extend(_readable_file(SERVER_INVENTORY_FILE, "SERVER_INVENTORY_FILE"))
     for key, server in SERVERS.items():
         if server.mode == "ssh" and not server.ssh_target:
             errors.append(f"SERVERS[{key}]: отсутствует SSH target")
@@ -187,7 +189,15 @@ def main() -> int:
         for error in errors:
             print(f"Ошибка конфигурации: {error}", file=sys.stderr)
         return 1
-    print("Конфигурация MaintBot корректна")
+    from . import SERVERS
+
+    dns_count = sum(len(server.check_a_domains) for server in SERVERS.values())
+    tls_count = sum(len(server.tls_endpoints) for server in SERVERS.values())
+    container_count = sum(len(server.monitor_containers) for server in SERVERS.values())
+    print(
+        "Конфигурация MaintBot корректна: "
+        f"servers={len(SERVERS)} dns_domains={dns_count} tls_endpoints={tls_count} containers={container_count}"
+    )
     return 0
 
 

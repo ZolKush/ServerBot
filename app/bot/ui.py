@@ -113,24 +113,24 @@ async def safe_edit_or_reply(
     *,
     reply_markup: InlineKeyboardMarkup | None = None,
     parse_mode: str = ParseMode.HTML,
-) -> None:
+) -> Any | None:
     """Edit a Telegram message and fall back to a reply without duplicates."""
     if message is None:
-        return
+        return None
     text = clip_html_message(text)
     try:
-        await message.edit_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
-        return
+        return await message.edit_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
     except BadRequest as error:
         if "message is not modified" in str(error).lower():
-            return
+            return message
         logger.warning("edit_text не удался (%s), отправляю новое сообщение", error)
     except Exception as error:
         logger.warning("edit_text не удался (%s), отправляю новое сообщение", error)
     try:
-        await message.reply_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
+        return await message.reply_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
     except Exception as error:
         logger.error("Не удалось отправить сообщение после неудачного edit_text: %s", error)
+        return None
 
 
 # Existing formatters insert SEP on a separate line.  An empty value preserves

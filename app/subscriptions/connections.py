@@ -12,6 +12,7 @@ from telegram.ext import ContextTypes
 from ..bot.guards import get_user_id, require_auth
 from ..bot.ui import format_dt_human, html_escape, ui_info_text, wrap_as_codeblock_html
 from ..config import TZ
+from ..messaging.message_cleanup import record_navigation_result
 from ..messaging.outbox import document_text_payload, message_payload
 from ..runtime.logging import logger
 from ..storage import get_user_meta_copy, service_requests_snapshot
@@ -45,6 +46,23 @@ def get_connection_url(meta: dict[str, Any] | None) -> str:
 
 def has_connection(meta: dict[str, Any] | None) -> bool:
     return bool(get_connection_url(meta).strip())
+
+
+def trial_access_expired(meta: dict[str, Any] | None, *, at: datetime | None = None) -> bool:
+    if not meta or meta.get("role") == "admin" or meta.get("service_tier") != "basic":
+        return False
+    raw_end = str(meta.get("trial_end_at") or "").strip()
+    if not raw_end:
+        return False
+    try:
+        end = datetime.fromisoformat(raw_end)
+    except ValueError:
+        return False
+    if end.tzinfo is None:
+        end = end.replace(tzinfo=TZ)
+    else:
+        end = end.astimezone(TZ)
+    return (at or datetime.now(TZ)) >= end
 
 
 def _connection_intro(meta: dict[str, Any]) -> str:
@@ -138,7 +156,7 @@ def _dashboard_markup(meta: dict[str, Any]) -> Any:
     tier = str(meta.get("service_tier") or "basic")
     billing_exempt = is_billing_exempt_meta(meta)
     rows: list[list[InlineKeyboardButton]] = []
-    if has_connection(meta):
+    if has_connection(meta) and not trial_access_expired(meta):
         rows.append([InlineKeyboardButton("🔗 Моя ссылка подключения", callback_data="subscription:connection")])
     if tier == "basic" and not billing_exempt:
         if meta.get("role") != "admin" and not meta.get("trial_issued_at"):
@@ -185,6 +203,11 @@ def _dashboard_text(meta: dict[str, Any]) -> str:
         f"• Доступ до: <code>{html_escape(end_text)}</code>",
         f"• Персональная ссылка: <b>{'назначена' if has_connection(meta) else 'не назначена'}</b>",
     ]
+    if meta.get("trial_end_at"):
+        trial_state = "завершён" if trial_access_expired(meta) else "активен"
+        lines.append(
+            f"• Тест: <b>{trial_state}</b> до <code>{html_escape(format_dt_human(meta.get('trial_end_at')))}</code>"
+        )
     for kind, label in (("trial", "Тест"), ("purchase", "Покупка"), ("renewal", "Продление")):
         status = _active_request_status(uid, kind)
         if status:
@@ -230,9 +253,11 @@ async def subscription_show(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     text = _dashboard_text(meta)
     markup = _dashboard_markup(meta)
     if q:
-        await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+        result = await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+        await record_navigation_result(update, result)
     elif msg:
-        await msg.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+        result = await msg.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+        await record_navigation_result(update, result)
 
 
 @require_auth
@@ -243,6 +268,12 @@ async def connection_show_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not q or uid is None or not meta:
         return
     await q.answer()
+    if trial_access_expired(meta):
+        await q.edit_message_text(
+            "Срок тестового доступа завершён. Для продолжения оформите подписку.",
+            reply_markup=_dashboard_markup(meta),
+        )
+        return
     if not has_connection(meta):
         await q.edit_message_text(
             "Персональная ссылка подключения ещё не назначена.",
@@ -255,3 +286,17 @@ async def connection_show_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
         reply_markup=_dashboard_markup(meta),
     )
     logger.info("Connection URL delivered to user_id=%s", uid)
+
+
+__all__ = [
+    "CONNECTION_URL_KEY",
+    "MAX_CONNECTION_BYTES",
+    "connection_outbox_payload",
+    "connection_show_cb",
+    "get_connection_url",
+    "has_connection",
+    "is_valid_connection_url",
+    "send_connection_payload",
+    "subscription_show",
+    "trial_access_expired",
+]

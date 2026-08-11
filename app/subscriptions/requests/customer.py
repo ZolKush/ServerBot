@@ -8,6 +8,7 @@ from telegram.ext import ContextTypes, ConversationHandler
 
 from ...bot.guards import require_auth
 from ...bot.ui import html_escape
+from ...messaging.review_refs import review_completion
 from ...storage import (
     UserData,
     product_settings_snapshot,
@@ -153,6 +154,11 @@ async def purchase_create_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 ],
                 [{"text": "👤 Профиль", "callback_data": f"users:user:{user_id}"}],
             ],
+            completion=review_completion(
+                scope="service",
+                target_id=request_id,
+                generation=str(request.get("created_at") or ""),
+            ),
         )
         return "created", request_id
 
@@ -203,6 +209,11 @@ def apply_trial_comment(
             ],
             [{"text": "👤 Профиль", "callback_data": f"users:user:{user_id}"}],
         ],
+        completion=review_completion(
+            scope="service",
+            target_id=request_id,
+            generation=str(request.get("created_at") or ""),
+        ),
     )
     return "created", request_id
 

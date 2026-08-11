@@ -23,6 +23,7 @@ from ...bot.ui import (
     ui_warn_text,
     wrap_as_codeblock_html,
 )
+from ...messaging.message_cleanup import record_navigation_result
 from ...messaging.outbox import message_payload
 from ...runtime.logging import logger
 from ...storage import make_outbox_event
@@ -45,6 +46,21 @@ from ..views import (
 from .navigation import conversation_data, get_users_filter
 from .operations import queue_broadcast, queue_direct_message
 
+BROADCAST_AUDIENCE_KEY = "users_all_broadcast_audience"
+BROADCAST_TEXT_KEY = "users_all_broadcast_text"
+
+
+def _broadcast_recipients(update: Update, audience: str) -> list[int]:
+    sender_id = get_user_id(update)
+    return authorized_ids(
+        role_filter="admin" if audience == "admins" else None,
+        exclude={sender_id} if sender_id else set(),
+    )
+
+
+def _audience_label(audience: str) -> str:
+    return "только активные администраторы" if audience == "admins" else "все активные пользователи"
+
 
 @require_admin
 async def users_all_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -61,10 +77,15 @@ async def users_all_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             reply_markup=users_list_kb(active_filter),
         )
         return ADMIN_PICK
-    if query.data == "users:allmsg":
+    if (query.data or "").startswith("users:allmsg:"):
+        audience = (query.data or "").rsplit(":", 1)[-1]
+        if audience not in {"all", "admins"}:
+            return ADMIN_ALL_MENU
+        conversation_data(context)[BROADCAST_AUDIENCE_KEY] = audience
         await query.edit_message_text(
             f"<b>{html_escape(breadcrumbs('Админ-панель', 'Пользователи', 'Рассылка', 'Текст'))}</b>\n\n"
-            "Введите текст сообщения всем пользователям:",
+            f"Получатели: <b>{html_escape(_audience_label(audience))}</b>.\n\n"
+            "Введите текст сообщения:",
             parse_mode=ParseMode.HTML,
         )
         return ADMIN_ALL_MSG_TEXT
@@ -85,19 +106,26 @@ async def users_all_msg_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if message:
             await message.reply_text(ui_error_text("пустой текст. Введите сообщение:"))
         return ADMIN_ALL_MSG_TEXT
-    conversation_data(context)["users_all_broadcast_text"] = text
+    data = conversation_data(context)
+    audience = str(data.get(BROADCAST_AUDIENCE_KEY) or "all")
+    if audience not in {"all", "admins"}:
+        audience = "all"
+    data[BROADCAST_TEXT_KEY] = text
+    recipients = _broadcast_recipients(update, audience)
     preview = (
         f"<b>{html_escape(breadcrumbs('Админ-панель', 'Пользователи', 'Рассылка', 'Проверка'))}</b>\n\n"
-        "Сообщение будет отправлено всем авторизованным пользователям (кроме вас).\n\n"
+        f"Получатели: <b>{html_escape(_audience_label(audience))}</b> (кроме вас).\n"
+        f"Текущее количество: <b>{len(recipients)}</b>.\n\n"
         + wrap_as_codeblock_html(clip_text(text, limit=3000))
         + "\n\nПодтвердите действие:"
     )
     if message:
-        await message.reply_text(
+        result = await message.reply_text(
             preview,
             parse_mode=ParseMode.HTML,
-            reply_markup=users_all_confirm_kb(),
+            reply_markup=users_all_confirm_kb(audience),
         )
+        await record_navigation_result(update, result)
     return ADMIN_ALL_MSG_CONFIRM
 
 
@@ -119,16 +147,18 @@ async def users_all_msg_confirm(update: Update, context: ContextTypes.DEFAULT_TY
         return ADMIN_ALL_MSG_CONFIRM
 
     user_data = conversation_data(context)
-    text = str(user_data.get("users_all_broadcast_text", "")).strip()
+    text = str(user_data.get(BROADCAST_TEXT_KEY, "")).strip()
     if not text:
         await query.edit_message_text(ui_error_text("текст рассылки потерян. Повторите позже."))
         return ADMIN_PICK
 
+    audience = str(user_data.get(BROADCAST_AUDIENCE_KEY) or "all")
+    if audience not in {"all", "admins"}:
+        audience = "all"
     sender_id = get_user_id(update)
-    recipients = authorized_ids(
-        role_filter=None,
-        exclude={sender_id} if sender_id else set(),
-    )
+    # Recalculate at confirmation time so blocked/logged-out accounts cannot
+    # receive a draft that was composed while they were still active.
+    recipients = _broadcast_recipients(update, audience)
     if not recipients:
         await query.edit_message_text(ui_warn_text("нет получателей для рассылки."))
         return ADMIN_PICK
@@ -147,13 +177,15 @@ async def users_all_msg_confirm(update: Update, context: ContextTypes.DEFAULT_TY
         event,
         sender_id=sender_id,
         recipient_count=len(recipients),
+        audience=audience,
     )
     logger.info(
         "Admin user_id=%s queued broadcast recipients=%s",
         sender_id,
         len(recipients),
     )
-    user_data.pop("users_all_broadcast_text", None)
+    user_data.pop(BROADCAST_TEXT_KEY, None)
+    user_data.pop(BROADCAST_AUDIENCE_KEY, None)
     await query.edit_message_text(
         ui_ok_text(f"Рассылка сохранена в очереди для {len(recipients)} получателей."),
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Меню", callback_data="menu:home")]]),
@@ -169,11 +201,12 @@ async def users_user_msg_text(update: Update, context: ContextTypes.DEFAULT_TYPE
         if message:
             active_filter = get_users_filter(context)
             await message.reply_text(ui_error_text("пользователь не выбран."))
-            await message.reply_text(
+            result = await message.reply_text(
                 users_list_title(active_filter),
                 parse_mode=ParseMode.HTML,
                 reply_markup=users_list_kb(active_filter),
             )
+            await record_navigation_result(update, result)
         return ADMIN_PICK
 
     meta = get_user_meta(user_id)
@@ -181,11 +214,12 @@ async def users_user_msg_text(update: Update, context: ContextTypes.DEFAULT_TYPE
         if message:
             active_filter = get_users_filter(context)
             await message.reply_text(ui_error_text("пользователь не найден."))
-            await message.reply_text(
+            result = await message.reply_text(
                 users_list_title(active_filter),
                 parse_mode=ParseMode.HTML,
                 reply_markup=users_list_kb(active_filter),
             )
+            await record_navigation_result(update, result)
         return ADMIN_PICK
 
     text = ((message.text if message else "") or "").strip()
@@ -217,9 +251,10 @@ async def users_user_msg_text(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
     if message:
         await message.reply_text(ui_ok_text("Сообщение сохранено в очереди отправки"))
-        await message.reply_text(
+        result = await message.reply_text(
             format_user_card(meta),
             parse_mode=ParseMode.HTML,
             reply_markup=user_card_kb(user_id),
         )
+        await record_navigation_result(update, result)
     return ADMIN_USER_MENU

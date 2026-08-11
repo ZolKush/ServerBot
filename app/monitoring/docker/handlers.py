@@ -7,11 +7,14 @@ from telegram.ext import ContextTypes
 from ...bot.guards import require_admin
 from ...bot.ui import breadcrumbs, html_escape, ui_error_text, wrap_as_codeblock_html
 from ...config import SERVER_KEY_PATTERN
+from ...storage import get_docker_status_cache
 from ..remote.docker import remote_docker_inspect_summary, remote_docker_logs_tail
-from ..status.common import get_server_target
+from ..status.cache import docker_views_from_cache
+from ..status.common import format_iso_short, get_server_target
 from ..status.presenter import build_status_message
 from .local import docker_inspect_summary, docker_logs_tail
 from .models import is_valid_container_name
+from .presentation import format_docker_report
 
 DOCKER_LOGS_TAIL_MIN = 120
 DOCKER_LOGS_TAIL_MAX = 600
@@ -69,6 +72,14 @@ def _docker_list_kb(server_key: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+def _docker_report(server_key: str, server_label: str) -> str:
+    server = get_server_target(server_key)
+    items = docker_views_from_cache(server) if server else []
+    cached_status = get_docker_status_cache(server_key) or {}
+    updated_at = format_iso_short(cached_status.get("updated_at"))
+    return format_docker_report(server_label, items, updated_at=updated_at)
+
+
 def _docker_item_kb(server_key: str, name: str, tail: int = DOCKER_LOGS_TAIL_MIN) -> InlineKeyboardMarkup:
     tail = int(tail)
     tail = (
@@ -114,7 +125,7 @@ async def docker_list_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await q.edit_message_text(ui_error_text("сервер не найден."))
         return
     await q.edit_message_text(
-        f"<b>{html_escape(breadcrumbs('Статус', srv.label, 'Docker'))}</b>\n\nВыберите контейнер:",
+        _docker_report(srv.key, srv.label),
         parse_mode=ParseMode.HTML,
         reply_markup=_docker_list_kb(srv.key),
     )

@@ -49,16 +49,14 @@ def set_pending_change(context: ContextTypes.DEFAULT_TYPE, pending: dict[str, An
 def normalize_input_action(data: str) -> str | None:
     aliases = {
         "staff:alias": "alias",
-        "product:input:setting_bank": "payment_bank",
-        "product:input:setting_recipient": "payment_recipient",
-        "product:input:setting_phone": "payment_phone",
+        "product:input:setting_payment": "payment_message",
         "product:input:setting_current": "period_current",
         "product:input:setting_next": "period_next",
     }
     if data in aliases:
         return aliases[data]
     match = re.fullmatch(
-        r"administration:input:(alias|help|support_email|payment_bank|payment_recipient|payment_phone|"
+        r"administration:input:(alias|help|support_email|payment_message|"
         r"period_current|period_next)",
         data,
     )

@@ -15,6 +15,7 @@ from ...config import (
     FAIL2BAN_DIGEST_TAIL_LINES,
     TZ,
 )
+from ...messaging.message_cleanup import record_navigation_result
 from ..remote.fail2ban import remote_fail2ban_events, remote_tail_text_file
 from ..status.presenter import build_status_message
 from .local import tail_text_file_with_sudo_async
@@ -44,17 +45,19 @@ async def fail2ban_menu(
     text = await build_fail2ban_menu_text(server_key)
     if query:
         await query.answer()
-        await query.edit_message_text(
+        result = await query.edit_message_text(
             text,
             parse_mode=ParseMode.HTML,
             reply_markup=menu_keyboard(server_key),
         )
+        await record_navigation_result(update, result)
     else:
-        await message.reply_text(
+        result = await message.reply_text(
             text,
             parse_mode=ParseMode.HTML,
             reply_markup=menu_keyboard(server_key),
         )
+        await record_navigation_result(update, result)
 
 
 @require_admin

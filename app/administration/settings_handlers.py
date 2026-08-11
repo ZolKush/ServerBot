@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any
 
 from telegram import Update
@@ -8,10 +7,8 @@ from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
 from ..bot.guards import get_user_id, require_admin
-from ..config import TZ
 from ..storage import get_user_meta_copy, product_settings_snapshot
 from ..users.staff import can_edit_help_meta, is_owner_meta
-from .operations import reset_help_text
 from .views import service_settings_markup, service_settings_text
 
 
@@ -40,32 +37,6 @@ async def administration_service_settings_cb(
     )
 
 
-@require_admin
-async def administration_help_reset_cb(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-    query = update.callback_query
-    actor = actor_meta(update)
-    if not query or not actor:
-        return
-    await query.answer()
-    if not can_edit_help_meta(actor):
-        await query.edit_message_text("Недостаточно прав.")
-        return
-
-    settings = await reset_help_text(
-        actor=actor,
-        changed_at=datetime.now(TZ),
-    )
-    await query.edit_message_text(
-        service_settings_text(settings, actor),
-        parse_mode=ParseMode.HTML,
-        reply_markup=service_settings_markup(actor),
-    )
-
-
 __all__ = [
-    "administration_help_reset_cb",
     "administration_service_settings_cb",
 ]

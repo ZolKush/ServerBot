@@ -10,9 +10,11 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from ...bot.ui import clip_html, html_escape
 from ...storage import get_user_meta_copy
 from ...users.staff import is_owner_meta, staff_internal_identity
-from ..connections import has_connection
 from ..policy import PLAN_MONTHS, PLAN_TOTAL_RUB
 from . import state
+
+PAYMENT_MESSAGE_MAX_LENGTH = 3500
+PAYMENT_MESSAGE_PLACEHOLDERS = ("{amount}", "{months}", "{access_until}")
 
 
 def service_tier_label(value: object) -> str:
@@ -72,7 +74,7 @@ def request_card(request: dict[str, Any], meta: dict[str, Any]) -> str:
         f"• Уровень: <b>{html_escape(service_tier_label(meta.get('service_tier')))}</b>",
         f"• Оплата: <b>{'подтверждена' if meta.get('is_paid') else 'не подтверждена'}</b>",
         f"• Тест ранее: <b>{'выдавался' if meta.get('trial_issued_at') else 'не выдавался'}</b>",
-        f"• Ссылка: <b>{'назначена' if has_connection(meta) else 'не назначена'}</b>",
+        f"• Ссылка: <b>{'назначена' if str(meta.get('connection_url') or '').strip() else 'не назначена'}</b>",
     ]
     if request.get("target_end_at"):
         lines.append(f"• Доступ до: <code>{html_escape(state.datetime_text(request.get('target_end_at')))}</code>")
@@ -92,13 +94,28 @@ def request_markup(request: dict[str, Any], actor_meta: dict[str, Any]) -> Inlin
     kind = str(request.get("kind") or "")
     status = str(request.get("status") or "")
     rows: list[list[InlineKeyboardButton]] = []
-    if kind == "trial" and status in {"pending", "claimed", "awaiting_link"}:
+    if kind == "trial" and status in {"pending", "claimed"}:
         rows.append(
             [
                 InlineKeyboardButton("✅ Одобрить", callback_data=f"product:req:approve:{request_id}"),
                 InlineKeyboardButton("❌ Отклонить", callback_data=f"product:req:reject:{request_id}"),
             ]
         )
+    elif kind == "trial" and status == "awaiting_link":
+        actor_id = int(actor_meta.get("user_id", 0) or 0)
+        claimed_by = int(request.get("claimed_by_id", 0) or 0)
+        if actor_id > 0 and claimed_by == actor_id:
+            duration = int(request.get("trial_duration_hours", 24) or 24)
+            continue_action = "custom" if is_owner_meta(actor_meta) and duration != 24 else "approve24"
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        "🔗 Продолжить ввод ссылки",
+                        callback_data=f"product:req:{continue_action}:{request_id}",
+                    ),
+                    InlineKeyboardButton("❌ Отклонить", callback_data=f"product:req:reject:{request_id}"),
+                ]
+            )
     elif kind == "purchase" and status == "pending":
         rows.append(
             [
@@ -155,21 +172,51 @@ def payment_target(settings: dict[str, Any], *, after: datetime | None = None) -
     return None
 
 
+def _legacy_payment_template(settings: dict[str, Any]) -> str:
+    """Build the former fixed message without discarding deployed settings."""
+
+    bank = str(settings.get("payment_bank") or "").strip()
+    recipient = str(settings.get("payment_recipient") or "").strip()
+    phone = str(settings.get("payment_phone") or "").strip()
+    if not all((bank, recipient, phone)):
+        return ""
+    return (
+        "💳 Оплата подписки\n\n"
+        "• Период: {months} месяца\n"
+        "• Стоимость: {amount} ₽\n"
+        "• Доступ до: {access_until}\n\n"
+        f"• Банк: {bank}\n"
+        f"• Получатель: {recipient}\n"
+        f"• Телефон: {phone}\n\n"
+        "После перевода нажмите «Я оплатил». Если возникнут вопросы, создайте тикет в поддержку."
+    )
+
+
+def payment_template_from_settings(settings: dict[str, Any]) -> str:
+    configured = str(settings.get("payment_message") or "").strip()
+    return configured[:PAYMENT_MESSAGE_MAX_LENGTH] if configured else _legacy_payment_template(settings)
+
+
+def render_payment_template(settings: dict[str, Any], *, access_until: object) -> str:
+    """Render a plain-text payment template with a deliberately small placeholder set."""
+
+    rendered = payment_template_from_settings(settings)
+    replacements = {
+        "{amount}": str(PLAN_TOTAL_RUB),
+        "{months}": str(PLAN_MONTHS),
+        "{access_until}": state.datetime_text(access_until),
+    }
+    for placeholder, value in replacements.items():
+        rendered = rendered.replace(placeholder, value)
+    return rendered
+
+
 def payment_profile_ready(settings: dict[str, Any]) -> bool:
-    return all(str(settings.get(key) or "").strip() for key in ("payment_bank", "payment_recipient", "payment_phone"))
+    return bool(payment_template_from_settings(settings))
 
 
 def payment_message(settings: dict[str, Any], request: dict[str, Any]) -> str:
-    return (
-        "💳 <b>Оплата подписки</b>\n\n"
-        f"• Период: <b>{PLAN_MONTHS} месяца</b>\n"
-        f"• Стоимость: <b>{PLAN_TOTAL_RUB} ₽</b>\n"
-        f"• Доступ до: <code>{html_escape(state.datetime_text(request.get('target_end_at')))}</code>\n\n"
-        f"• Банк: <b>{html_escape(str(settings.get('payment_bank') or '-'))}</b>\n"
-        f"• Получатель: <b>{html_escape(str(settings.get('payment_recipient') or '-'))}</b>\n"
-        f"• Телефон: <code>{html_escape(str(settings.get('payment_phone') or '-'))}</code>\n\n"
-        "После перевода нажмите «Я оплатил». Если возникнут вопросы, создайте тикет в поддержку."
-    )
+    return render_payment_template(settings, access_until=request.get("target_end_at"))
 
 
 def payment_markup(request_id: int) -> list[list[dict[str, str]]]:
@@ -187,9 +234,12 @@ def renewal_markup() -> list[list[dict[str, str]]]:
 
 
 __all__ = [
+    "PAYMENT_MESSAGE_MAX_LENGTH",
+    "PAYMENT_MESSAGE_PLACEHOLDERS",
     "payment_markup",
     "payment_message",
     "payment_profile_ready",
+    "payment_template_from_settings",
     "payment_target",
     "real_user_name",
     "renewal_markup",
@@ -197,6 +247,7 @@ __all__ = [
     "request_kind_label",
     "request_markup",
     "request_status_label",
+    "render_payment_template",
     "service_tier_label",
     "user_nickname",
 ]

@@ -10,18 +10,17 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from ...bot.guards import require_admin
-from ...bot.ui import html_escape, ui_ok_text, ui_warn_text
+from ...bot.ui import clip_html, html_escape, ui_ok_text, ui_warn_text
 from ...storage import UserData, append_audit_entry, update_user_data
 from ...users.staff import (
     is_lead_or_owner_meta,
     staff_public_signature,
     staff_title_label,
 )
-from ..policy import PLAN_MONTHS, PLAN_TOTAL_RUB
 from . import state
 from .eligibility import is_eligible_paid_subscriber
 from .operations import queue_message
-from .views import payment_profile_ready, payment_target
+from .views import payment_profile_ready, payment_target, render_payment_template
 
 
 def manual_reminder_text(
@@ -40,19 +39,11 @@ def manual_reminder_text(
         f"Отправитель: <b>{html_escape(staff_title_label(actor))}</b>",
         "",
         (f"Текущий доступ до: <code>{html_escape(state.datetime_text(meta.get('subscription_end_at')))}</code>"),
-        f"Стоимость продления: <b>{PLAN_TOTAL_RUB} ₽ за {PLAN_MONTHS} месяца</b>",
     ]
     if target:
         lines.append(f"Следующий период до: <code>{html_escape(state.datetime_text(target.isoformat()))}</code>")
     if payment_profile_ready(settings):
-        lines.extend(
-            [
-                "",
-                f"Банк: <b>{html_escape(str(settings.get('payment_bank')))}</b>",
-                (f"Получатель: <b>{html_escape(str(settings.get('payment_recipient')))}</b>"),
-                f"Телефон: <code>{html_escape(str(settings.get('payment_phone')))}</code>",
-            ]
-        )
+        lines.extend(["", clip_html(render_payment_template(settings, access_until=target), limit=2600)])
     if can_report_payment:
         lines.extend(
             [

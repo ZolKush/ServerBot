@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from app.config.inventory import load_inventory_document
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -34,3 +36,12 @@ def test_sudoers_only_allows_the_validating_helper() -> None:
 def test_privileged_helper_is_valid_python() -> None:
     helper = ROOT / "deploy" / "maintbot-helper"
     compile(helper.read_text(encoding="utf-8"), str(helper), "exec")
+
+
+def test_server_inventory_example_is_valid_and_documents_tls_fallback() -> None:
+    inventory = load_inventory_document(ROOT / "deploy" / "servers.toml.example")
+
+    assert list(inventory.servers) == ["main", "nl"]
+    zeronet = next(item for item in inventory.servers["nl"].domains if item.host.startswith("zeronet-monitor"))
+    assert zeronet.tls_primary_port == 443
+    assert zeronet.tls_fallback_ports == [8443]

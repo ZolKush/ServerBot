@@ -3,7 +3,6 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from ..bot.help import DEFAULT_HELP_TEXT
 from ..storage import UserData, append_audit_entry, update_user_data
 from ..users.staff import (
     STAFF_DISPLAY_TITLE,
@@ -14,7 +13,6 @@ from ..users.staff import (
 )
 from .dates import parse_datetime
 
-PaymentSetting = Literal["payment_bank", "payment_recipient", "payment_phone"]
 PeriodKind = Literal["period_current", "period_next"]
 
 
@@ -83,19 +81,19 @@ async def change_support_email(
     return await update_user_data(_change)
 
 
-async def change_payment_setting(
+async def change_payment_message(
     *,
     actor: dict[str, Any],
-    key: PaymentSetting,
     value: str,
 ) -> dict[str, Any]:
     def _change(data: UserData) -> dict[str, Any]:
-        data.product_settings[key] = value
+        old = str(data.product_settings.get("payment_message") or "")
+        data.product_settings["payment_message"] = value
         append_audit_entry(
             data,
-            action=f"{key}_changed",
+            action="payment_message_changed",
             actor_meta=actor,
-            details={"value": "обновлено"},
+            details={"old_length": len(old), "new_length": len(value)},
         )
         return dict(data.product_settings)
 
@@ -130,35 +128,6 @@ async def save_help_text(
         return dict(data.product_settings)
 
     return await update_user_data(_save)
-
-
-async def reset_help_text(
-    *,
-    actor: dict[str, Any],
-    changed_at: datetime,
-) -> dict[str, Any]:
-    def _reset(data: UserData) -> dict[str, Any]:
-        old = data.product_settings.get("help_text")
-        data.product_settings.update(
-            {
-                "help_text": None,
-                "help_updated_at": changed_at.isoformat(),
-                "help_updated_by_id": actor.get("user_id"),
-                "help_updated_by_name": staff_public_signature(actor, allow_alias=False),
-            }
-        )
-        append_audit_entry(
-            data,
-            action="help_text_reset",
-            actor_meta=actor,
-            details={
-                "old_length": len(str(old or "")),
-                "default_length": len(DEFAULT_HELP_TEXT),
-            },
-        )
-        return dict(data.product_settings)
-
-    return await update_user_data(_reset)
 
 
 async def save_billing_period(
@@ -218,14 +187,12 @@ async def change_staff_title(
 
 
 __all__ = [
-    "PaymentSetting",
     "PeriodKind",
-    "change_payment_setting",
+    "change_payment_message",
     "change_staff_alias",
     "change_staff_display_mode",
     "change_staff_title",
     "change_support_email",
-    "reset_help_text",
     "save_billing_period",
     "save_help_text",
 ]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import datetime
 
 from telegram.ext import ContextTypes
@@ -32,6 +33,7 @@ async def docker_status_refresh(
 
     async def refresh(server: ServerTarget) -> None:
         async with semaphore:
+            started = time.monotonic()
             try:
                 containers = (
                     await remote_docker_containers(
@@ -71,10 +73,19 @@ async def docker_status_refresh(
                 if not is_up or "unhealthy" in str(status).lower() or str(status).lower() == "не найден"
             )
             logger.info(
-                "Docker status refreshed for server=%s containers=%s problems=%s",
+                "Docker status refreshed source=scheduled server=%s containers=%s problems=%s duration_ms=%s",
                 server.key,
                 len(containers),
                 problem_count,
+                round((time.monotonic() - started) * 1000),
+                extra={
+                    "action": "docker_refresh",
+                    "source": "scheduled",
+                    "server_key": server.key,
+                    "total": len(containers),
+                    "problems": problem_count,
+                    "duration_ms": round((time.monotonic() - started) * 1000),
+                },
             )
 
     await asyncio.gather(*(refresh(server) for server in SERVERS.values()))
@@ -83,21 +94,34 @@ async def docker_status_refresh(
 async def dns_daily_refresh(
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
+    job_name = str(getattr(getattr(context, "job", None), "name", "") or "")
+    source = "startup" if "startup" in job_name else "scheduled"
     semaphore = asyncio.Semaphore(4)
 
     async def refresh(server: ServerTarget) -> None:
         async with semaphore:
+            started = time.monotonic()
             try:
                 payload = await build_dns_status_payload_live(server)
                 await set_dns_status_cache(server.key, payload)
                 invalidate_status_cache(server.key)
                 logger.info(
-                    "DNS status refreshed (scheduled) for server=%s ok=%s bad=%s unknown=%s total=%s",
+                    "DNS status refreshed source=%s server=%s ok=%s bad=%s unknown=%s total=%s duration_ms=%s",
+                    source,
                     server.key,
                     payload.get("ok"),
                     payload.get("bad"),
                     payload.get("unknown"),
                     payload.get("total"),
+                    round((time.monotonic() - started) * 1000),
+                    extra={
+                        "action": "dns_refresh",
+                        "source": source,
+                        "server_key": server.key,
+                        "total": payload.get("total"),
+                        "ok": payload.get("ok"),
+                        "duration_ms": round((time.monotonic() - started) * 1000),
+                    },
                 )
             except Exception:
                 logger.exception(
@@ -115,15 +139,24 @@ async def daily_node_status_refresh(
         return
 
     async def refresh(server: ServerTarget) -> None:
+        started = time.monotonic()
         try:
             payload = await collect_disk_ufw(server, admin_mode=True)
             if payload.get("ok"):
                 await set_daily_node_status_cache(server.key, payload)
                 invalidate_status_cache(server.key)
             logger.info(
-                "Daily node status refreshed for server=%s ok=%s",
+                "Daily node status refreshed source=scheduled server=%s ok=%s duration_ms=%s",
                 server.key,
                 payload.get("ok"),
+                round((time.monotonic() - started) * 1000),
+                extra={
+                    "action": "daily_node_status_refresh",
+                    "source": "scheduled",
+                    "server_key": server.key,
+                    "ok": bool(payload.get("ok")),
+                    "duration_ms": round((time.monotonic() - started) * 1000),
+                },
             )
         except Exception:
             logger.exception(

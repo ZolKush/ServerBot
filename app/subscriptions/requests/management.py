@@ -11,6 +11,8 @@ from telegram.ext import ContextTypes
 
 from ...bot.guards import require_admin
 from ...bot.ui import html_escape, ui_ok_text
+from ...messaging.review_sync import sync_service_review_messages_for_user
+from ...runtime.logging import logger
 from ...storage import UserData, append_audit_entry, get_user_meta_copy, update_user_data
 from ...users.staff import (
     is_admin_meta,
@@ -190,6 +192,10 @@ async def product_tier_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             ]
         ),
     )
+    try:
+        await sync_service_review_messages_for_user(context.bot, user_id)
+    except Exception:
+        logger.exception("Could not synchronize cancelled service requests user_id=%s", user_id)
 
 
 __all__ = ["product_manage_user_cb", "product_tier_cb"]

@@ -16,12 +16,18 @@ class TLSCertificateView:
     domain: str
     port: int
     status: str
+    primary_port: int = 443
+    fallback_ports: tuple[int, ...] = ()
+    used_fallback: bool = False
     not_after: str = ""
     remaining_seconds: int = 0
     hostname_valid: bool = False
     trust_valid: bool = False
     error: str = ""
     checked_at: str = ""
+    last_attempt_at: str = ""
+    last_success_at: str = ""
+    attempt_errors: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

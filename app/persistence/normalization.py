@@ -52,6 +52,7 @@ def normalize_product_settings(raw: Any = None) -> dict[str, Any]:
         "payment_bank": optional_text(source.get("payment_bank"), limit=160),
         "payment_recipient": optional_text(source.get("payment_recipient"), limit=160),
         "payment_phone": optional_text(source.get("payment_phone"), limit=80),
+        "payment_message": optional_text(source.get("payment_message"), limit=3800),
         "current_period_end": optional_text(source.get("current_period_end"), limit=80),
         "next_period_end": optional_text(source.get("next_period_end"), limit=80),
         "period_setup_reminder_for": optional_text(source.get("period_setup_reminder_for"), limit=80),
@@ -62,6 +63,47 @@ def normalize_product_settings(raw: Any = None) -> dict[str, Any]:
         "help_updated_by_name": optional_text(source.get("help_updated_by_name"), limit=160),
         "support_email": normalize_email(source.get("support_email")),
     }
+
+
+def normalize_review_messages(raw: Any) -> dict[str, list[dict[str, Any]]]:
+    """Normalize Telegram message references used for review-card synchronization."""
+
+    if not isinstance(raw, dict):
+        return {}
+    result: dict[str, list[dict[str, Any]]] = {}
+    for raw_admin_id, raw_refs in raw.items():
+        try:
+            admin_id = int(raw_admin_id)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if admin_id <= 0:
+            continue
+        candidates = raw_refs if isinstance(raw_refs, list) else [raw_refs]
+        clean_refs: list[dict[str, Any]] = []
+        seen: set[tuple[int, int, str | None]] = set()
+        for raw_ref in candidates[-20:]:
+            if not isinstance(raw_ref, dict):
+                continue
+            try:
+                chat_id = int(raw_ref.get("chat_id", 0) or 0)
+                message_id = int(raw_ref.get("message_id", 0) or 0)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            generation = optional_text(raw_ref.get("generation"), limit=100)
+            identity = (chat_id, message_id, generation)
+            if chat_id == 0 or message_id <= 0 or identity in seen:
+                continue
+            seen.add(identity)
+            clean_refs.append(
+                {
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "generation": generation,
+                }
+            )
+        if clean_refs:
+            result[str(admin_id)] = clean_refs
+    return result
 
 
 def normalize_service_requests(raw: Any) -> dict[str, dict[str, Any]]:
@@ -86,6 +128,7 @@ def normalize_service_requests(raw: Any) -> dict[str, dict[str, Any]]:
         item.pop("used_app", None)
         item.pop("used_application", None)
         item.update({"id": request_id, "user_id": user_id, "kind": kind, "status": status})
+        item["review_messages"] = normalize_review_messages(item.get("review_messages"))
         resume_status = str(item.get("resume_status") or "")
         item["resume_status"] = resume_status if resume_status in {"pending", "payment_reported"} else None
         for key in (
@@ -197,11 +240,33 @@ def normalize_tls_certificates(raw: Any) -> dict[str, dict[str, Any]]:
         if not domain:
             continue
         try:
-            port = int(raw_item.get("port", 443) or 443)
+            primary_port = int(raw_item.get("primary_port", raw_item.get("port", 443)) or 443)
         except (TypeError, ValueError, OverflowError):
-            port = 443
-        if not 1 <= port <= 65535:
-            port = 443
+            primary_port = 443
+        if not 1 <= primary_port <= 65535:
+            primary_port = 443
+        try:
+            effective_port = int(raw_item.get("effective_port", raw_item.get("port", primary_port)) or primary_port)
+        except (TypeError, ValueError, OverflowError):
+            effective_port = primary_port
+        if not 1 <= effective_port <= 65535:
+            effective_port = primary_port
+        fallback_ports: list[int] = []
+        raw_fallback_ports = raw_item.get("fallback_ports")
+        if isinstance(raw_fallback_ports, list):
+            for raw_port in raw_fallback_ports[:20]:
+                try:
+                    fallback_port = int(raw_port)
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if 1 <= fallback_port <= 65535 and fallback_port != primary_port:
+                    fallback_ports.append(fallback_port)
+        raw_attempt_errors = raw_item.get("attempt_errors")
+        attempt_errors = (
+            [str(item)[:1000] for item in raw_attempt_errors[:20] if str(item or "").strip()]
+            if isinstance(raw_attempt_errors, list)
+            else []
+        )
         status = {"valid": "ok", "unavailable": "error"}.get(
             str(raw_item.get("status") or "unknown"),
             str(raw_item.get("status") or "unknown"),
@@ -224,9 +289,14 @@ def normalize_tls_certificates(raw: Any) -> dict[str, dict[str, Any]]:
             remaining = int(raw_item.get("remaining_seconds", 0) or 0)
         except (TypeError, ValueError, OverflowError):
             remaining = 0
-        result[f"{domain}:{port}"] = {
+        result[f"{domain}:{primary_port}"] = {
             "domain": domain,
-            "port": port,
+            # ``port`` remains the effective endpoint for backwards-compatible
+            # views, while identity is always anchored to the configured primary.
+            "port": effective_port,
+            "primary_port": primary_port,
+            "fallback_ports": list(dict.fromkeys(fallback_ports)),
+            "effective_port": effective_port,
             "servers": list(dict.fromkeys(clean_servers)),
             "status": status,
             "checked_at": optional_text(raw_item.get("checked_at"), limit=80),
@@ -235,6 +305,10 @@ def normalize_tls_certificates(raw: Any) -> dict[str, dict[str, Any]]:
             "fingerprint": optional_text(raw_item.get("fingerprint"), limit=128),
             "issuer": optional_text(raw_item.get("issuer"), limit=500),
             "error": optional_text(raw_item.get("error"), limit=1000),
+            "last_attempt_at": optional_text(raw_item.get("last_attempt_at"), limit=80),
+            "last_success_at": optional_text(raw_item.get("last_success_at"), limit=80),
+            "used_fallback": bool(raw_item.get("used_fallback", effective_port != primary_port)),
+            "attempt_errors": attempt_errors,
             "hostname_valid": bool(raw_item.get("hostname_valid", False)),
             "trust_valid": bool(raw_item.get("trust_valid", False)),
             "remaining_seconds": remaining,
@@ -280,6 +354,7 @@ __all__ = [
     "normalize_docker_status",
     "normalize_outbox",
     "normalize_product_settings",
+    "normalize_review_messages",
     "normalize_service_requests",
     "normalize_tls_certificates",
     "optional_int",

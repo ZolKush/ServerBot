@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 from app import config
@@ -8,6 +11,8 @@ from app.config.servers import ServerTarget
 from app.config_check import _check_json_object, validate_configuration
 from app.persistence.backend import SplitJsonBackend
 from app.persistence.layout import default_store_data
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_config_check_rejects_malformed_or_non_object_json(tmp_path: Path) -> None:
@@ -42,6 +47,15 @@ def test_config_check_rejects_insecure_ssh_host_key_mode(monkeypatch) -> None:
     assert "SSH_STRICT_HOST_KEY_CHECKING должен быть yes для удалённых серверов" in errors
 
 
+def test_config_check_requires_readable_server_inventory(tmp_path: Path, monkeypatch) -> None:
+    missing = tmp_path / "missing-servers.toml"
+    monkeypatch.setattr(config, "SERVER_INVENTORY_FILE", str(missing))
+
+    errors = validate_configuration()
+
+    assert any("SERVER_INVENTORY_FILE: файл не найден" in error for error in errors)
+
+
 def test_config_check_requires_migrated_split_layout(tmp_path: Path) -> None:
     errors = _check_split_storage(str(tmp_path))
 
@@ -60,3 +74,25 @@ def test_config_check_rejects_multiple_owners_across_split_access_store(tmp_path
     errors = _check_split_storage(str(tmp_path))
 
     assert any("несколько руководителей" in error for error in errors)
+
+
+def test_config_check_cli_catches_inventory_import_failure_without_traceback(tmp_path: Path) -> None:
+    inventory = tmp_path / "broken-servers.toml"
+    inventory.write_text("version = [broken", encoding="utf-8")
+    env = os.environ.copy()
+    env.update({"PYTHONUTF8": "1", "SERVER_INVENTORY_FILE": str(inventory)})
+
+    result = subprocess.run(
+        [sys.executable, "-m", "app.config_check"],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert result.stderr.startswith("Ошибка конфигурации: ")
+    assert "Traceback" not in result.stderr

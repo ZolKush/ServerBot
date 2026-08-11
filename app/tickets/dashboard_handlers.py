@@ -19,6 +19,7 @@ from ..bot.ui import (
     safe_edit_or_reply,
     urgency_emoji,
 )
+from ..messaging.message_cleanup import record_navigation_result
 from ..storage import get_all_tickets_snapshot, get_ticket_copy
 from .operations import _safe_int
 from .routes import ACTIVE_PAGE_SIZE, ARCHIVE_PAGE_SIZE
@@ -94,11 +95,12 @@ async def _show_ticket_dashboard(
     rows.append([InlineKeyboardButton("🗂 Архив", callback_data="ticket:archive")])
     rows.append([InlineKeyboardButton("🏠 Меню", callback_data="menu:home")])
 
-    await safe_edit_or_reply(
+    result = await safe_edit_or_reply(
         update.effective_message,
         "\n".join(lines),
         reply_markup=InlineKeyboardMarkup(rows),
     )
+    await record_navigation_result(update, result)
     return ConversationHandler.END
 
 

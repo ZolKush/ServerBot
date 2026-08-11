@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.administration.views import administration_markup, service_settings_markup
+from app.administration.views import administration_markup, service_settings_markup, service_settings_text
 from app.bot.help import render_help_message
 from app.bot.menu import main_menu_inline_kb_for_meta
 from app.storage import UserData
@@ -82,6 +82,7 @@ def test_administration_buttons_follow_staff_permissions() -> None:
     support = _callbacks(administration_markup(_admin(1)))
     engineer = _callbacks(administration_markup(_admin(2, title=STAFF_TITLE_MAINTAINER)))
     lead = _callbacks(administration_markup(_admin(3, title=STAFF_TITLE_LEAD)))
+    owner_main = _callbacks(administration_markup(_admin(4, owner=True)))
     owner = _callbacks(service_settings_markup(_admin(4, owner=True)))
 
     assert "administration:settings" not in support
@@ -91,9 +92,31 @@ def test_administration_buttons_follow_staff_permissions() -> None:
     assert {
         "administration:input:help",
         "administration:input:support_email",
-        "administration:input:payment_bank",
+        "administration:input:payment_message",
         "administration:input:period_next",
     }.issubset(owner)
+    assert "users:export:xlsx" in owner_main
+    assert "administration:help:reset" not in owner
+    assert not {
+        "administration:input:payment_bank",
+        "administration:input:payment_recipient",
+        "administration:input:payment_phone",
+    }.intersection(owner)
+
+
+def test_service_settings_hides_help_preview_and_shows_payment_template() -> None:
+    text = service_settings_text(
+        {
+            "help_text": "Секретный текст инструкции, который не нужен в настройках",
+            "payment_message": "Переведите {amount} ₽ до {access_until}",
+        },
+        _admin(4, owner=True),
+    )
+
+    assert "Секретный текст инструкции" not in text
+    assert "Инструкция помощи" not in text
+    assert "Текст доступен пользователям через /help" not in text
+    assert "Переведите {amount} ₽ до {access_until}" in text
 
 
 def test_main_menu_uses_administration_section_name() -> None:

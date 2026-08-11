@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest.mock import AsyncMock
 
 import pytest
@@ -89,6 +89,7 @@ async def test_reauthorization_preserves_existing_service_tier_and_connection(is
                     enabled=False,
                     service_tier="subscriber",
                     is_paid=True,
+                    subscription_end_at=(datetime.now(TZ) + timedelta(days=5)).isoformat(),
                     connection_url="https://connect.test/42",
                 )
             }
@@ -100,10 +101,61 @@ async def test_reauthorization_preserves_existing_service_tier_and_connection(is
 
     current = storage.get_user_meta_copy(42)
     assert current is not None
-    assert current["access_state"] == "pending"
+    assert current["access_state"] == "approved"
+    assert current["enabled"] is True
     assert current["service_tier"] == "subscriber"
     assert current["is_paid"] is True
     assert current["connection_url"] == "https://connect.test/42"
+    assert storage.outbox_snapshot() == []
+
+
+@pytest.mark.asyncio
+async def test_logged_out_paid_flag_without_future_end_still_requires_review(isolated_storage: None) -> None:
+    await storage.update_user_data(
+        lambda cfg: cfg.authorized_users.update(
+            {
+                "42": _user(
+                    42,
+                    access_state="logged_out",
+                    enabled=False,
+                    service_tier="subscriber",
+                    is_paid=True,
+                    subscription_end_at=None,
+                )
+            }
+        )
+    )
+    update, context = _callback_update(42)
+
+    await access_requests.access_request_cb(update, context)
+
+    current = storage.get_user_meta_copy(42)
+    assert current is not None
+    assert current["access_state"] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_paid_logout_explains_automatic_return_without_review(isolated_storage: None) -> None:
+    await storage.update_user_data(
+        lambda cfg: cfg.authorized_users.update(
+            {
+                "42": _user(
+                    42,
+                    service_tier="subscriber",
+                    is_paid=True,
+                    subscription_end_at=(datetime.now(TZ) + timedelta(days=5)).isoformat(),
+                )
+            }
+        )
+    )
+    update, context = _callback_update(42)
+    update.callback_query = None
+
+    await access_commands.cmd_logout(update, context)
+
+    reply = update.effective_message.reply_text.await_args.args[0]
+    assert "/start" in reply
+    assert "без повторного одобрения" in reply
 
 
 @pytest.mark.asyncio

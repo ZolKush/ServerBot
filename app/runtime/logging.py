@@ -17,7 +17,20 @@ class JsonLogFormatter(logging.Formatter):
         }
         if record.exc_info:
             payload["exc"] = self.formatException(record.exc_info)
-        for key in ("user_id", "chat_id", "server_key", "action"):
+        for key in (
+            "user_id",
+            "chat_id",
+            "server_key",
+            "action",
+            "source",
+            "duration_ms",
+            "total",
+            "ok",
+            "problems",
+            "cache_age_sec",
+            "primary_port",
+            "effective_port",
+        ):
             if hasattr(record, key):
                 payload[key] = getattr(record, key)
         return json.dumps(payload, ensure_ascii=False)

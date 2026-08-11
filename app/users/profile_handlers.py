@@ -8,6 +8,7 @@ from telegram.ext import ContextTypes, ConversationHandler
 
 from ..bot.guards import get_user_id, require_auth
 from ..bot.ui import format_dt_human, html_escape, ui_ok_text
+from ..messaging.message_cleanup import record_navigation_result
 from ..storage import UserData, append_audit_entry, get_user_meta_copy, update_user_data
 from ..subscriptions.connections import has_connection
 from .staff import is_billing_exempt_meta
@@ -136,11 +137,12 @@ async def profile_email_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await message.reply_text("Профиль больше не найден.")
         return ConversationHandler.END
     await message.reply_text(ui_ok_text("Резервная почта сохранена"))
-    await message.reply_text(
+    result = await message.reply_text(
         personal_profile_text(updated),
         parse_mode=ParseMode.HTML,
         reply_markup=personal_profile_markup(updated),
     )
+    await record_navigation_result(update, result)
     return ConversationHandler.END
 
 

@@ -12,6 +12,7 @@ from telegram.ext import ContextTypes, ConversationHandler
 from ...bot.guards import get_user_meta, require_admin
 from ...bot.menu import show_main_menu
 from ...bot.ui import breadcrumbs, html_escape, ui_error_text
+from ...messaging.message_cleanup import record_navigation_result
 from ..states import ADMIN_ALL_MENU, ADMIN_PICK, ADMIN_USER_MENU
 from ..views import format_user_card, user_card_kb, users_all_kb, users_list_kb, users_list_title
 from .navigation import conversation_data, get_users_filter, set_users_filter
@@ -25,17 +26,19 @@ async def users_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     title = users_list_title(active_filter)
     if query and message:
         await query.answer()
-        await query.edit_message_text(
+        result = await query.edit_message_text(
             title,
             parse_mode=ParseMode.HTML,
             reply_markup=users_list_kb(active_filter),
         )
+        await record_navigation_result(update, result)
     elif message:
-        await message.reply_text(
+        result = await message.reply_text(
             title,
             parse_mode=ParseMode.HTML,
             reply_markup=users_list_kb(active_filter),
         )
+        await record_navigation_result(update, result)
     return ADMIN_PICK
 
 

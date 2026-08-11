@@ -12,8 +12,10 @@ from apscheduler.triggers.interval import IntervalTrigger
 from telegram.ext import CallbackQueryHandler, CommandHandler, ConversationHandler, MessageHandler, TypeHandler
 
 import app.main as main_module
+from tests.routing_contract_data import CONVERSATION_ROUTES
 
 DEFAULT_ROUTES = (
+    "message",
     "command:start",
     "command:menu",
     "command:help",
@@ -29,7 +31,6 @@ DEFAULT_ROUTES = (
     r"callback:^(administration:show|staff:profile)$",
     r"callback:^(administration:signature|staff:mode):(title|title_alias)$",
     r"callback:^(administration:settings|product:owner)$",
-    r"callback:^administration:help:reset$",
     r"callback:^(administration:title|product:titlemenu):\d+$",
     r"callback:^(administration:title|product:title):\d+:[a-z_]+$",
     "conversation:profile_flow",
@@ -57,6 +58,7 @@ DEFAULT_ROUTES = (
     r"callback:^ticket:take:\d+$",
     r"callback:^ticket:close:\d+$",
     "conversation:users_flow",
+    r"callback:^users:export:xlsx$",
     "command:cancel",
     r"callback:^menu:home$",
     r"callback:^menu:help$",
@@ -64,9 +66,11 @@ DEFAULT_ROUTES = (
     r"callback:^menu:subscription$",
     r"callback:^status:pick$",
     r"callback:^status:show:[a-z0-9_-]{1,12}$",
+    r"callback:^status:refresh:[a-z0-9_-]{1,12}$",
     r"callback:^status:ufw:[a-z0-9_-]{1,12}$",
     r"callback:^status:dnsrefresh:[a-z0-9_-]{1,12}$",
     r"callback:^status:tlsrefresh:[a-z0-9_-]{1,12}$",
+    r"callback:^tls:list:[a-z0-9_-]{1,12}$",
     r"callback:^dns:back:[a-z0-9_-]{1,12}$",
     r"callback:^docker:list:[a-z0-9_-]{1,12}$",
     r"callback:^docker:back:[a-z0-9_-]{1,12}$",
@@ -87,9 +91,11 @@ NON_BLOCKING_ROUTES = (
     r"callback:^menu:status$",
     r"callback:^status:pick$",
     r"callback:^status:show:[a-z0-9_-]{1,12}$",
+    r"callback:^status:refresh:[a-z0-9_-]{1,12}$",
     r"callback:^status:ufw:[a-z0-9_-]{1,12}$",
     r"callback:^status:dnsrefresh:[a-z0-9_-]{1,12}$",
     r"callback:^status:tlsrefresh:[a-z0-9_-]{1,12}$",
+    r"callback:^tls:list:[a-z0-9_-]{1,12}$",
     r"callback:^dns:back:[a-z0-9_-]{1,12}$",
     r"callback:^docker:list:[a-z0-9_-]{1,12}$",
     r"callback:^docker:back:[a-z0-9_-]{1,12}$",
@@ -103,140 +109,6 @@ NON_BLOCKING_ROUTES = (
     r"callback:^f2b:back:[a-z0-9_-]{1,12}$",
 )
 
-CONVERSATION_ROUTES = {
-    "administration_flow": {
-        "states": (81, 82),
-        "entry_points": (
-            r"callback:^(administration:input:(alias|help|support_email|payment_bank|payment_recipient|"
-            r"payment_phone|period_current|period_next)|staff:alias|"
-            r"product:input:setting_(bank|recipient|phone|current|next))$",
-        ),
-        "state_routes": {
-            81: ("message",),
-            82: (r"callback:^administration:confirm$",),
-        },
-        "fallbacks": (
-            "command:cancel",
-            r"callback:^administration:cancel$",
-            r"callback:^menu:home$",
-        ),
-    },
-    "profile_flow": {
-        "states": (91,),
-        "entry_points": (r"callback:^profile:email:edit$",),
-        "state_routes": {91: ("message",)},
-        "fallbacks": (
-            "command:cancel",
-            r"callback:^profile:show$",
-            r"callback:^menu:home$",
-        ),
-    },
-    "product_flow": {
-        "states": (0, 1),
-        "entry_points": (
-            r"callback:^subscription:trial$",
-            r"callback:^product:req:(approve|reject|requisites|confirm|notfound):\d+$",
-            r"callback:^product:input:(massdate|massremind|user_end:\d+|manualpay:\d+)$",
-        ),
-        "state_routes": {
-            0: ("message",),
-            1: (r"callback:^product:confirm:apply$",),
-        },
-        "fallbacks": (
-            "command:cancel",
-            r"callback:^(product:cancel|menu:home)$",
-        ),
-    },
-    "maint_flow": {
-        "states": (0, 1, 2, 3, 4, 5, 6),
-        "entry_points": (
-            "command:maint",
-            r"callback:^menu:maint$",
-            r"callback:^maint:extend:[0-9a-f]+$",
-        ),
-        "state_routes": {
-            0: (r"callback:^maint:mode:(announce|schedule)$",),
-            1: (r"callback:^maint:scope:[a-z0-9_-]{1,12}$",),
-            2: (r"callback:^maint:urgency:(urgent|planned)$",),
-            3: ("message",),
-            4: ("message",),
-            5: ("message",),
-            6: (
-                r"callback:^maint:cal:nav:\d{4}-\d{2}$",
-                r"callback:^maint:cal:day:\d{4}-\d{2}-\d{2}$",
-                r"callback:^maint:cal:noop$",
-            ),
-        },
-        "fallbacks": (
-            "command:cancel",
-            r"callback:^menu:home$",
-        ),
-    },
-    "ticket_flow": {
-        "states": (0, 1, 2, 3, 4, 5),
-        "entry_points": (
-            "command:ticket",
-            r"callback:^menu:ticket$",
-            r"callback:^ticket:adminreply:\d+$",
-            r"callback:^ticket:userreply:\d+$",
-            r"callback:^ticket:list(?::\d+)?$",
-            r"callback:^ticket:open:\d+$",
-            r"callback:^ticket:archive$",
-            r"callback:^ticket:archive_page:\d+$",
-            r"callback:^ticket:transfer_init:\d+$",
-            r"callback:^ticket:transfer_to:\d+:\d+$",
-        ),
-        "state_routes": {
-            0: ("message",),
-            1: (r"callback:^ticket:(p1|p2|p3)$",),
-            2: ("message",),
-            3: (r"callback:^ticket:(send|edit_subj|edit_text|cancel)$",),
-            4: ("message",),
-            5: ("message",),
-        },
-        "fallbacks": (
-            "command:cancel",
-            r"callback:^menu:home$",
-            r"callback:^ticket:list(?::\d+)?$",
-            r"callback:^ticket:open:\d+$",
-            r"callback:^ticket:archive$",
-            r"callback:^ticket:archive_page:\d+$",
-            r"callback:^ticket:transfer_init:\d+$",
-            r"callback:^ticket:transfer_to:\d+:\d+$",
-        ),
-    },
-    "users_flow": {
-        "states": (0, 1, 2, 3, 4, 5, 6, 7),
-        "entry_points": (
-            "command:users",
-            r"callback:^menu:users$",
-            r"callback:^users:user:\d+$",
-        ),
-        "state_routes": {
-            0: (
-                r"callback:^users:(all|main|back|filter:(all|active|disabled|unpaid|admins|blocked)|"
-                r"user:\d+|page:\d+)$",
-            ),
-            1: (r"callback:^users:(allmsg|back)$",),
-            2: ("message",),
-            3: (r"callback:^users:(allsend|all|back)$",),
-            4: (
-                r"callback:^users:(msg:\d+|nick:\d+|cfg:\d+|subassign:\d+|subsend:\d+|"
-                r"toggle:\d+|toggleapply:\d+|access:(approve|block):\d+|"
-                r"accessapply:(approve|block):\d+|back)$",
-                r"callback:^users:user:\d+$",
-            ),
-            5: ("message",),
-            6: ("message",),
-            7: ("message", r"callback:^users:user:\d+$"),
-        },
-        "fallbacks": (
-            "command:cancel",
-            r"callback:^menu:home$",
-        ),
-    },
-}
-
 DEFAULT_JOB_NAMES = (
     "fail2ban_digest",
     "dns_daily_refresh",
@@ -248,7 +120,9 @@ DEFAULT_JOB_NAMES = (
     "ticket_orphan_release",
     "subscription_lifecycle",
     "docker_status_refresh",
+    "tls_certificate_check_startup",
     "tls_certificate_check",
+    "tls_deadline_evaluation",
     "message_cleanup",
 )
 
@@ -285,9 +159,9 @@ def _cron_fields(trigger: CronTrigger) -> dict[str, str]:
 def test_default_handler_groups_and_route_order_are_stable() -> None:
     application = main_module.build_app()
 
-    assert tuple(sorted(application.handlers)) == (-100, -2, -1, 0)
-    assert all(len(application.handlers[group]) == 1 for group in (-100, -2, -1))
-    assert all(isinstance(application.handlers[group][0], TypeHandler) for group in (-100, -2, -1))
+    assert tuple(sorted(application.handlers)) == (-100, -1, 0)
+    assert all(len(application.handlers[group]) == 1 for group in (-100, -1))
+    assert all(isinstance(application.handlers[group][0], TypeHandler) for group in (-100, -1))
 
     routes = tuple(_route_key(handler) for handler in application.handlers[0])
     assert routes == DEFAULT_ROUTES
@@ -333,7 +207,8 @@ def test_default_job_names_and_schedules_are_stable() -> None:
         "ticket_orphan_release": 60,
         "subscription_lifecycle": 60,
         "docker_status_refresh": 21600,
-        "tls_certificate_check": 21600,
+        "tls_certificate_check": 604800,
+        "tls_deadline_evaluation": 86400,
         "message_cleanup": 1800,
     }
     for name, seconds in intervals.items():
@@ -357,6 +232,10 @@ def test_default_job_names_and_schedules_are_stable() -> None:
     assert isinstance(startup, DateTrigger)
     assert before.timestamp() + 4 <= startup.run_date.timestamp() <= after.timestamp() + 6
 
+    tls_startup = jobs["tls_certificate_check_startup"].job.trigger
+    assert isinstance(tls_startup, DateTrigger)
+    assert before.timestamp() + 9 <= tls_startup.run_date.timestamp() <= after.timestamp() + 11
+
 
 def test_mixed_mode_adds_only_ssh_routes_and_node_status_jobs(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(main_module, "BOT_MODE", "mixed")
@@ -366,6 +245,8 @@ def test_mixed_mode_adds_only_ssh_routes_and_node_status_jobs(monkeypatch: pytes
 
     routes = tuple(_route_key(handler) for handler in application.handlers[0])
     expected_ssh_routes = (
+        r"callback:^status:sshfallback:confirm:[a-z0-9_-]{1,12}$",
+        r"callback:^status:sshfallback:[a-z0-9_-]{1,12}$",
         r"callback:^status:sshrefresh:confirm:[a-z0-9_-]{1,12}$",
         r"callback:^status:sshrefresh:[a-z0-9_-]{1,12}$",
         r"callback:^status:sshdiag:confirm:[a-z0-9_-]{1,12}$",

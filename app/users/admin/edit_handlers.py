@@ -11,6 +11,7 @@ from telegram.ext import ContextTypes
 from ...bot.guards import get_user_id, get_user_meta, require_admin, staff_title
 from ...bot.ui import ui_error_text, ui_ok_text
 from ...config import TZ
+from ...messaging.message_cleanup import record_navigation_result
 from ...runtime.logging import logger
 from ...subscriptions.connections import MAX_CONNECTION_BYTES, is_valid_connection_url
 from ..states import (
@@ -41,11 +42,12 @@ async def users_user_nick_text(
         if message:
             active_filter = get_users_filter(context)
             await message.reply_text(ui_error_text("пользователь не выбран."))
-            await message.reply_text(
+            result = await message.reply_text(
                 users_list_title(active_filter),
                 parse_mode=ParseMode.HTML,
                 reply_markup=users_list_kb(active_filter),
             )
+            await record_navigation_result(update, result)
         return ADMIN_PICK
 
     meta = get_user_meta(user_id)
@@ -53,11 +55,12 @@ async def users_user_nick_text(
         if message:
             active_filter = get_users_filter(context)
             await message.reply_text(ui_error_text("пользователь не найден."))
-            await message.reply_text(
+            result = await message.reply_text(
                 users_list_title(active_filter),
                 parse_mode=ParseMode.HTML,
                 reply_markup=users_list_kb(active_filter),
             )
+            await record_navigation_result(update, result)
         return ADMIN_PICK
 
     nickname = ((message.text if message else "") or "").strip()
@@ -88,11 +91,12 @@ async def users_user_nick_text(
 
     if message:
         await message.reply_text(ui_ok_text("Никнейм сохранён"))
-        await message.reply_text(
+        result = await message.reply_text(
             format_user_card(updated),
             parse_mode=ParseMode.HTML,
             reply_markup=user_card_kb(user_id),
         )
+        await record_navigation_result(update, result)
     return ADMIN_USER_MENU
 
 
@@ -157,9 +161,10 @@ async def users_user_cfg_text(
 
     data.pop("subscription_delivery_mode", None)
     if message:
-        await message.reply_text(
+        result = await message.reply_text(
             format_user_card(updated),
             parse_mode=ParseMode.HTML,
             reply_markup=user_card_kb(user_id),
         )
+        await record_navigation_result(update, result)
     return ADMIN_USER_MENU

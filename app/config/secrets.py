@@ -6,15 +6,19 @@ from pathlib import Path
 from dotenv import dotenv_values
 from pydantic import BaseModel, ConfigDict, ValidationError, ValidationInfo, field_validator, model_validator
 
-_SECRET_KEYS = ("BOT_TOKEN", "ADMIN_PASSWORD", "OWNER_PASSWORD")
+_REQUIRED_SECRET_KEYS = ("BOT_TOKEN", "ADMIN_PASSWORD", "OWNER_PASSWORD")
+_OPTIONAL_SECRET_KEYS = ("REMNAWAVE_METRICS_USER", "REMNAWAVE_METRICS_PASS")
+_SECRET_KEYS = (*_REQUIRED_SECRET_KEYS, *_OPTIONAL_SECRET_KEYS)
 
 
 class SecretSettings(BaseModel):
-    model_config = ConfigDict(hide_input_in_errors=True)
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
 
     BOT_TOKEN: str
     ADMIN_PASSWORD: str
     OWNER_PASSWORD: str
+    REMNAWAVE_METRICS_USER: str = ""
+    REMNAWAVE_METRICS_PASS: str = ""
 
     @field_validator("BOT_TOKEN", mode="before")
     @classmethod
@@ -31,6 +35,11 @@ class SecretSettings(BaseModel):
         if len(password) < 16:
             raise ValueError(f"{info.field_name} должен содержать не менее 16 символов")
         return password
+
+    @field_validator("REMNAWAVE_METRICS_USER", "REMNAWAVE_METRICS_PASS", mode="before")
+    @classmethod
+    def _strip_optional_secret(cls, value: object) -> str:
+        return str(value or "").strip()
 
     @model_validator(mode="after")
     def _passwords_must_differ(self) -> SecretSettings:
@@ -65,7 +74,7 @@ def _safe_secret_error_fields(exc: ValidationError) -> tuple[str, bool]:
         if error.get("type") != "missing":
             only_missing = False
         location = error.get("loc") or ()
-        if location and str(location[0]) in _SECRET_KEYS:
+        if location and str(location[0]) in _REQUIRED_SECRET_KEYS:
             fields.add(str(location[0]))
     if not fields:
         # model_validator errors have an empty location. Never include its
@@ -85,13 +94,20 @@ def load_required_secrets(path: Path, *, fallback_path: Path | None = None) -> S
         )
 
     checked_sources.append(str(path))
-    merged.update({key: value for key, value in _load_env_file_values(path).items() if key in _SECRET_KEYS})
+    secret_file_values = _load_env_file_values(path)
+    unknown_keys = sorted(set(secret_file_values) - set(_SECRET_KEYS))
+    if unknown_keys:
+        raise RuntimeError(f"Неизвестные ключи в secret env {path}: {', '.join(unknown_keys)}")
+    merged.update({key: value for key, value in secret_file_values.items() if key in _SECRET_KEYS})
 
     for key in _SECRET_KEYS:
         env_value = os.getenv(key, "").strip()
         if env_value:
             merged[key] = env_value
     checked_sources.append("переменные окружения процесса")
+
+    if bool(merged.get("REMNAWAVE_METRICS_USER")) != bool(merged.get("REMNAWAVE_METRICS_PASS")):
+        raise RuntimeError("REMNAWAVE_METRICS_USER и REMNAWAVE_METRICS_PASS должны быть заданы вместе")
 
     try:
         return SecretSettings.model_validate(merged)
@@ -101,7 +117,7 @@ def load_required_secrets(path: Path, *, fallback_path: Path | None = None) -> S
         raise RuntimeError(
             f"{problem}: {fields}. Проверены источники: {', '.join(checked_sources)}. "
             "Рекомендуемый вариант: хранить секреты в app/env.secrets; "
-            "также поддерживаются app/.env и переменные окружения процесса."
+            "также поддерживаются переменные окружения процесса."
         ) from None
 
 

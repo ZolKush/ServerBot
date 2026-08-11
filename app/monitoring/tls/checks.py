@@ -124,6 +124,7 @@ async def check_tls_endpoint(domain: str, port: int, server_keys: list[str]) -> 
         "hostname_valid": False,
         "trust_valid": False,
         "remaining_seconds": 0,
+        "failure_kind": "",
     }
     try:
         certificate_der = await _fetch_der_certificate(domain, port)
@@ -161,10 +162,15 @@ async def check_tls_endpoint(domain: str, port: int, server_keys: list[str]) -> 
                 "remaining_seconds": int(remaining.total_seconds()),
             }
         )
-    except (TimeoutError, OSError, ssl.SSLError, ValueError, UnsupportedAlgorithm) as exc:
+    except (TimeoutError, OSError, ssl.SSLError) as exc:
+        result["failure_kind"] = "transport"
+        result["error"] = f"{exc.__class__.__name__}: {exc}"[:1000]
+    except (ValueError, UnsupportedAlgorithm) as exc:
+        result["failure_kind"] = "certificate"
         result["error"] = f"{exc.__class__.__name__}: {exc}"[:1000]
     except Exception as exc:
         logger.exception("Unexpected TLS certificate check error domain=%s port=%s", domain, port)
+        result["failure_kind"] = "internal"
         result["error"] = f"{exc.__class__.__name__}: {exc}"[:1000]
     return result
 

@@ -44,6 +44,10 @@ IMPORTANT_TOP_LEVEL_KEYS = {
     "tls_certificates",
     "docker_status",
 }
+# These fields were introduced after monolithic schema v4 had already been
+# deployed. Their absence is therefore expected and must not turn a valid v4
+# backup into an unmigratable source.
+OPTIONAL_V4_PRODUCT_SETTINGS = {"payment_message"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,7 +138,7 @@ def transform_v4(source: V4Source) -> V4Transform:
 
     product_settings = _mapping(source.user_data["product_settings"], "product_settings")
     unknown_settings = sorted(set(product_settings) - BILLING_FIELDS - HELP_FIELDS)
-    missing_settings = sorted((BILLING_FIELDS | HELP_FIELDS) - set(product_settings))
+    missing_settings = sorted((BILLING_FIELDS | HELP_FIELDS) - OPTIONAL_V4_PRODUCT_SETTINGS - set(product_settings))
     if unknown_settings or missing_settings:
         raise MigrationError(f"product_settings field mismatch; missing={missing_settings}, unknown={unknown_settings}")
 
@@ -143,6 +147,8 @@ def transform_v4(source: V4Source) -> V4Transform:
     merged_outbox, collisions = _merge_outboxes(user_outbox, important_outbox)
     ticket_items, ticket_messages = _split_tickets(source.important_data["tickets"])
 
+    billing_settings = _select_fields(product_settings, BILLING_FIELDS)
+    billing_settings.setdefault("payment_message", None)
     stores: dict[str, Any] = {
         "users.profiles": profiles,
         "access.grants": grants,
@@ -151,7 +157,7 @@ def transform_v4(source: V4Source) -> V4Transform:
             "next_id": _non_negative_int(source.user_data["request_seq"], "request_seq"),
             "items": copy.deepcopy(_mapping(source.user_data["service_requests"], "service_requests")),
         },
-        "subscriptions.billing_settings": _select_fields(product_settings, BILLING_FIELDS),
+        "subscriptions.billing_settings": billing_settings,
         "settings.help_and_contacts": _select_fields(product_settings, HELP_FIELDS),
         "support.tickets": {
             "next_id": _non_negative_int(source.important_data["tickets_seq"], "tickets_seq"),

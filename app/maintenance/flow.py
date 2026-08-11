@@ -13,6 +13,7 @@ from telegram.ext import ContextTypes, ConversationHandler
 from ..bot.guards import get_user_id, require_maintenance, staff_title
 from ..bot.ui import html_escape
 from ..config import TZ, logger
+from ..messaging.message_cleanup import record_navigation_result
 from ..storage import get_active_maintenance, get_scheduled_maintenance
 from .calendar import maint_mode_kb, parse_hhmm, schedule_calendar_kb, scope_kb, urgency_kb
 from .notifications import make_maintenance_notice_event
@@ -48,17 +49,20 @@ async def maint_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message = update.effective_message
         if query and message:
             await query.answer()
-            await query.edit_message_text(
+            result = await query.edit_message_text(
                 maintenance_panel_text(active),
                 parse_mode=ParseMode.HTML,
                 reply_markup=maintenance_control_keyboard(str(active["id"])),
             )
         elif message:
-            await message.reply_text(
+            result = await message.reply_text(
                 maintenance_panel_text(active),
                 parse_mode=ParseMode.HTML,
                 reply_markup=maintenance_control_keyboard(str(active["id"])),
             )
+        else:
+            return ConversationHandler.END
+        await record_navigation_result(update, result)
         return ConversationHandler.END
 
     scheduled = get_scheduled_maintenance()
@@ -68,23 +72,29 @@ async def maint_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = scheduled_control_keyboard(str(scheduled["id"]))
         if query and message:
             await query.answer()
-            await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+            result = await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
         elif message:
-            await message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+            result = await message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        else:
+            return ConversationHandler.END
+        await record_navigation_result(update, result)
         return STATE_MAINT_MODE
     if query and message:
         await query.answer()
-        await query.edit_message_text(
+        result = await query.edit_message_text(
             maintenance_menu_text(scheduled),
             parse_mode=ParseMode.HTML,
             reply_markup=maint_mode_kb(),
         )
     elif message:
-        await message.reply_text(
+        result = await message.reply_text(
             maintenance_menu_text(scheduled),
             parse_mode=ParseMode.HTML,
             reply_markup=maint_mode_kb(),
         )
+    else:
+        return ConversationHandler.END
+    await record_navigation_result(update, result)
     return STATE_MAINT_MODE
 
 
@@ -213,11 +223,12 @@ async def maint_duration(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.warning("Не удалось обновить панель техработ (%s), отправляю новое сообщение", exc)
 
     if message:
-        await message.reply_text(
+        result = await message.reply_text(
             panel_text,
             parse_mode=ParseMode.HTML,
             reply_markup=maintenance_control_keyboard(maintenance_id),
         )
+        await record_navigation_result(update, result)
     clear_maintenance_context(context)
     return ConversationHandler.END
 

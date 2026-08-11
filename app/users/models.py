@@ -30,6 +30,8 @@ class UserMeta(TypedDict, total=False):
     subscription_end_at: str | None
     paid_at: str | None
     trial_issued_at: str | None
+    trial_end_at: str | None
+    trial_duration_hours: int | None
     last_auto_payment_reminder_at: str | None
     last_auto_payment_reminder_type: str | None
     last_manual_payment_reminder_at: str | None

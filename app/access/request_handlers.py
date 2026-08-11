@@ -6,6 +6,7 @@ from typing import cast
 
 from telegram import Update
 from telegram.constants import ParseMode
+from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
 from ..bot.guards import (
@@ -13,20 +14,19 @@ from ..bot.guards import (
     display_name,
     require_admin,
     require_private,
-    staff_title,
 )
-from ..bot.ui import html_escape
 from ..config import TZ, logger
 from ..messaging.outbox import message_payload
+from ..messaging.review_sync import review_completion, sync_access_review_messages
 from ..storage import make_outbox_event
 from .operations import AccessReviewAction, review_access, submit_access_request
 from .views import (
-    ACCESS_DECISION_LABELS,
     ACCESS_NOTIFICATION_TEXTS,
     ACCESS_RESULT_TEXTS,
     ACCESS_REVIEW_RESULT_TEXTS,
+    access_request_card,
+    access_request_markup,
     access_request_markup_descriptor,
-    post_rejection_markup,
 )
 
 
@@ -42,20 +42,26 @@ async def access_request_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     requested_at = datetime.now(TZ)
     admin_ids = authorized_ids(role_filter="admin")
-    display = (
-        f"@{user.username}" if user.username else " ".join(part for part in (user.first_name, user.last_name) if part)
-    )
-    display = display or str(user.id)
     notification_event = None
     if admin_ids:
+        pending_meta: dict[str, object] = {
+            "user_id": user.id,
+            "username": user.username,
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+            "access_state": "pending",
+        }
         notification_event = make_outbox_event(
             kind="access_request",
             recipient_ids=admin_ids,
             payload=message_payload(
-                "🔐 <b>Новая заявка на доступ</b>\n\n"
-                f"Пользователь: <b>{html_escape(display)}</b>\n"
-                f"ID: <code>{user.id}</code>",
+                access_request_card(pending_meta),
                 reply_markup=access_request_markup_descriptor(user.id),
+            ),
+            completion=review_completion(
+                scope="access",
+                target_id=user.id,
+                generation=requested_at.isoformat(),
             ),
         )
 
@@ -95,7 +101,6 @@ async def access_review_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     reviewed_at = datetime.now(TZ)
     actor_name = display_name(update)
-    actor_public = staff_title(update)
     desired = {
         "approve": "approved",
         "reject": "rejected",
@@ -127,17 +132,45 @@ async def access_review_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             extra={"user_id": actor.id, "action": f"access_{action}"},
         )
         await query.answer("Решение сохранено.")
-        original_text = str(getattr(query.message, "text_html", "") or "Заявка")
-        await query.edit_message_text(
-            original_text + f"\n\n<b>Решение:</b> {ACCESS_DECISION_LABELS[action]} · {html_escape(actor_public)}",
-            parse_mode=ParseMode.HTML,
-            reply_markup=post_rejection_markup(target_user_id) if action == "reject" else None,
-        )
+        if getattr(context, "bot", None) is not None:
+            await sync_access_review_messages(context.bot, target_user_id)
+        if isinstance(_meta, dict):
+            try:
+                await query.edit_message_text(
+                    access_request_card(_meta),
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=access_request_markup(_meta),
+                )
+            except BadRequest as exc:
+                if "message is not modified" not in str(exc).lower():
+                    logger.warning(
+                        "Could not refresh clicked access card target_uid=%s: %s",
+                        target_user_id,
+                        exc,
+                        extra={"user_id": actor.id, "action": "access_card_refresh"},
+                    )
         return
     await query.answer(
         ACCESS_REVIEW_RESULT_TEXTS.get(outcome, "Заявка уже обработана."),
         show_alert=True,
     )
+    if isinstance(_meta, dict):
+        if getattr(context, "bot", None) is not None:
+            await sync_access_review_messages(context.bot, target_user_id)
+        try:
+            await query.edit_message_text(
+                access_request_card(_meta),
+                parse_mode=ParseMode.HTML,
+                reply_markup=access_request_markup(_meta),
+            )
+        except BadRequest as exc:
+            if "message is not modified" not in str(exc).lower():
+                logger.warning(
+                    "Could not refresh stale access card target_uid=%s: %s",
+                    target_user_id,
+                    exc,
+                    extra={"user_id": actor.id, "action": "access_card_refresh"},
+                )
 
 
 __all__ = [

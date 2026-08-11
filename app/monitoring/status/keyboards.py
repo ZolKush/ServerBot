@@ -34,63 +34,37 @@ def status_actions_keyboard(
     admin_mode: bool,
     server_key: str,
     *,
-    show_ssh_diag: bool = False,
-    show_ssh_refresh: bool = False,
+    show_ssh_fallback: bool = False,
 ) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = [
-        [InlineKeyboardButton("🔄 Обновить", callback_data=f"status:show:{server_key}")],
-        [
-            InlineKeyboardButton(
-                "🌐 Обновить DNS статус",
-                callback_data=f"status:dnsrefresh:{server_key}",
-            )
-        ],
+        [InlineKeyboardButton("🔄 Обновить", callback_data=f"status:refresh:{server_key}")],
     ]
     if admin_mode:
         rows.extend(
             [
                 [InlineKeyboardButton("🛡️ UFW", callback_data=f"status:ufw:{server_key}")],
                 [
-                    InlineKeyboardButton(
-                        "🔐 Обновить TLS",
-                        callback_data=f"status:tlsrefresh:{server_key}",
-                    )
+                    InlineKeyboardButton("🐳 Контейнеры", callback_data=f"docker:list:{server_key}"),
+                    InlineKeyboardButton("🔐 TLS", callback_data=f"tls:list:{server_key}"),
                 ],
             ]
         )
-    if admin_mode and show_ssh_refresh:
+    if admin_mode and show_ssh_fallback:
         rows.append(
             [
                 InlineKeyboardButton(
-                    "🔧 Обновить disk/UFW по SSH",
-                    callback_data=f"status:sshrefresh:{server_key}",
-                )
-            ]
-        )
-    if admin_mode and show_ssh_diag:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    "🔧 Проверить через SSH (только вам)",
-                    callback_data=f"status:sshdiag:{server_key}",
+                    "🔧 Проверить disk/UFW по SSH",
+                    callback_data=f"status:sshfallback:{server_key}",
                 )
             ]
         )
     if admin_mode:
-        rows.extend(
+        rows.append(
             [
-                [
-                    InlineKeyboardButton(
-                        "🐳 Docker: inspect/logs",
-                        callback_data=f"docker:list:{server_key}",
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        "🛡️ Fail2ban: logs",
-                        callback_data=f"f2b:menu:{server_key}",
-                    )
-                ],
+                InlineKeyboardButton(
+                    "🛡️ Fail2ban: logs",
+                    callback_data=f"f2b:menu:{server_key}",
+                )
             ]
         )
     if len(SERVERS) > 1:
@@ -158,3 +132,7 @@ def parse_dns_refresh_callback(data: str) -> str | None:
 
 def parse_tls_refresh_callback(data: str) -> str | None:
     return resolve_server_key(data, r"status:tlsrefresh")
+
+
+def parse_refresh_callback(data: str) -> str | None:
+    return resolve_server_key(data, r"status:refresh")

@@ -13,6 +13,7 @@ from telegram.ext import ContextTypes, ConversationHandler
 from ..bot.guards import get_user_id, require_maintenance, staff_title
 from ..bot.ui import html_escape
 from ..config import TZ, logger
+from ..messaging.message_cleanup import record_navigation_result
 from ..storage import get_scheduled_maintenance
 from .calendar import parse_clock_range, schedule_calendar_kb
 from .operations import cancel_scheduled_maintenance, schedule_maintenance
@@ -172,11 +173,12 @@ async def maint_schedule_range(update: Update, context: ContextTypes.DEFAULT_TYP
             logger.warning("Не удалось обновить панель техработ (%s), отправляю новое сообщение", exc)
 
     if message:
-        await message.reply_text(
+        result = await message.reply_text(
             panel_text,
             parse_mode=ParseMode.HTML,
             reply_markup=maintenance_notice_menu_keyboard(),
         )
+        await record_navigation_result(update, result)
     clear_maintenance_context(context)
     return ConversationHandler.END
 

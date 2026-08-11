@@ -12,10 +12,7 @@ from ..administration.profile_handlers import (
     administration_staff_title_apply_cb,
     administration_staff_title_menu_cb,
 )
-from ..administration.settings_handlers import (
-    administration_help_reset_cb,
-    administration_service_settings_cb,
-)
+from ..administration.settings_handlers import administration_service_settings_cb
 from ..maintenance.lifecycle import (
     maint_cancel_end_cb,
     maint_end_cb,
@@ -26,35 +23,7 @@ from ..maintenance.scheduling import (
     maint_sched_cancel_cb,
     maint_sched_cancel_confirm_cb,
 )
-from ..monitoring.docker.handlers import (
-    docker_back_to_status,
-    docker_inspect,
-    docker_list_menu,
-    docker_logs,
-    docker_show,
-)
-from ..monitoring.fail2ban.handlers import (
-    f2b_back_cb,
-    f2b_digest_cb,
-    f2b_menu_cb,
-    f2b_tail_cb,
-    fail2ban_menu,
-)
-from ..monitoring.status.handlers import (
-    cmd_health,
-    dns_back_cb,
-    status_dns_refresh_cb,
-    status_pick_cb,
-    status_show_cb,
-    status_tls_refresh_cb,
-    status_ufw_cb,
-)
-from ..monitoring.status.ssh import (
-    status_ssh_diag_cb,
-    status_ssh_diag_confirm_cb,
-    status_ssh_refresh_cb,
-    status_ssh_refresh_confirm_cb,
-)
+from ..monitoring.status.handlers import cmd_health
 from ..subscriptions.connections import connection_show_cb, subscription_show
 from ..subscriptions.requests.admin_listing import (
     product_request_view_cb,
@@ -71,6 +40,7 @@ from ..subscriptions.requests.payment_reports import (
 )
 from ..subscriptions.requests.reminders import product_manual_reminder_cb
 from ..tickets.admin_handlers import ticket_close_cb, ticket_take_cb
+from ..users.admin import export_clients_xlsx_cb
 from ..users.profile_handlers import personal_profile_cb, profile_email_clear_cb
 from .conversations import NavigableConversationHandler
 from .flow_routes import (
@@ -82,6 +52,7 @@ from .flow_routes import (
     build_users_flow,
 )
 from .menu import menu_home_cb
+from .monitoring_routes import register_monitoring_routes
 from .navigation import cancel
 
 
@@ -121,7 +92,6 @@ def _register_administration_routes(
             pattern=r"^(administration:settings|product:owner)$",
         )
     )
-    application.add_handler(CallbackQueryHandler(administration_help_reset_cb, pattern=r"^administration:help:reset$"))
     application.add_handler(
         CallbackQueryHandler(
             administration_staff_title_menu_cb,
@@ -210,6 +180,7 @@ def _register_users_routes(
     flow = build_users_flow()
     conversations.append(flow)
     application.add_handler(flow)
+    application.add_handler(CallbackQueryHandler(export_clients_xlsx_cb, pattern=r"^users:export:xlsx$"))
 
 
 def _register_menu_routes(application: Application) -> None:
@@ -218,147 +189,6 @@ def _register_menu_routes(application: Application) -> None:
     application.add_handler(CallbackQueryHandler(cmd_help, pattern=r"^menu:help$"))
     application.add_handler(CallbackQueryHandler(cmd_health, pattern=r"^menu:status$", block=False))
     application.add_handler(CallbackQueryHandler(subscription_show, pattern=r"^menu:subscription$"))
-
-
-def _register_status_routes(
-    application: Application,
-    *,
-    bot_mode: str,
-    server_key_pattern: str,
-) -> None:
-    application.add_handler(CallbackQueryHandler(status_pick_cb, pattern=r"^status:pick$", block=False))
-    application.add_handler(
-        CallbackQueryHandler(
-            status_show_cb,
-            pattern=rf"^status:show:{server_key_pattern}$",
-            block=False,
-        )
-    )
-    application.add_handler(
-        CallbackQueryHandler(
-            status_ufw_cb,
-            pattern=rf"^status:ufw:{server_key_pattern}$",
-            block=False,
-        )
-    )
-    application.add_handler(
-        CallbackQueryHandler(
-            status_dns_refresh_cb,
-            pattern=rf"^status:dnsrefresh:{server_key_pattern}$",
-            block=False,
-        )
-    )
-    application.add_handler(
-        CallbackQueryHandler(
-            status_tls_refresh_cb,
-            pattern=rf"^status:tlsrefresh:{server_key_pattern}$",
-            block=False,
-        )
-    )
-    if bot_mode == "mixed":
-        application.add_handler(
-            CallbackQueryHandler(
-                status_ssh_refresh_confirm_cb,
-                pattern=rf"^status:sshrefresh:confirm:{server_key_pattern}$",
-                block=False,
-            )
-        )
-        application.add_handler(
-            CallbackQueryHandler(
-                status_ssh_refresh_cb,
-                pattern=rf"^status:sshrefresh:{server_key_pattern}$",
-                block=False,
-            )
-        )
-        application.add_handler(
-            CallbackQueryHandler(
-                status_ssh_diag_confirm_cb,
-                pattern=rf"^status:sshdiag:confirm:{server_key_pattern}$",
-                block=False,
-            )
-        )
-        application.add_handler(
-            CallbackQueryHandler(
-                status_ssh_diag_cb,
-                pattern=rf"^status:sshdiag:{server_key_pattern}$",
-                block=False,
-            )
-        )
-
-    application.add_handler(
-        CallbackQueryHandler(
-            dns_back_cb,
-            pattern=rf"^dns:back:{server_key_pattern}$",
-            block=False,
-        )
-    )
-    application.add_handler(
-        CallbackQueryHandler(
-            docker_list_menu,
-            pattern=rf"^docker:list:{server_key_pattern}$",
-            block=False,
-        )
-    )
-    application.add_handler(
-        CallbackQueryHandler(
-            docker_back_to_status,
-            pattern=rf"^docker:back:{server_key_pattern}$",
-            block=False,
-        )
-    )
-    application.add_handler(
-        CallbackQueryHandler(
-            docker_show,
-            pattern=rf"^docker:show:{server_key_pattern}:[a-zA-Z0-9_.\-]{{1,64}}$",
-            block=False,
-        )
-    )
-    application.add_handler(
-        CallbackQueryHandler(
-            docker_inspect,
-            pattern=rf"^docker:inspect:{server_key_pattern}:[a-zA-Z0-9_.\-]{{1,64}}$",
-            block=False,
-        )
-    )
-    application.add_handler(
-        CallbackQueryHandler(
-            docker_logs,
-            pattern=rf"^docker:logs:{server_key_pattern}:[a-zA-Z0-9_.\-]{{1,64}}:\d{{1,4}}$",
-            block=False,
-        )
-    )
-
-
-def _register_fail2ban_routes(application: Application, *, server_key_pattern: str) -> None:
-    application.add_handler(CommandHandler("fail2ban", fail2ban_menu, block=False))
-    application.add_handler(
-        CallbackQueryHandler(
-            f2b_menu_cb,
-            pattern=rf"^f2b:menu:{server_key_pattern}$",
-            block=False,
-        )
-    )
-    application.add_handler(
-        CallbackQueryHandler(
-            f2b_tail_cb,
-            pattern=rf"^f2b:tail:{server_key_pattern}:\d{{1,5}}$",
-            block=False,
-        )
-    )
-    application.add_handler(
-        CallbackQueryHandler(
-            f2b_digest_cb,
-            pattern=rf"^f2b:digest:{server_key_pattern}$",
-            block=False,
-        )
-    )
-    application.add_handler(
-        CallbackQueryHandler(
-            f2b_back_cb,
-            pattern=rf"^f2b:back:{server_key_pattern}$",
-            block=False,
-        )
-    )
 
 
 def register_routes(
@@ -381,10 +211,9 @@ def register_routes(
     _register_ticket_routes(application, conversations)
     _register_users_routes(application, conversations)
     _register_menu_routes(application)
-    _register_status_routes(
+    register_monitoring_routes(
         application,
         bot_mode=bot_mode,
         server_key_pattern=server_key_pattern,
     )
-    _register_fail2ban_routes(application, server_key_pattern=server_key_pattern)
     return conversations

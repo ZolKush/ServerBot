@@ -21,8 +21,16 @@ from ..bot.guards import (
 from ..bot.help import render_help_message
 from ..bot.menu import main_menu_inline_kb, show_main_menu
 from ..config import ADMIN_PASSWORD, OWNER_PASSWORD, TZ, logger
+from ..messaging.message_cleanup import record_navigation_result
+from ..messaging.review_sync import sync_service_review_messages_for_user
 from ..storage import get_user_meta_copy, product_settings_snapshot
-from .operations import authorize_admin, claim_service_owner, logout_user
+from .operations import (
+    authorize_admin,
+    can_restore_paid_access,
+    claim_service_owner,
+    logout_user,
+    restore_paid_access,
+)
 from .security import (
     auth_actor_key,
     auth_lock_remaining_sec,
@@ -46,7 +54,25 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if meta and meta.get("access_state") == "blocked":
             await reply_disabled(update)
         else:
-            await reply_need_auth(update)
+            user = update.effective_user
+            restored = (
+                await restore_paid_access(
+                    user_id=user.id,
+                    username=user.username,
+                    first_name=user.first_name,
+                    last_name=user.last_name,
+                    restored_at=datetime.now(TZ),
+                )
+                if user
+                else None
+            )
+            if restored:
+                await show_main_menu(
+                    update,
+                    text="Оплаченный доступ восстановлен автоматически ✅\n\nМеню:",
+                )
+            else:
+                await reply_need_auth(update)
         return
     if not is_enabled(update):
         await reply_disabled(update)
@@ -66,17 +92,19 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     if query and message:
         await query.answer()
-        await query.edit_message_text(
+        result = await query.edit_message_text(
             text,
             parse_mode=ParseMode.HTML,
             reply_markup=main_menu_inline_kb(update),
         )
+        await record_navigation_result(update, result)
     elif message:
-        await message.reply_text(
+        result = await message.reply_text(
             text,
             parse_mode=ParseMode.HTML,
             reply_markup=main_menu_inline_kb(update),
         )
+        await record_navigation_result(update, result)
 
 
 async def cmd_auth(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -207,6 +235,13 @@ async def cmd_owner(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 update,
                 text="Роль руководителя сервиса активирована ✅\n\nМеню:",
             )
+            try:
+                await sync_service_review_messages_for_user(context.bot, user_id)
+            except Exception:
+                logger.exception(
+                    "Could not synchronize requests cancelled by owner claim user_id=%s",
+                    user_id,
+                )
         # If an owner already exists, state and interface remain unchanged.
     finally:
         await delete_sensitive_auth_message(update)
@@ -229,6 +264,11 @@ async def cmd_logout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
     if updated.get("role") == "admin":
         await message.reply_text("Вы вышли из администраторской учётной записи. Для возврата используйте /auth.")
+        return
+    if can_restore_paid_access(updated, now=datetime.now(TZ)):
+        await message.reply_text(
+            "Вы вышли из бота. Оплаченная подписка сохранена; для возврата без повторного одобрения отправьте /start."
+        )
         return
     await message.reply_text(
         "Вы вышли из бота. Запись и ограничения доступа сохранены; для возврата отправьте новую заявку.",

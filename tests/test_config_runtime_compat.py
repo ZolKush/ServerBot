@@ -12,11 +12,15 @@ from app.config.servers import ServerTarget
 from app.config_check import validate_configuration
 
 
-def test_configuration_exports_share_canonical_objects() -> None:
+def test_configuration_exports_share_canonical_objects(monkeypatch) -> None:
     assert config.ServerTarget is ServerTarget
     assert isinstance(config.SETTINGS, AppSettings)
     assert config.BASE_DIR.name == "app"
-    assert validate_configuration is checks.validate_configuration
+
+    delegated_result = ["delegated validation result"]
+    monkeypatch.setattr(checks, "validate_configuration", lambda: delegated_result)
+
+    assert validate_configuration() is delegated_result
 
 
 def test_importing_config_does_not_reconfigure_root_logging() -> None:

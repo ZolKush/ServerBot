@@ -9,7 +9,7 @@ from telegram import Update
 
 from ...bot.guards import is_admin
 from ...bot.ui import now_str
-from ...config import BOT_MODE, ServerTarget
+from ...config import ServerTarget
 from ..remnawave import (
     NodeMetrics,
     format_memory_bytes,
@@ -34,6 +34,7 @@ from .common import (
 )
 from .dns import dns_payload_from_cache_or_empty
 from .models import StatusSnapshot
+from .source_policy import node_metrics_problem, server_uses_metrics
 
 StatusPayload = tuple[
     object,
@@ -107,10 +108,6 @@ async def build_status_payload_remote(
     )
 
 
-def server_uses_metrics(server: ServerTarget) -> bool:
-    return BOT_MODE == "mixed" and bool((server.remnawave_uuid or "").strip())
-
-
 def _dns_snapshot_values(
     server: ServerTarget,
 ) -> tuple[int, int, int, int, list[str]]:
@@ -172,8 +169,9 @@ async def build_status_snapshot_mixed(
     metrics = await get_metrics_snapshot()
     node: NodeMetrics | None = metrics.get(server.remnawave_uuid)
     metrics_error = "" if metrics.ok else metrics.error
-    if metrics_error or node is None:
-        error = metrics_error or "Нода не найдена в ответе панели метрик"
+    node_problem = node_metrics_problem(node)
+    if metrics_error or node_problem:
+        error = metrics_error or node_problem
         fetched = metrics.fetched_at.strftime("%d.%m %H:%M") if metrics_error and metrics.fetched_at else ""
         return _mixed_unavailable_snapshot(
             server,
@@ -181,6 +179,14 @@ async def build_status_snapshot_mixed(
             node_online=None,
             metrics_error=error,
             last_seen_text=fetched,
+        )
+    if node is None:
+        return _mixed_unavailable_snapshot(
+            server,
+            admin_mode=admin_mode,
+            node_online=None,
+            metrics_error="метрики настроенной ноды отсутствуют",
+            last_seen_text="",
         )
     if not node.is_online:
         return _mixed_unavailable_snapshot(

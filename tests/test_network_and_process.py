@@ -9,6 +9,7 @@ import pytest
 
 from app.config.servers import ServerTarget
 from app.monitoring.docker import local as docker_service
+from app.monitoring.docker.presentation import MAX_DOCKER_STATUS_CHARS
 from app.monitoring.remnawave import client as remnawave_metrics
 from app.monitoring.remote import docker as remote_docker
 from app.monitoring.remote import status as remote_status
@@ -136,6 +137,29 @@ async def test_remote_docker_empty_inventory_is_available(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_remote_docker_ssh_error_is_normalized_deduplicated_and_clipped(monkeypatch) -> None:
+    repeated_line = "WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!"
+    stderr = (f"  {repeated_line}  \n" * 200) + ("detail " * 2000)
+
+    async def fake_ssh_run_shell(target, script, *, timeout):
+        return 255, "", stderr
+
+    monkeypatch.setattr(remote_docker, "ssh_run_shell", fake_ssh_run_shell)
+
+    containers = await remote_docker.remote_docker_containers(
+        "root@example.com",
+        ["remnanode", "remnawave-nginx"],
+    )
+
+    statuses = [item[2] for item in containers]
+    assert len(set(statuses)) == 1
+    assert statuses[0].count(repeated_line) == 1
+    assert "\n" not in statuses[0]
+    assert "  " not in statuses[0]
+    assert len(statuses[0]) <= MAX_DOCKER_STATUS_CHARS
+
+
+@pytest.mark.asyncio
 async def test_regular_status_uses_docker_cache_without_live_docker_call(monkeypatch) -> None:
     server = ServerTarget(
         key="test",
@@ -154,7 +178,6 @@ async def test_regular_status_uses_docker_cache_without_live_docker_call(monkeyp
     async def unexpected_docker_call(_names):
         raise AssertionError("regular status must not execute Docker")
 
-    monkeypatch.setattr(status_collectors, "BOT_MODE", "standalone")
     monkeypatch.setattr(status_collectors, "check_uptime", lambda: value("1 ч"))
     monkeypatch.setattr(status_collectors, "meminfo", lambda: value("100 / 200 MiB"))
     monkeypatch.setattr(status_collectors, "disk_root", lambda: value("1G / 2G (50%)"))

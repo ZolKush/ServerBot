@@ -9,6 +9,8 @@ from telegram.ext import ContextTypes, ConversationHandler
 
 from ...bot.guards import require_admin
 from ...bot.ui import ui_ok_text
+from ...messaging.review_sync import sync_service_review_messages_for_user
+from ...runtime.logging import logger
 from ...storage import UserData, append_audit_entry, update_user_data
 from ...users.staff import (
     is_billing_exempt_meta,
@@ -131,6 +133,14 @@ async def product_confirm_cb(
 
         outcome, _updated = await update_user_data(register_payment)
         state.clear_request_context(context)
+        if outcome == "updated" and getattr(context, "bot", None) is not None:
+            try:
+                await sync_service_review_messages_for_user(context.bot, user_id)
+            except Exception:
+                logger.exception(
+                    "Could not synchronize requests cancelled by manual payment user_id=%s",
+                    user_id,
+                )
         messages = {
             "updated": "Оплата зарегистрирована, доступ пользователя активирован.",
             "connection_missing": ("Сначала назначьте персональную ссылку подключения."),

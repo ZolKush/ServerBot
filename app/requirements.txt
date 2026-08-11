@@ -4,9 +4,11 @@ python-dotenv==1.2.2
 aiodns==4.0.4
 httpx==0.28.1
 idna==3.18
-cryptography==49.0.0
+cryptography==50.0.0
+openpyxl==3.1.5
 pydantic==2.13.4
 pydantic-settings==2.14.2
+tomli==2.4.1; python_version < "3.11"
 
 # Compatible transitive runtime lock (review and test as one set).
 annotated-types==0.7.0
@@ -16,6 +18,7 @@ certifi==2026.6.17
 cffi==2.1.0
 h11==0.16.0
 httpcore==1.0.9
+et-xmlfile==2.0.0
 pycares==5.0.1
 pycparser==3.0
 # Exact runtime required by pydantic==2.13.4; do not upgrade independently.

@@ -99,9 +99,7 @@ def dns_payload_from_cache_or_empty(server: ServerTarget) -> dict[str, object]:
             "ok": 0,
             "bad": 0,
             "unknown": 0,
-            "details": [
-                f"• {html_escape(ui_info_text('DNS статус ещё не обновлялся. Нажмите «Обновить DNS статус».'))}"
-            ],
+            "details": [f"• {html_escape(ui_info_text('DNS статус ещё не обновлялся. Нажмите «Обновить».'))}"],
         }
     return {
         "total": total,

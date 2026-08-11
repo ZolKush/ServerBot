@@ -11,6 +11,7 @@ from ...storage import (
     get_daily_node_status_cache,
     get_docker_status_cache,
 )
+from ..docker.presentation import normalize_docker_status
 from ..tls.service import tls_snapshot_for_server
 from .common import format_iso_short
 from .models import DockerContainerView, StatusSnapshot, TLSCertificateView
@@ -46,7 +47,7 @@ def docker_views_from_cache(server: ServerTarget) -> list[DockerContainerView]:
             DockerContainerView(
                 name=name,
                 is_up=bool(item[1]),
-                status_text=str(item[2] or "н/д"),
+                status_text=normalize_docker_status(item[2]),
                 restarts=str(item[3] if len(item) >= 4 else "-"),
             )
         )
@@ -54,8 +55,7 @@ def docker_views_from_cache(server: ServerTarget) -> list[DockerContainerView]:
 
 
 def tls_views(server_key: str, *, admin_mode: bool) -> list[TLSCertificateView]:
-    if not admin_mode:
-        return []
+    _ = admin_mode
     result: list[TLSCertificateView] = []
     for item in tls_snapshot_for_server(server_key):
         try:
@@ -68,12 +68,18 @@ def tls_views(server_key: str, *, admin_mode: bool) -> list[TLSCertificateView]:
                 domain=str(item.get("domain") or "-"),
                 port=port,
                 status=str(item.get("status") or "error"),
+                primary_port=int(item.get("primary_port", port) or port),
+                fallback_ports=tuple(int(value) for value in item.get("fallback_ports", []) if str(value).isdigit()),
+                used_fallback=bool(item.get("used_fallback", False)),
                 not_after=str(item.get("not_after") or ""),
                 remaining_seconds=remaining_seconds,
                 hostname_valid=bool(item.get("hostname_valid", False)),
                 trust_valid=bool(item.get("trust_valid", False)),
                 error=str(item.get("error") or ""),
                 checked_at=str(item.get("checked_at") or ""),
+                last_attempt_at=str(item.get("last_attempt_at") or item.get("checked_at") or ""),
+                last_success_at=str(item.get("last_success_at") or ""),
+                attempt_errors=tuple(str(value) for value in item.get("attempt_errors", []) if str(value).strip()),
             )
         )
     return result

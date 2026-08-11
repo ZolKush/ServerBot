@@ -1,4 +1,4 @@
-"""On-demand and scheduled disk/UFW collection plus SSH diagnostics."""
+"""Disk/UFW collection and guarded SSH fallback callbacks."""
 
 from __future__ import annotations
 
@@ -7,33 +7,26 @@ import re
 from datetime import datetime
 from typing import cast
 
-from telegram import Message, Update
+from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
 from ...bot.guards import require_admin
 from ...bot.ui import html_escape, ui_error_text, ui_info_text
 from ...config import SERVER_KEY_PATTERN, TZ, ServerTarget, logger
-from ...monitoring.docker.local import docker_containers
+from ...monitoring.remnawave import get_metrics_snapshot
 from ...monitoring.remote.status import remote_status_bundle
-from ...monitoring.system.metrics import check_uptime, disk_root, meminfo
+from ...monitoring.system.metrics import disk_root
 from ...monitoring.system.ufw import ufw_summary_for_admin
 from ...storage import set_daily_node_status_cache
 from .cache import invalidate_status_cache, ssh_refresh_lock
 from .common import exc_brief, get_server_target
-from .diagnostics import format_diagnostic_report
-from .keyboards import (
-    confirmation_keyboard,
-    status_pick_keyboard,
-)
+from .keyboards import confirmation_keyboard, status_pick_keyboard
 from .presenter import build_status_message
+from .source_policy import node_metrics_problem, server_uses_metrics
 
 
-async def collect_disk_ufw_uncached(
-    server: ServerTarget,
-    *,
-    admin_mode: bool,
-) -> dict[str, object]:
+async def collect_disk_ufw_uncached(server: ServerTarget, *, admin_mode: bool) -> dict[str, object]:
     if server.mode == "ssh":
         try:
             result = await remote_status_bundle(
@@ -44,15 +37,12 @@ async def collect_disk_ufw_uncached(
             )
         except Exception as exc:
             logger.warning(
-                "SSH refresh failed for server=%s: %s",
+                "SSH disk/UFW refresh failed server=%s error=%s",
                 server.key,
                 exc_brief(exc),
+                extra={"action": "ssh_status_fallback_failed", "source": "ssh", "server_key": server.key},
             )
-            return {
-                "ok": False,
-                "error": exc_brief(exc),
-                "updated_at": datetime.now(TZ).isoformat(),
-            }
+            return {"ok": False, "error": exc_brief(exc), "updated_at": datetime.now(TZ).isoformat()}
         if not result.ok:
             return {
                 "ok": False,
@@ -76,24 +66,13 @@ async def collect_disk_ufw_uncached(
             "updated_at": datetime.now(TZ).isoformat(),
         }
 
-    try:
-        local_disk, ufw_data = await asyncio.gather(
-            disk_root(),
-            ufw_summary_for_admin(),
-            return_exceptions=True,
-        )
-    except Exception as exc:
-        return {
-            "ok": False,
-            "error": exc_brief(exc),
-            "updated_at": datetime.now(TZ).isoformat(),
-        }
+    local_disk, ufw_data = await asyncio.gather(
+        disk_root(),
+        ufw_summary_for_admin(),
+        return_exceptions=True,
+    )
     if isinstance(local_disk, Exception):
-        return {
-            "ok": False,
-            "error": exc_brief(local_disk),
-            "updated_at": datetime.now(TZ).isoformat(),
-        }
+        return {"ok": False, "error": exc_brief(local_disk), "updated_at": datetime.now(TZ).isoformat()}
     if str(local_disk).strip().lower() in {"", "н/д"}:
         return {
             "ok": False,
@@ -101,15 +80,8 @@ async def collect_disk_ufw_uncached(
             "updated_at": datetime.now(TZ).isoformat(),
         }
     if isinstance(ufw_data, Exception):
-        return {
-            "ok": False,
-            "error": exc_brief(ufw_data),
-            "updated_at": datetime.now(TZ).isoformat(),
-        }
-    ufw_state, allow, deny, reject = cast(
-        tuple[str, list[str], list[str], list[str]],
-        ufw_data,
-    )
+        return {"ok": False, "error": exc_brief(ufw_data), "updated_at": datetime.now(TZ).isoformat()}
+    ufw_state, allow, deny, reject = cast(tuple[str, list[str], list[str], list[str]], ufw_data)
     return {
         "ok": True,
         "disk_raw": str(local_disk),
@@ -121,100 +93,54 @@ async def collect_disk_ufw_uncached(
     }
 
 
-async def collect_disk_ufw(
-    server: ServerTarget,
-    *,
-    admin_mode: bool,
-) -> dict[str, object]:
+async def collect_disk_ufw(server: ServerTarget, *, admin_mode: bool) -> dict[str, object]:
     async with ssh_refresh_lock(server.key):
         return await collect_disk_ufw_uncached(server, admin_mode=admin_mode)
 
 
-async def full_diagnostic(server: ServerTarget) -> dict[str, object]:
-    if server.mode == "ssh":
-        try:
-            result = await remote_status_bundle(
-                server.ssh_target,
-                server.monitor_containers,
-                admin_mode=True,
-            )
-        except Exception as exc:
-            return {"ok": False, "error": exc_brief(exc)}
-        if not result.ok:
-            return {"ok": False, "error": result.error or "SSH недоступен"}
-        remote_uptime, remote_memory, remote_disk, remote_containers, remote_ufw_state, _, _, _ = result.values()
-        return {
-            "ok": True,
-            "uptime": str(remote_uptime),
-            "memory": str(remote_memory),
-            "disk_raw": str(remote_disk),
-            "ufw_state": str(remote_ufw_state),
-            "containers": [
-                (name, bool(is_up), str(status), str(restarts)) for name, is_up, status, restarts in remote_containers
-            ],
-        }
-
-    local_uptime, local_memory, local_disk, local_containers, ufw_data = await asyncio.gather(
-        check_uptime(),
-        meminfo(),
-        disk_root(),
-        docker_containers(server.monitor_containers),
-        ufw_summary_for_admin(),
-        return_exceptions=True,
-    )
-    uptime_value = "н/д" if isinstance(local_uptime, Exception) else str(local_uptime)
-    memory_value = "н/д" if isinstance(local_memory, Exception) else str(local_memory)
-    disk_value = "н/д" if isinstance(local_disk, Exception) else str(local_disk)
-    if isinstance(local_containers, BaseException):
-        container_values = [
-            (name, False, f"ошибка: {exc_brief(local_containers)}", "-") for name in server.monitor_containers
-        ]
-    else:
-        container_values = list(local_containers)
-    ufw_state = "н/д" if isinstance(ufw_data, Exception) or not isinstance(ufw_data, tuple) else str(ufw_data[0])
-    return {
-        "ok": True,
-        "uptime": uptime_value,
-        "memory": memory_value,
-        "disk_raw": disk_value,
-        "ufw_state": ufw_state,
-        "containers": [
-            (name, bool(is_up), str(status), str(restarts)) for name, is_up, status, restarts in container_values
-        ],
-    }
+async def primary_monitoring_failed(server: ServerTarget, *, force_refresh: bool) -> bool:
+    """Return true only for a technical/incomplete primary metrics response."""
+    if server.mode != "ssh" or not server_uses_metrics(server):
+        return False
+    metrics = await get_metrics_snapshot(force_refresh=force_refresh)
+    return bool(metrics.error or node_metrics_problem(metrics.get(server.remnawave_uuid)))
 
 
 def _callback_server_key(data: str, action: str) -> str | None:
-    match = re.fullmatch(
-        rf"status:{action}:({SERVER_KEY_PATTERN})",
-        data or "",
-    )
+    match = re.fullmatch(rf"status:{action}:({SERVER_KEY_PATTERN})", data or "")
     return match.group(1) if match else None
 
 
-async def _confirmation_screen(
-    update: Update,
-    *,
-    action: str,
-    description: str,
-    visibility: str,
-) -> None:
+async def _show_current_status(update: Update, server_key: str, note: str) -> None:
     query = update.callback_query
     if not query:
         return
-    await query.answer()
+    invalidate_status_cache(server_key)
+    text, markup = await build_status_message(update, server_key=server_key)
+    await query.edit_message_text(
+        text + "\n\n" + ui_info_text(note),
+        parse_mode=ParseMode.HTML,
+        reply_markup=markup,
+    )
+
+
+async def _fallback_confirmation(update: Update, *, action: str) -> None:
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer("Проверяю основной мониторинг...")
     server_key = _callback_server_key(query.data or "", action)
     server = get_server_target(server_key)
     if not server:
-        await query.edit_message_text(
-            ui_error_text("сервер не найден."),
-            reply_markup=status_pick_keyboard(),
-        )
+        await query.edit_message_text(ui_error_text("сервер не найден."), reply_markup=status_pick_keyboard())
+        return
+    if not await primary_monitoring_failed(server, force_refresh=True):
+        await _show_current_status(update, server.key, "Основной мониторинг снова доступен; SSH не запускался.")
         return
     text = (
         "⚠️ <b>Подтверждение</b>\n\n"
-        f"Будет выполнено SSH-подключение к ноде <b>{html_escape(server.label)}</b>"
-        f"{description}\n\n{visibility}\n\nПродолжить?"
+        f"Основной мониторинг ноды <b>{html_escape(server.label)}</b> недоступен или вернул неполные данные. "
+        "Будет выполнено SSH-подключение для проверки disk/UFW.\n\nПродолжить?"
     )
     await query.edit_message_text(
         text,
@@ -223,98 +149,70 @@ async def _confirmation_screen(
     )
 
 
-@require_admin
-async def status_ssh_refresh_cb(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-    await _confirmation_screen(
-        update,
-        action="sshrefresh",
-        description=" для обновления disk/UFW.",
-        visibility="Результат сохранится в общий кэш и будет виден всем пользователям.",
-    )
-
-
-@require_admin
-async def status_ssh_diag_cb(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-    await _confirmation_screen(
-        update,
-        action="sshdiag",
-        description=".",
-        visibility="Результат будет показан <b>только вам</b> и не сохранится в общий кэш.",
-    )
-
-
-@require_admin
-async def status_ssh_refresh_confirm_cb(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-) -> None:
+async def _fallback_confirm(update: Update, *, action: str) -> None:
     query = update.callback_query
     if not query:
         return
-    await query.answer("Запускаю SSH...")
-    server_key = _callback_server_key(query.data or "", "sshrefresh:confirm")
+    await query.answer("Повторно проверяю мониторинг...")
+    server_key = _callback_server_key(query.data or "", f"{action}:confirm")
     server = get_server_target(server_key)
     if not server:
-        await query.edit_message_text(
-            ui_error_text("сервер не найден."),
-            reply_markup=status_pick_keyboard(),
-        )
+        await query.edit_message_text(ui_error_text("сервер не найден."), reply_markup=status_pick_keyboard())
+        return
+    if not await primary_monitoring_failed(server, force_refresh=True):
+        await _show_current_status(update, server.key, "Основной мониторинг восстановился; SSH не запускался.")
         return
     payload = await collect_disk_ufw(server, admin_mode=True)
     if payload.get("ok"):
         await set_daily_node_status_cache(server.key, payload)
-        invalidate_status_cache(server.key)
+    invalidate_status_cache(server.key)
     text, markup = await build_status_message(update, server_key=server.key)
     note = (
-        ui_info_text("Disk/UFW обновлены через SSH.")
+        ui_info_text("Disk/UFW проверены через аварийный SSH fallback.")
         if payload.get("ok")
         else ui_error_text(f"SSH ошибка: {html_escape(str(payload.get('error', 'н/д')))}")
     )
-    await query.edit_message_text(
-        text + "\n\n" + note,
-        parse_mode=ParseMode.HTML,
-        reply_markup=markup,
-    )
+    await query.edit_message_text(text + "\n\n" + note, parse_mode=ParseMode.HTML, reply_markup=markup)
 
 
 @require_admin
-async def status_ssh_diag_confirm_cb(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-    query = update.callback_query
-    if not query:
-        return
-    await query.answer("Запускаю SSH...")
-    server_key = _callback_server_key(query.data or "", "sshdiag:confirm")
-    server = get_server_target(server_key)
-    if not server:
-        await query.edit_message_text(
-            ui_error_text("сервер не найден."),
-            reply_markup=status_pick_keyboard(),
-        )
-        return
-    report = format_diagnostic_report(server, await full_diagnostic(server))
-    text, markup = await build_status_message(update, server_key=server.key)
-    await query.edit_message_text(
-        text,
-        parse_mode=ParseMode.HTML,
-        reply_markup=markup,
-    )
-    if isinstance(query.message, Message):
-        await query.message.reply_text(report, parse_mode=ParseMode.HTML)
+async def status_ssh_fallback_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _fallback_confirmation(update, action="sshfallback")
+
+
+@require_admin
+async def status_ssh_fallback_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _fallback_confirm(update, action="sshfallback")
+
+
+# Old callbacks remain safe while messages from the previous release still exist.
+@require_admin
+async def status_ssh_refresh_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _fallback_confirmation(update, action="sshrefresh")
+
+
+@require_admin
+async def status_ssh_refresh_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _fallback_confirm(update, action="sshrefresh")
+
+
+@require_admin
+async def status_ssh_diag_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _fallback_confirmation(update, action="sshdiag")
+
+
+@require_admin
+async def status_ssh_diag_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _fallback_confirm(update, action="sshdiag")
 
 
 __all__ = [
     "collect_disk_ufw",
+    "primary_monitoring_failed",
     "status_ssh_diag_cb",
     "status_ssh_diag_confirm_cb",
+    "status_ssh_fallback_cb",
+    "status_ssh_fallback_confirm_cb",
     "status_ssh_refresh_cb",
     "status_ssh_refresh_confirm_cb",
 ]

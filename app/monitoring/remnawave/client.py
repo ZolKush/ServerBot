@@ -88,7 +88,7 @@ async def _do_fetch_and_build_snapshot() -> MetricsSnapshot:
         text = await _fetch_metrics_text()
     except httpx.HTTPStatusError as exc:
         message = f"HTTP {exc.response.status_code}"
-        logger.warning("RemnaWave metrics: %s for %s", message, REMNAWAVE_METRICS_URL)
+        logger.warning("RemnaWave metrics request failed: %s", message)
         return MetricsSnapshot(error=message, fetched_at=_LAST_SUCCESS_AT)
     except (httpx.HTTPError, OSError) as exc:
         message = f"{exc.__class__.__name__}: {str(exc).strip() or 'connection error'}"

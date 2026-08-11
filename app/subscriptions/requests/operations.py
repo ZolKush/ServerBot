@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+from datetime import timedelta
 from typing import Any
 
 from ...bot.ui import html_escape
@@ -20,7 +21,12 @@ from ...users.staff import (
     is_owner_meta,
     staff_public_signature,
 )
-from ..connections import CONNECTION_URL_KEY, connection_outbox_payload
+from ..connections import CONNECTION_URL_KEY, connection_outbox_payload, is_valid_connection_url
+from ..policy import (
+    DEFAULT_TRIAL_DURATION_HOURS,
+    MAX_CUSTOM_TRIAL_DURATION_HOURS,
+    MIN_CUSTOM_TRIAL_DURATION_HOURS,
+)
 from . import state
 
 
@@ -50,6 +56,8 @@ def queue_message(
     kind: str,
     text: str,
     reply_markup: list[list[dict[str, str]]] | None = None,
+    parse_mode: str | None = "HTML",
+    completion: dict[str, Any] | None = None,
 ) -> None:
     if not recipient_ids:
         return
@@ -58,7 +66,8 @@ def queue_message(
         make_outbox_event(
             kind=kind,
             recipient_ids=recipient_ids,
-            payload=message_payload(text, reply_markup=reply_markup),
+            payload=message_payload(text, reply_markup=reply_markup, parse_mode=parse_mode),
+            completion=completion,
         ),
     )
 
@@ -158,13 +167,30 @@ def finalize_trial(
         raise ValueError("tier_changed")
     if current.get("trial_issued_at"):
         raise ValueError("already_issued")
+    try:
+        duration_hours = int(request.get("trial_duration_hours") or DEFAULT_TRIAL_DURATION_HOURS)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("invalid_trial_duration") from exc
+    if not MIN_CUSTOM_TRIAL_DURATION_HOURS <= duration_hours <= MAX_CUSTOM_TRIAL_DURATION_HOURS:
+        raise ValueError("invalid_trial_duration")
+    if duration_hours != DEFAULT_TRIAL_DURATION_HOURS and not is_owner_meta(actor):
+        raise ValueError("duration_forbidden")
+    normalized_url = str(connection_url or "").strip()
+    if not normalized_url or not is_valid_connection_url(normalized_url):
+        raise ValueError("connection_missing")
+    previous_url = str(current.get(CONNECTION_URL_KEY) or "").strip()
+    if previous_url and normalized_url == previous_url:
+        raise ValueError("connection_not_fresh")
+    issued_at = state.now()
+    trial_end = issued_at + timedelta(hours=duration_hours)
     updated = dict(current)
-    if connection_url:
-        updated[CONNECTION_URL_KEY] = connection_url
-        updated["subscription_updated_at"] = state.now_iso()
-        updated["subscription_updated_by_id"] = actor.get("user_id")
-        updated["subscription_updated_by_name"] = staff_public_signature(actor)
-    updated["trial_issued_at"] = state.now_iso()
+    updated[CONNECTION_URL_KEY] = normalized_url
+    updated["subscription_updated_at"] = issued_at.isoformat()
+    updated["subscription_updated_by_id"] = actor.get("user_id")
+    updated["subscription_updated_by_name"] = staff_public_signature(actor)
+    updated["trial_issued_at"] = issued_at.isoformat()
+    updated["trial_end_at"] = trial_end.isoformat()
+    updated["trial_duration_hours"] = duration_hours
     updated["trial_issued_by_id"] = actor.get("user_id")
     updated["trial_issued_by_name"] = staff_public_signature(actor)
     updated = UserData._normalize_user(updated)
@@ -174,8 +200,10 @@ def finalize_trial(
         {
             "status": "approved",
             "reviewed_by_id": actor.get("user_id"),
-            "reviewed_at": state.now_iso(),
-            "updated_at": state.now_iso(),
+            "reviewed_at": issued_at.isoformat(),
+            "updated_at": issued_at.isoformat(),
+            "target_end_at": trial_end.isoformat(),
+            "trial_duration_hours": duration_hours,
             "claimed_by_id": None,
             "claimed_at": None,
         }
@@ -188,7 +216,9 @@ def finalize_trial(
         text=(
             "🧪 <b>Тестовый доступ одобрен</b>\n\n"
             "Для вашей учётной записи подготовлена персональная ссылка подключения. "
-            "Тест не меняет базовый уровень доступа в боте."
+            "Тест не меняет базовый уровень доступа в боте.\n\n"
+            f"Тест действует до: <code>{html_escape(state.datetime_text(trial_end.isoformat()))}</code> "
+            f"({duration_hours} ч)."
         ),
     )
     enqueue_user_outbox(
@@ -204,7 +234,7 @@ def finalize_trial(
         action="trial_approved",
         actor_meta=actor,
         target_user_id=user_id,
-        details={"request_id": request.get("id")},
+        details={"request_id": request.get("id"), "duration_hours": duration_hours},
     )
     return updated
 

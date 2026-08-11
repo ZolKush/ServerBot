@@ -21,6 +21,7 @@ from .normalization import (
     normalize_docker_status,
     normalize_outbox,
     normalize_product_settings,
+    normalize_review_messages,
     normalize_service_requests,
     normalize_tls_certificates,
     optional_int,
@@ -80,6 +81,7 @@ class UserData:
             meta[key] = optional_text(meta.get(key), limit=limit)
         for key in ("access_reviewed_by_id", "blocked_by_id"):
             meta[key] = optional_int(meta.get(key))
+        meta["review_messages"] = normalize_review_messages(meta.get("review_messages"))
 
         is_admin = role == "admin"
         admin_level = str(meta.get("admin_level") or "admin") if is_admin else "none"
@@ -114,6 +116,7 @@ class UserData:
             "subscription_end_at": 80,
             "trial_issued_at": 80,
             "trial_issued_by_name": 160,
+            "trial_end_at": 80,
             "last_auto_payment_reminder_at": 80,
             "last_auto_payment_reminder_type": 40,
             "last_manual_payment_reminder_at": 80,
@@ -131,6 +134,8 @@ class UserData:
             "service_tier_updated_by_id",
         ):
             meta[key] = optional_int(meta.get(key))
+        duration = optional_int(meta.get("trial_duration_hours"))
+        meta["trial_duration_hours"] = min(duration, 8760) if duration is not None else None
         if tier == "unlimited_trial":
             meta["subscription_end_at"] = None
         reminders = meta.get("payment_auto_reminders")

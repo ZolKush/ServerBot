@@ -18,6 +18,7 @@ from ..config import (
     MENU_TICKET,
     MENU_USERS,
 )
+from ..messaging.message_cleanup import record_navigation_result
 from ..users.staff import can_manage_maintenance_meta
 from .guards import get_user_id, get_user_meta, has_subscriber_access, is_admin, require_auth
 
@@ -75,15 +76,17 @@ async def show_main_menu(update: Update, text: str = "Меню:") -> None:
     if query:
         await query.answer()
         try:
-            await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+            result = await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
         except BadRequest as error:
             if "message is not modified" in str(error).lower():
                 return
             raise
+        await record_navigation_result(update, result)
         return
     message = update.effective_message
     if message:
-        await message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+        result = await message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+        await record_navigation_result(update, result)
 
 
 @require_auth

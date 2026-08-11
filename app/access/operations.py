@@ -18,6 +18,49 @@ from ..users.staff import STAFF_TITLE_OWNER, STAFF_TITLE_SUPPORT
 AccessReviewAction = Literal["approve", "reject", "block"]
 
 
+def can_restore_paid_access(meta: dict[str, Any], *, now: datetime) -> bool:
+    """Return whether a logged-out subscriber can re-enter without review."""
+
+    if (
+        meta.get("role") != "user"
+        or meta.get("access_state") != "logged_out"
+        or meta.get("service_tier") != "subscriber"
+        or not bool(meta.get("is_paid"))
+    ):
+        return False
+    try:
+        end = datetime.fromisoformat(str(meta.get("subscription_end_at") or ""))
+    except (TypeError, ValueError):
+        return False
+    if end.tzinfo is None:
+        end = end.replace(tzinfo=TZ)
+    return end.astimezone(TZ) > now.astimezone(TZ)
+
+
+def _restore_paid_meta(
+    current: dict[str, Any],
+    *,
+    username: str | None,
+    first_name: str | None,
+    last_name: str | None,
+    restored_at: datetime,
+) -> dict[str, Any] | None:
+    if not can_restore_paid_access(current, now=restored_at):
+        return None
+    return UserData._normalize_user(
+        {
+            **current,
+            "access_state": "approved",
+            "enabled": True,
+            "username": username,
+            "first_name": first_name,
+            "last_name": last_name,
+            "auth_at": restored_at.isoformat(),
+            "logged_out_at": None,
+        }
+    )
+
+
 async def authorize_admin(
     *,
     user_id: int,
@@ -77,6 +120,23 @@ async def submit_access_request(
             return "blocked"
         if state == "pending":
             return "pending"
+        restored = _restore_paid_meta(
+            current,
+            username=username,
+            first_name=first_name,
+            last_name=last_name,
+            restored_at=requested_at,
+        )
+        if restored is not None:
+            data.authorized_users[str(user_id)] = restored
+            append_audit_entry(
+                data,
+                action="paid_access_restored",
+                actor_meta=restored,
+                target_user_id=user_id,
+                details={},
+            )
+            return "restored_paid"
         previous = str(current.get("access_requested_at") or "")
         if previous:
             with contextlib.suppress(ValueError):
@@ -97,6 +157,7 @@ async def submit_access_request(
                 "first_name": first_name,
                 "last_name": last_name,
                 "access_requested_at": requested_at.isoformat(),
+                "review_messages": {},
             }
         )
         data.authorized_users[str(user_id)] = UserData._normalize_user(current)
@@ -105,6 +166,40 @@ async def submit_access_request(
         return "created"
 
     return await update_user_data(_apply)
+
+
+async def restore_paid_access(
+    *,
+    user_id: int,
+    username: str | None,
+    first_name: str | None,
+    last_name: str | None,
+    restored_at: datetime,
+) -> dict[str, Any] | None:
+    def _restore(data: UserData) -> dict[str, Any] | None:
+        existing = data.authorized_users.get(str(user_id))
+        if not isinstance(existing, dict):
+            return None
+        restored = _restore_paid_meta(
+            dict(existing),
+            username=username,
+            first_name=first_name,
+            last_name=last_name,
+            restored_at=restored_at,
+        )
+        if restored is None:
+            return None
+        data.authorized_users[str(user_id)] = restored
+        append_audit_entry(
+            data,
+            action="paid_access_restored",
+            actor_meta=restored,
+            target_user_id=user_id,
+            details={},
+        )
+        return restored
+
+    return await update_user_data(_restore)
 
 
 async def review_access(
@@ -157,7 +252,7 @@ async def review_access(
                 target_user_id,
                 keep_event_id=str(notification_event["id"]),
             )
-        return "updated", current
+        return "updated", dict(data.authorized_users[str(target_user_id)])
 
     return await update_user_data(_apply)
 
@@ -227,8 +322,10 @@ async def logout_user(*, user_id: int, logged_out_at: datetime) -> dict[str, Any
 __all__ = [
     "AccessReviewAction",
     "authorize_admin",
+    "can_restore_paid_access",
     "claim_service_owner",
     "logout_user",
     "review_access",
+    "restore_paid_access",
     "submit_access_request",
 ]

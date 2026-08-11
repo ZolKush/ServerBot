@@ -1,8 +1,10 @@
 """Golden-тесты редизайна статус-экрана."""
 
 from app.bot.ui import SEP
+from app.monitoring.docker.presentation import format_docker_report
 from app.monitoring.status.models import DockerContainerView, StatusSnapshot, TLSCertificateView
 from app.monitoring.status.views import format_status_message, format_ufw_message
+from app.monitoring.tls.views import format_tls_report
 
 
 def make_snapshot(**kw) -> StatusSnapshot:
@@ -36,7 +38,7 @@ def test_status_message_structure() -> None:
     assert "45%" in text  # диск из disk_raw
     assert "🌐 DNS 🟢 8/8" in text
     assert "🛡 UFW 🟢" in text
-    assert "🐳 Docker 🟢 работают 2 · остановлены 0 · unhealthy 0 · всего 2" in text
+    assert "🐳 Docker 🟢 2/2" in text
     assert "обновлено 12.06.2026 14:30:05" in text
     assert len(text) < 4096
 
@@ -104,14 +106,15 @@ def test_docker_summary_counts_stopped_unhealthy_and_missing() -> None:
             ]
         )
     )
-    assert "🐳 Docker 🔴 работают 2 · остановлены 1 · unhealthy 1 · всего 3 · не найдены 1" in text
-    assert "🔴 stopped" in text
+    assert "🐳 Docker 🔴 1/4" in text
+    assert "⚠️ stopped" in text
+    assert "\n🟢 healthy —" not in text
 
 
 def test_docker_zero_containers_is_available_not_warning() -> None:
     text = format_status_message(make_snapshot(containers=[]))
-    assert "🐳 Docker 🟢 работают 0 · остановлены 0 · unhealthy 0 · всего 0" in text
-    assert "Docker доступен, контейнеров нет" in text
+    assert "🐳 Docker 🟢 0/0" in text
+    assert "Контейнеры" not in text
 
 
 def test_docker_details_are_admin_only() -> None:
@@ -126,10 +129,37 @@ def test_docker_details_are_admin_only() -> None:
     )
 
     assert "🐳 Docker 🔴" in user_text
-    assert "работают 1" not in user_text
-    assert "всего 2" not in user_text
+    assert "🐳 Docker 🔴 1/2" in user_text
     assert "Контейнеры" not in user_text
     assert "private-service" not in user_text
+
+
+def test_repeated_long_docker_ssh_error_is_bounded_and_deduplicated_in_reports() -> None:
+    repeated_line = "WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!"
+    long_error = "ssh ошибка:\n" + (f" {repeated_line} \n" * 200)
+    containers = [DockerContainerView(f"container-{index}", False, long_error, "-") for index in range(30)]
+
+    main_text = format_status_message(make_snapshot(containers=containers))
+    report_text = format_docker_report("Netherlands", containers, updated_at="07.08 23:13")
+
+    for text in (main_text, report_text):
+        assert len(text) < 4096
+        assert text.count(repeated_line) == 1
+        assert "\nWARNING" not in text
+    assert "и ещё 24" in main_text
+    assert "и ещё 24" in report_text
+
+
+def test_main_docker_problem_list_has_a_visible_bound() -> None:
+    containers = [
+        DockerContainerView(f"broken-{index}", False, f"ошибка: failure {index}", "-") for index in range(100)
+    ]
+
+    text = format_status_message(make_snapshot(containers=containers))
+
+    assert len(text) < 4096
+    assert "подробности в разделе Docker" in text
+    assert "broken-99" not in text
 
 
 def test_tls_details_are_admin_only() -> None:
@@ -143,9 +173,30 @@ def test_tls_details_are_admin_only() -> None:
         trust_valid=True,
     )
     admin_text = format_status_message(make_snapshot(tls_certificates=[certificate], admin_mode=True))
-    user_text = format_status_message(make_snapshot(tls_certificates=[], admin_mode=False))
+    user_text = format_status_message(make_snapshot(tls_certificates=[certificate], admin_mode=False))
 
-    assert "🔐 TLS ⚠️ исправны 0 · проблемы 1 · всего 1" in admin_text
+    assert "🔐 TLS ⚠️ 0/1" in admin_text
     assert "vpn.example.com:443" in admin_text
     assert "TLS-сертификаты" not in user_text
-    assert "🔐 TLS" not in user_text
+    assert "🔐 TLS ⚠️ 0/1" in user_text
+    assert "vpn.example.com" not in user_text
+
+
+def test_full_tls_report_is_separate_and_shows_fallback_metadata() -> None:
+    certificate = TLSCertificateView(
+        domain="zeronet-monitor.embeddedcontrolsinc.com",
+        port=8443,
+        primary_port=443,
+        fallback_ports=(8443,),
+        used_fallback=True,
+        status="ok",
+        not_after="2026-10-18T17:33:00+00:00",
+        last_attempt_at="2026-08-07T23:13:31+00:00",
+        last_success_at="2026-08-07T23:13:31+00:00",
+    )
+
+    text = format_tls_report("Netherlands", [certificate])
+
+    assert "zeronet-monitor.embeddedcontrolsinc.com:8443" in text
+    assert "основной <code>443</code> → fallback <code>8443</code>" in text
+    assert "один раз в неделю" in text

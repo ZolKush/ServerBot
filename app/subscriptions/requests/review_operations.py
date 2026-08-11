@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import Any
 
 from ...storage import UserData, append_audit_entry
-from ...users.staff import is_billing_exempt_meta, is_owner_meta
+from ...users.staff import is_admin_meta, is_billing_exempt_meta, is_owner_meta
 from ..connections import has_connection
+from ..policy import (
+    DEFAULT_TRIAL_DURATION_HOURS,
+    MAX_CUSTOM_TRIAL_DURATION_HOURS,
+    MIN_CUSTOM_TRIAL_DURATION_HOURS,
+)
 from . import state
 from .operations import (
     cancel_active_requests,
     finalize_payment,
-    finalize_trial,
     queue_message,
 )
 from .views import payment_markup, payment_message, payment_profile_ready, payment_target
@@ -24,6 +29,7 @@ def approve_trial(
     *,
     request_id: int,
     actor: dict[str, Any],
+    duration_hours: int = DEFAULT_TRIAL_DURATION_HOURS,
 ) -> RequestResult:
     request = config.service_requests.get(str(request_id))
     if not isinstance(request, dict) or request.get("kind") != "trial":
@@ -32,6 +38,16 @@ def approve_trial(
         return "stale", request
     if request.get("claimed_by_id") not in (None, actor.get("user_id")):
         return "claimed", request
+    if not is_admin_meta(actor):
+        return "admin_required", request
+    try:
+        duration_hours = int(duration_hours)
+    except (TypeError, ValueError, OverflowError):
+        return "invalid_duration", request
+    if not MIN_CUSTOM_TRIAL_DURATION_HOURS <= duration_hours <= MAX_CUSTOM_TRIAL_DURATION_HOURS:
+        return "invalid_duration", request
+    if not is_owner_meta(actor) and duration_hours != DEFAULT_TRIAL_DURATION_HOURS:
+        return "duration_forbidden", request
     user_id = int(request.get("user_id", 0) or 0)
     current = config.authorized_users.get(str(user_id))
     if not isinstance(current, dict):
@@ -46,10 +62,14 @@ def approve_trial(
         return "tier_changed", request
     if current.get("trial_issued_at"):
         return "already_issued", request
-    if has_connection(current):
-        finalize_trial(config, request, actor, None)
-        return "completed", request
-    updated = dict(request)
+    target_end = state.now() + timedelta(hours=duration_hours)
+    prepared = {
+        **request,
+        "trial_duration_hours": duration_hours,
+        "target_end_at": target_end.isoformat(),
+        "updated_at": state.now_iso(),
+    }
+    updated = dict(prepared)
     updated.update(
         {
             "status": "awaiting_link",
@@ -69,6 +89,8 @@ def send_requisites(
     request_id: int,
     actor: dict[str, Any],
 ) -> RequestResult:
+    if not is_admin_meta(actor):
+        return "admin_required", None
     request = config.service_requests.get(str(request_id))
     if not isinstance(request, dict) or request.get("kind") != "purchase":
         return "missing", None
@@ -110,6 +132,7 @@ def send_requisites(
         kind="payment_requisites",
         text=payment_message(config.product_settings, updated),
         reply_markup=payment_markup(request_id),
+        parse_mode=None,
     )
     return "sent", updated
 
@@ -120,6 +143,8 @@ def reject_request(
     request_id: int,
     actor: dict[str, Any],
 ) -> str:
+    if not is_admin_meta(actor):
+        return "admin_required"
     request = config.service_requests.get(str(request_id))
     if not isinstance(request, dict) or request.get("status") not in state.ACTIVE_REQUEST_STATUSES:
         return "stale"
@@ -170,6 +195,8 @@ def reset_unconfirmed_payment(
     request_id: int,
     actor: dict[str, Any],
 ) -> str:
+    if not is_owner_meta(actor):
+        return "owner_only"
     request = config.service_requests.get(str(request_id))
     if not isinstance(request, dict) or request.get("status") != "payment_reported":
         return "stale"
@@ -204,6 +231,8 @@ def confirm_payment(
     request_id: int,
     actor: dict[str, Any],
 ) -> RequestResult:
+    if not is_owner_meta(actor):
+        return "owner_only", None
     request = config.service_requests.get(str(request_id))
     if not isinstance(request, dict) or request.get("kind") not in {"purchase", "renewal"}:
         return "missing", None

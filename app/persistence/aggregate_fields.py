@@ -28,6 +28,7 @@ ACCESS_FIELDS = frozenset(
         "blocked_by_name",
         "blocked_reason",
         "logged_out_at",
+        "review_messages",
     }
 )
 SUBSCRIPTION_FIELDS = frozenset(
@@ -45,6 +46,8 @@ SUBSCRIPTION_FIELDS = frozenset(
         "trial_issued_at",
         "trial_issued_by_id",
         "trial_issued_by_name",
+        "trial_end_at",
+        "trial_duration_hours",
         "last_auto_payment_reminder_at",
         "last_auto_payment_reminder_type",
         "last_manual_payment_reminder_at",
@@ -61,6 +64,7 @@ BILLING_FIELDS = frozenset(
         "payment_bank",
         "payment_recipient",
         "payment_phone",
+        "payment_message",
         "current_period_end",
         "next_period_end",
         "period_setup_reminder_for",

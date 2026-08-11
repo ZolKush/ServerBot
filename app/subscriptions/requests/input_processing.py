@@ -5,28 +5,44 @@ from __future__ import annotations
 from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.constants import ParseMode
 from telegram.ext import ContextTypes, ConversationHandler
 
 from ...bot.guards import require_auth
 from ...bot.menu import main_menu_inline_kb
-from ...bot.ui import html_escape
-from ...storage import (
-    UserData,
-    authorized_users_snapshot,
-    get_user_meta_copy,
-    update_user_data,
+from ...messaging.message_cleanup import record_navigation_result
+from ...messaging.review_sync import (
+    sync_service_review_messages,
+    sync_service_review_messages_for_user,
 )
-from ...users.staff import is_admin_meta, is_billing_exempt_meta, is_owner_meta
-from ..connections import has_connection, is_valid_connection_url
+from ...runtime.logging import logger
+from ...storage import UserData, get_user_meta_copy, service_requests_snapshot, update_user_data
+from ...users.staff import is_admin_meta, is_owner_meta
+from ..connections import is_valid_connection_url
+from ..policy import MAX_CUSTOM_TRIAL_DURATION_HOURS, MIN_CUSTOM_TRIAL_DURATION_HOURS
 from . import state
-from .customer import apply_trial_comment
-from .eligibility import (
-    is_eligible_paid_subscriber,
-    is_paid_subscriber,
-    parse_id_list,
+from .admin_input import (
+    handle_mass_date_input,
+    handle_mass_reminder_input,
+    handle_user_date_input,
 )
+from .customer import apply_trial_comment
 from .operations import finalize_payment, finalize_trial
+from .review_operations import approve_trial
+
+
+async def _sync_request_cards(context: ContextTypes.DEFAULT_TYPE, request_id: int) -> None:
+    bot = getattr(context, "bot", None)
+    if bot is None:
+        return
+    try:
+        request = service_requests_snapshot().get(str(request_id))
+        user_id = int(request.get("user_id", 0) or 0) if isinstance(request, dict) else 0
+        if user_id:
+            await sync_service_review_messages_for_user(bot, user_id)
+        else:
+            await sync_service_review_messages(bot, request_id)
+    except Exception:
+        logger.exception("Could not synchronize service request cards request_id=%s", request_id)
 
 
 async def complete_connection_input(
@@ -94,154 +110,6 @@ async def complete_connection_input(
     return await update_user_data(apply)
 
 
-def _confirmation_markup() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton(
-                    "✅ Подтвердить",
-                    callback_data="product:confirm:apply",
-                )
-            ],
-            [InlineKeyboardButton("❌ Отмена", callback_data="product:cancel")],
-        ]
-    )
-
-
-async def _handle_mass_reminder_input(
-    message: Any,
-    data: dict[str, Any],
-    text: str,
-) -> int:
-    targets: list[int] = []
-    snapshot = authorized_users_snapshot()
-    lowered = text.lower()
-    if lowered == "все":
-        targets = [int(meta.get("user_id", key)) for key, meta in snapshot.items() if is_eligible_paid_subscriber(meta)]
-    elif lowered.startswith("до "):
-        cutoff = state.parse_input_datetime(text[3:].strip())
-        if cutoff is None:
-            await message.reply_text("Некорректная дата. Используйте ДД.ММ.ГГГГ ЧЧ:ММ.")
-            return state.PRODUCT_INPUT
-        for key, meta in snapshot.items():
-            end = state.parse_datetime(meta.get("subscription_end_at"))
-            if is_eligible_paid_subscriber(meta) and end and end <= cutoff:
-                targets.append(int(meta.get("user_id", key)))
-    else:
-        parsed_ids = parse_id_list(text)
-        if parsed_ids is None:
-            await message.reply_text("Введите «все», условие с датой или Telegram ID через запятую.")
-            return state.PRODUCT_INPUT
-        targets = sorted(parsed_ids)
-    if not targets:
-        await message.reply_text("Подходящих получателей нет. Повторите ввод.")
-        return state.PRODUCT_INPUT
-    data[state.CTX_PENDING] = {
-        "kind": "mass_reminder",
-        "target_ids": sorted(set(targets)),
-    }
-    await message.reply_text(
-        f"Будет подготовлено напоминаний: <b>{len(set(targets))}</b>. Подтвердите отправку.",
-        parse_mode=ParseMode.HTML,
-        reply_markup=_confirmation_markup(),
-    )
-    return state.PRODUCT_CONFIRM
-
-
-async def _handle_mass_date_input(
-    message: Any,
-    data: dict[str, Any],
-    text: str,
-) -> int:
-    date_part, separator, ids_part = text.partition("|")
-    target = state.parse_input_datetime(date_part.strip())
-    if target is None:
-        await message.reply_text("Некорректная дата. Используйте ДД.ММ.ГГГГ ЧЧ:ММ.")
-        return state.PRODUCT_INPUT
-    selected_ids = parse_id_list(ids_part.strip()) if separator else None
-    if separator and selected_ids is None:
-        await message.reply_text("После | укажите корректные Telegram ID через запятую.")
-        return state.PRODUCT_INPUT
-    snapshot = authorized_users_snapshot()
-    candidates = [
-        int(meta.get("user_id", key))
-        for key, meta in snapshot.items()
-        if is_eligible_paid_subscriber(meta) and (selected_ids is None or int(meta.get("user_id", key)) in selected_ids)
-    ]
-    skipped = (len(selected_ids) - len(candidates)) if selected_ids is not None else 0
-    if not candidates:
-        await message.reply_text("Нет оплаченных подписчиков, которым можно назначить эту дату.")
-        return state.PRODUCT_INPUT
-    data[state.CTX_PENDING] = {
-        "kind": "mass_date",
-        "target_ids": sorted(set(candidates)),
-        "target_end_at": target.isoformat(),
-        "skipped": max(0, skipped),
-    }
-    await message.reply_text(
-        "📅 <b>Проверка массового изменения</b>\n\n"
-        f"• Новая дата: <code>{html_escape(state.datetime_text(target.isoformat()))}</code>\n"
-        f"• Будет изменено: <b>{len(set(candidates))}</b>\n"
-        f"• Пропущено: <b>{max(0, skipped)}</b>",
-        parse_mode=ParseMode.HTML,
-        reply_markup=_confirmation_markup(),
-    )
-    return state.PRODUCT_CONFIRM
-
-
-async def _handle_user_date_input(
-    message: Any,
-    data: dict[str, Any],
-    action: str,
-    text: str,
-) -> int:
-    target = state.parse_input_datetime(text)
-    if target is None:
-        await message.reply_text("Некорректная дата. Используйте ДД.ММ.ГГГГ ЧЧ:ММ.")
-        return state.PRODUCT_INPUT
-    if action == "manualpay" and target <= state.now():
-        await message.reply_text("Для этого действия дата должна находиться в будущем.")
-        return state.PRODUCT_INPUT
-    pending: dict[str, Any] = {
-        "kind": action,
-        "target_end_at": target.isoformat(),
-    }
-    target_user_id = data.get(state.CTX_TARGET_UID)
-    if isinstance(target_user_id, int):
-        pending["target_uid"] = target_user_id
-    user = get_user_meta_copy(int(target_user_id or 0))
-    if action == "user_end" and (not user or not is_paid_subscriber(user)):
-        await message.reply_text(
-            "⛔ Невозможно изменить дату окончания\n\n"
-            "Оплата пользователя не подтверждена. Сначала руководитель "
-            "сервиса должен подтвердить оплату."
-        )
-        return state.PRODUCT_INPUT
-    if action == "manualpay":
-        if not user:
-            await message.reply_text("Пользователь не найден.")
-            return state.PRODUCT_INPUT
-        if is_billing_exempt_meta(user):
-            await message.reply_text("У руководителя сервиса бессрочный оплаченный доступ.")
-            return state.PRODUCT_INPUT
-        if not has_connection(user):
-            await message.reply_text("Сначала назначьте пользователю персональную ссылку подключения.")
-            return state.PRODUCT_INPUT
-    data[state.CTX_PENDING] = pending
-    labels = {
-        "user_end": "Дата окончания пользователя",
-        "manualpay": "Ручное подтверждение оплаты",
-    }
-    await message.reply_text(
-        f"<b>{html_escape(labels[action])}</b>\n\n"
-        f"Новое значение: <code>{html_escape(state.datetime_text(target.isoformat()))}</code>\n\n"
-        "Подтвердите изменение.",
-        parse_mode=ParseMode.HTML,
-        reply_markup=_confirmation_markup(),
-    )
-    return state.PRODUCT_CONFIRM
-
-
 @require_auth
 async def product_text_input(
     update: Update,
@@ -270,7 +138,7 @@ async def product_text_input(
             )
         )
         state.clear_request_context(context)
-        await message.reply_text(
+        result = await message.reply_text(
             {
                 "created": "✅ Заявка на тестовый доступ отправлена.",
                 "exists": "Заявка уже ожидает решения.",
@@ -279,6 +147,61 @@ async def product_text_input(
             }[outcome],
             reply_markup=main_menu_inline_kb(update),
         )
+        await record_navigation_result(update, result)
+        return ConversationHandler.END
+
+    if action == "trial_duration":
+        if not is_owner_meta(actor):
+            state.clear_request_context(context)
+            await message.reply_text("Изменять срок теста может только руководитель сервиса.")
+            return ConversationHandler.END
+        try:
+            duration_hours = int(text)
+        except (TypeError, ValueError, OverflowError):
+            duration_hours = 0
+        if not MIN_CUSTOM_TRIAL_DURATION_HOURS <= duration_hours <= MAX_CUSTOM_TRIAL_DURATION_HOURS:
+            await message.reply_text(
+                f"Введите целое число часов от {MIN_CUSTOM_TRIAL_DURATION_HOURS} до {MAX_CUSTOM_TRIAL_DURATION_HOURS}."
+            )
+            return state.PRODUCT_INPUT
+        request_id = int(data.get(state.CTX_REQUEST_ID, 0) or 0)
+        outcome, request = await update_user_data(
+            lambda config: approve_trial(
+                config,
+                request_id=request_id,
+                actor=actor,
+                duration_hours=duration_hours,
+            )
+        )
+        if outcome == "need_link":
+            data[state.CTX_ACTION] = "request_link"
+            deadline = state.datetime_text((request or {}).get("target_end_at"))
+            result = await message.reply_text(
+                "🔗 Вставьте персональную ссылку подключения одним сообщением. "
+                "Поддерживаются только ссылки HTTP/HTTPS.\n\n"
+                f"Ссылка должна быть ограничена сроком до: {deadline} ({duration_hours} ч).",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("❌ Отмена", callback_data="product:cancel")]]
+                ),
+            )
+            await record_navigation_result(update, result)
+            await _sync_request_cards(context, request_id)
+            return state.PRODUCT_INPUT
+        state.clear_request_context(context)
+        result = await message.reply_text(
+            {
+                "completed": f"✅ Тестовый доступ одобрен на {duration_hours} ч.",
+                "claimed": "Заявку уже обрабатывает другой сотрудник.",
+                "stale": "Заявка уже обработана.",
+                "tier_changed": "Уровень пользователя изменился; заявка отменена.",
+                "already_issued": "Тестовый доступ уже выдавался.",
+                "invalid_duration": "Некорректная длительность теста.",
+                "missing": "Заявка или пользователь не найдены.",
+            }.get(outcome, "Заявка не обработана."),
+            reply_markup=main_menu_inline_kb(update),
+        )
+        await record_navigation_result(update, result)
+        await _sync_request_cards(context, request_id)
         return ConversationHandler.END
 
     if action in {"request_link", "payment_link"}:
@@ -288,6 +211,17 @@ async def product_text_input(
                 "Некорректная ссылка. Вставьте полную ссылку, начинающуюся с http:// или https://."
             )
             return state.PRODUCT_INPUT
+        if action == "request_link":
+            request = service_requests_snapshot().get(str(request_id))
+            user_id = int(request.get("user_id", 0) or 0) if isinstance(request, dict) else 0
+            current = get_user_meta_copy(user_id) if user_id else None
+            previous_url = str((current or {}).get("connection_url") or "").strip()
+            if previous_url and text == previous_url:
+                await message.reply_text(
+                    "Для теста нужна новая ссылка, ограниченная указанным сроком. "
+                    "Существующую постоянную ссылку использовать нельзя."
+                )
+                return state.PRODUCT_INPUT
         outcome = await complete_connection_input(
             action=action,
             request_id=request_id,
@@ -295,7 +229,7 @@ async def product_text_input(
             actor=actor,
         )
         state.clear_request_context(context)
-        await message.reply_text(
+        result = await message.reply_text(
             {
                 "completed": ("✅ Ссылка сохранена, заявка завершена и уведомление поставлено в очередь."),
                 "claimed": "Заявку уже обрабатывает другой сотрудник.",
@@ -305,11 +239,14 @@ async def product_text_input(
                 ),
                 "user_missing": "Пользователь больше не найден.",
                 "connection_missing": "Не удалось сохранить персональную ссылку.",
+                "connection_not_fresh": "Для теста требуется новая ограниченная по сроку ссылка.",
                 "tier_changed": ("Уровень пользователя уже изменился; заявка на тест отменена."),
                 "already_issued": "Тестовый доступ уже был выдан ранее.",
             }.get(outcome, "Заявку не удалось завершить. Откройте её заново."),
             reply_markup=main_menu_inline_kb(update),
         )
+        await record_navigation_result(update, result)
+        await _sync_request_cards(context, request_id)
         return ConversationHandler.END
 
     if not is_admin_meta(actor):
@@ -317,11 +254,11 @@ async def product_text_input(
         await message.reply_text("Административное действие больше недоступно.")
         return ConversationHandler.END
     if action == "mass_reminder":
-        return await _handle_mass_reminder_input(message, data, text)
+        return await handle_mass_reminder_input(update, message, data, text)
     if action == "mass_date":
-        return await _handle_mass_date_input(message, data, text)
+        return await handle_mass_date_input(update, message, data, text)
     if action in {"user_end", "manualpay"}:
-        return await _handle_user_date_input(message, data, action, text)
+        return await handle_user_date_input(update, message, data, action, text)
 
     state.clear_request_context(context)
     await message.reply_text("Сценарий ввода устарел. Начните действие заново.")

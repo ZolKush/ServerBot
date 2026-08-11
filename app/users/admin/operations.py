@@ -29,6 +29,7 @@ async def queue_broadcast(
     *,
     sender_id: int | None,
     recipient_count: int,
+    audience: str,
 ) -> None:
     def apply(data: UserData) -> None:
         enqueue_user_outbox(data, event)
@@ -36,7 +37,7 @@ async def queue_broadcast(
             data,
             action="broadcast_queued",
             actor_meta=data.authorized_users.get(str(sender_id)),
-            details={"recipient_count": recipient_count},
+            details={"recipient_count": recipient_count, "audience": audience},
         )
 
     await update_user_data(apply)
