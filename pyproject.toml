@@ -9,14 +9,13 @@ description = "Telegram bot that monitors local and remote servers and manages m
 requires-python = ">=3.10"
 dependencies = [
     "python-telegram-bot[job-queue]==22.8",
-    "python-dotenv==1.2.2",
+    "python-dotenv==1.2.3",
     "aiodns==4.0.4",
     "httpx==0.28.1",
-    "idna==3.18",
     "cryptography==50.0.0",
     "openpyxl==3.1.5",
     "pydantic==2.13.4",
-    "pydantic-settings==2.14.2",
+    "tzdata==2026.3",
     "tomli==2.4.1; python_version < '3.11'",
 ]
 

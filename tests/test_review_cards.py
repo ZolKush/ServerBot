@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from telegram.constants import ChatType
-from telegram.error import TimedOut
+from telegram.error import RetryAfter, TimedOut
 
 from app import storage
 from app.messaging import review_sync
@@ -168,6 +168,30 @@ async def test_retryable_review_edit_is_retried_immediately(
 
     assert len(bot.edited) == 2
     sleep.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_review_edit_respects_full_process_wide_retry_after(monkeypatch: pytest.MonkeyPatch) -> None:
+    class RateLimitedBot:
+        async def edit_message_text(self, **_kwargs):
+            raise RetryAfter(timedelta(seconds=30))
+
+    wait_gate = AsyncMock()
+    extend_gate = AsyncMock()
+    monkeypatch.setattr(review_sync, "wait_flood_gate", wait_gate)
+    monkeypatch.setattr(review_sync, "extend_flood_gate", extend_gate)
+
+    result = await review_sync._edit_card(
+        RateLimitedBot(),
+        chat_id=1,
+        message_id=2,
+        text="card",
+        reply_markup=None,
+    )
+
+    assert result == "retryable"
+    wait_gate.assert_awaited_once()
+    extend_gate.assert_awaited_once_with(30.5)
 
 
 @pytest.mark.asyncio

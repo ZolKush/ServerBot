@@ -7,7 +7,14 @@ from pathlib import Path
 
 import pytest
 
-from app.persistence import RecoveryError, SchemaError, SplitJsonBackend, StorageConflictError
+from app.persistence import (
+    CommittedTransactionError,
+    PreparedTransactionError,
+    RecoveryError,
+    SchemaError,
+    SplitJsonBackend,
+    StorageConflictError,
+)
 from app.persistence.layout import STORE_SPECS, TRANSACTIONS_DIR
 
 
@@ -152,6 +159,157 @@ def test_recovery_finishes_multi_store_commit_after_crash(tmp_path: Path) -> Non
     assert recovered.data("messaging.outbox") == {"event": {"id": "event"}}
 
 
+def test_recovery_preflights_every_file_before_replacing_targets(tmp_path: Path) -> None:
+    root = tmp_path / "data"
+    SplitJsonBackend(root).bootstrap()
+
+    def crash(name: str) -> None:
+        if name == "after_prepare":
+            raise SimulatedCrash
+
+    crashing = SplitJsonBackend(root, failpoint=crash)
+    with crashing.unit_of_work() as uow:
+        uow.profiles.put(42, {"user_id": 42})
+        uow.access.put(42, {"access_state": "approved"})
+        with pytest.raises(SimulatedCrash):
+            uow.commit()
+
+    target_paths = [
+        root / STORE_SPECS["users.profiles"].relative_path,
+        root / STORE_SPECS["access.grants"].relative_path,
+        root / "storage_layout.json",
+    ]
+    before = {path: path.read_bytes() for path in target_paths}
+    transaction = next((root / TRANSACTIONS_DIR).iterdir())
+    (transaction / "staged" / "storage_layout.json").unlink()
+
+    with pytest.raises(RecoveryError, match="neither target nor staging"):
+        SplitJsonBackend(root).recover()
+
+    assert {path: path.read_bytes() for path in target_paths} == before
+
+
+def test_verify_recovery_is_strictly_read_only(tmp_path: Path) -> None:
+    root = tmp_path / "data"
+    SplitJsonBackend(root).bootstrap()
+
+    def crash(name: str) -> None:
+        if name == "after_install:access/grants.json":
+            raise SimulatedCrash
+
+    crashing = SplitJsonBackend(root, failpoint=crash)
+    with crashing.unit_of_work() as uow:
+        uow.profiles.put(42, {"user_id": 42})
+        uow.access.put(42, {"access_state": "approved"})
+        with pytest.raises(SimulatedCrash):
+            uow.commit()
+
+    before = _tree_payloads(root)
+    pending = SplitJsonBackend(root).verify_recovery()
+
+    assert len(pending) == 1
+    assert _tree_payloads(root) == before
+
+
+def test_verify_recovery_rejects_reused_staging_without_writes(tmp_path: Path) -> None:
+    root = tmp_path / "data"
+
+    def crash(name: str) -> None:
+        if name == "after_prepare":
+            raise SimulatedCrash
+
+    with pytest.raises(SimulatedCrash):
+        SplitJsonBackend(root, failpoint=crash).bootstrap()
+
+    transaction = next((root / TRANSACTIONS_DIR).iterdir())
+    journal_path = transaction / "journal.json"
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    journal["files"][1]["staged"] = journal["files"][0]["staged"]
+    journal_path.write_text(json.dumps(journal), encoding="utf-8")
+    before = _tree_payloads(root)
+
+    with pytest.raises(RecoveryError, match="non-canonical staged path"):
+        SplitJsonBackend(root).verify_recovery()
+
+    assert _tree_payloads(root) == before
+
+
+def test_transient_error_after_prepare_is_recovered_before_return(tmp_path: Path) -> None:
+    root = tmp_path / "data"
+    SplitJsonBackend(root).bootstrap()
+    failed_once = False
+
+    def transient_failure(name: str) -> None:
+        nonlocal failed_once
+        if name == "after_prepare" and not failed_once:
+            failed_once = True
+            raise OSError("transient install failure")
+
+    backend = SplitJsonBackend(root, failpoint=transient_failure)
+    with backend.unit_of_work() as uow:
+        uow.profiles.put(42, {"user_id": 42})
+        uow.commit()
+
+    snapshot = backend.snapshot()
+    assert snapshot.revision == 2
+    assert snapshot.data("users.profiles") == {"42": {"user_id": 42}}
+    assert backend.has_pending_transactions() is False
+
+
+def test_persistent_error_after_prepare_has_non_retryable_outcome(tmp_path: Path) -> None:
+    root = tmp_path / "data"
+    SplitJsonBackend(root).bootstrap()
+
+    def persistent_failure(name: str) -> None:
+        if name == "after_manifest":
+            raise OSError("persistent install failure")
+
+    backend = SplitJsonBackend(root, failpoint=persistent_failure)
+    with backend.unit_of_work() as uow:
+        uow.profiles.put(42, {"user_id": 42})
+        with pytest.raises(PreparedTransactionError, match="must not be retried") as captured:
+            uow.commit()
+        with pytest.raises(RuntimeError, match="committed Unit of Work"):
+            uow.rollback()
+
+    assert captured.value.transaction_id in backend.verify_recovery()
+    recovered = SplitJsonBackend(root).snapshot()
+    assert recovered.revision == 2
+    assert recovered.data("users.profiles") == {"42": {"user_id": 42}}
+
+
+def test_post_commit_reload_error_has_non_retryable_outcome(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "data"
+    backend = SplitJsonBackend(root)
+    backend.bootstrap()
+
+    with backend.unit_of_work() as uow:
+        original_load = backend._load
+        load_calls = 0
+
+        def fail_post_commit_load():
+            nonlocal load_calls
+            load_calls += 1
+            if load_calls == 2:
+                raise OSError("transient post-commit read failure")
+            return original_load()
+
+        monkeypatch.setattr(backend, "_load", fail_post_commit_load)
+        uow.profiles.put(42, {"user_id": 42})
+        with pytest.raises(CommittedTransactionError, match="must not be retried") as captured:
+            uow.commit()
+        with pytest.raises(RuntimeError, match="committed Unit of Work"):
+            uow.rollback()
+
+    recovered = backend.snapshot()
+    assert recovered.transaction_id == captured.value.transaction_id
+    assert recovered.revision == 2
+    assert recovered.data("users.profiles") == {"42": {"user_id": 42}}
+
+
 def test_recovery_refuses_missing_staging_and_target(tmp_path: Path) -> None:
     root = tmp_path / "data"
 
@@ -224,3 +382,7 @@ def test_commit_refuses_non_json_values_before_writing(tmp_path: Path) -> None:
             uow.commit()
 
     assert backend.snapshot().revision == 1
+
+
+def _tree_payloads(root: Path) -> dict[str, bytes]:
+    return {path.relative_to(root).as_posix(): path.read_bytes() for path in root.rglob("*") if path.is_file()}

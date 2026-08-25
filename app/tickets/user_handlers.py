@@ -304,11 +304,11 @@ async def ticket_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         ticket_id = int(ticket["id"])
         logger.info(
-            "Ticket created ticket_id=%s user_id=%s urgency=%s subject=%s",
+            "Ticket created ticket_id=%s user_id=%s urgency=%s subject_len=%s",
             ticket_id,
             uid,
             urgency,
-            subject,
+            len(subject),
         )
         _clear_ticket_ctx(context)
         await query.edit_message_text(

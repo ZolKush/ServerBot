@@ -1,59 +1,50 @@
 from __future__ import annotations
 
-from typing import Any
+import ipaddress
+from pathlib import Path
+from typing import Any, Literal
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import ValidationInfo, field_validator, model_validator
-from pydantic_settings import SettingsConfigDict
-from pydantic_settings.sources import DotEnvSettingsSource
+from pydantic import ValidationError, ValidationInfo, field_validator, model_validator
 
-from .locations import ENV_FILE
-from .parsing import split_env_list
+from .json_files import JsonConfigError, load_json_object
 from .schema_fields import SettingsFields
 from .schema_rules import validate_settings_consistency
 from .validators import is_uuid
 
 
-class _PermissiveDotEnvSource(DotEnvSettingsSource):
-    """Allow comma-separated list values in .env without requiring JSON."""
-
-    def decode_complex_value(self, field_name: str, field: Any, value: Any) -> Any:
-        try:
-            return super().decode_complex_value(field_name, field, value)
-        except Exception:
-            return value
-
-
 class AppSettings(SettingsFields):
-    model_config = SettingsConfigDict(
-        env_file=str(ENV_FILE),
-        env_file_encoding="utf-8",
-        extra="forbid",
-        env_ignore_empty=True,
-        hide_input_in_errors=True,
-    )
-
-    @classmethod
-    def settings_customise_sources(cls, settings_cls, init_settings, env_settings, dotenv_settings, **kwargs):
-        _ = dotenv_settings
-        secrets = kwargs.get("secrets_settings") or kwargs.get("file_secret_settings")
-        sources = [init_settings, env_settings, _PermissiveDotEnvSource(settings_cls)]
-        if secrets is not None:
-            sources.append(secrets)
-        return tuple(sources)
-
     @field_validator("DNS_RESOLVERS", "REMNAWAVE_HIDDEN_UUIDS", mode="before")
     @classmethod
-    def _parse_list(cls, value: Any) -> list[str]:
-        return split_env_list(value)
+    def _parse_list(cls, value: Any, info: ValidationInfo) -> list[str]:
+        if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+            raise ValueError(f"{info.field_name} must be a JSON array of strings")
+        return value
 
     @field_validator("REMNAWAVE_HIDDEN_UUIDS", mode="after")
     @classmethod
     def _validate_uuids(cls, value: list[str]) -> list[str]:
-        for item in value:
+        unique = list(dict.fromkeys(value))
+        for item in unique:
             if not is_uuid(item):
                 raise ValueError(f"REMNAWAVE_HIDDEN_UUIDS: invalid UUID '{item}'")
-        return value
+        return unique
+
+    @field_validator("DNS_RESOLVERS", mode="after")
+    @classmethod
+    def _validate_dns_resolvers(cls, value: list[str]) -> list[str]:
+        resolvers: list[str] = []
+        for item in value:
+            try:
+                resolver = str(ipaddress.ip_address(item))
+            except ValueError as exc:
+                raise ValueError(f"DNS_RESOLVERS contains an invalid IP address: {item}") from exc
+            if resolver not in resolvers:
+                resolvers.append(resolver)
+        if not resolvers:
+            raise ValueError("DNS_RESOLVERS must contain at least one IP address")
+        return resolvers
 
     @field_validator("TZ")
     @classmethod
@@ -68,7 +59,9 @@ class AppSettings(SettingsFields):
     @field_validator("LOG_LEVEL", mode="before")
     @classmethod
     def _normalize_log_level(cls, value: Any) -> str:
-        normalized = str(value or "").strip().upper() or "INFO"
+        if not isinstance(value, str):
+            raise ValueError("LOG_LEVEL must be a string")
+        normalized = value.strip().upper() or "INFO"
         normalized = {"WARN": "WARNING", "FATAL": "CRITICAL"}.get(normalized, normalized)
         allowed = {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG", "NOTSET"}
         if normalized not in allowed:
@@ -136,10 +129,39 @@ class AppSettings(SettingsFields):
             raise ValueError("NAVIGATION_CLEANUP_INTERVAL_SEC must be in range 60..3600")
         return normalized
 
-    @field_validator("REMNAWAVE_METRICS_URL", "SERVER_INVENTORY_FILE", mode="before")
+    @field_validator(
+        "DATA_DIR",
+        "INSTANCE_LOCK_PATH",
+        "PTB_PERSISTENCE_PATH",
+        "SSH_IDENTITY_FILE",
+        "SSH_KNOWN_HOSTS_FILE",
+        mode="before",
+    )
     @classmethod
-    def _strip_string(cls, value: Any) -> str:
-        return str(value or "").strip()
+    def _normalize_path(cls, value: Any, info: ValidationInfo) -> str:
+        if not isinstance(value, str):
+            raise ValueError(f"{info.field_name} must be a string")
+        normalized = value.strip()
+        if "\x00" in normalized:
+            raise ValueError(f"{info.field_name} must not contain NUL")
+        if info.field_name == "DATA_DIR" and not normalized:
+            raise ValueError("DATA_DIR must not be empty")
+        return normalized
+
+    @field_validator("REMNAWAVE_METRICS_URL", mode="before")
+    @classmethod
+    def _validate_metrics_url(cls, value: Any) -> str:
+        if not isinstance(value, str):
+            raise ValueError("REMNAWAVE_METRICS_URL must be a string")
+        normalized = value.strip()
+        if not normalized:
+            return ""
+        parsed = urlsplit(normalized)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("REMNAWAVE_METRICS_URL must be an absolute HTTP(S) URL")
+        if parsed.username or parsed.password or parsed.fragment:
+            raise ValueError("REMNAWAVE_METRICS_URL must not contain credentials or a fragment")
+        return normalized
 
     @field_validator("REMNAWAVE_METRICS_TIMEOUT_SEC", "REMNAWAVE_METRICS_CACHE_TTL_SEC")
     @classmethod
@@ -176,7 +198,9 @@ class AppSettings(SettingsFields):
     @field_validator("SSH_STRICT_HOST_KEY_CHECKING", mode="before")
     @classmethod
     def _validate_ssh_host_key_mode(cls, value: Any) -> str:
-        normalized = str(value or "").strip().lower() or "yes"
+        if not isinstance(value, str):
+            raise ValueError("SSH_STRICT_HOST_KEY_CHECKING must be a string")
+        normalized = value.strip().lower() or "yes"
         if normalized not in {"yes", "no", "ask", "accept-new"}:
             raise ValueError("SSH_STRICT_HOST_KEY_CHECKING must be yes, no, ask, or accept-new")
         return normalized
@@ -187,4 +211,21 @@ class AppSettings(SettingsFields):
         return self
 
 
-__all__ = ["AppSettings"]
+class BotConfigDocument(AppSettings):
+    version: Literal[1]
+
+
+def load_app_settings(path: str | Path) -> AppSettings:
+    raw = load_json_object(path, field_name="BOT_CONFIG_FILE")
+    expected = {"version", *AppSettings.model_fields}
+    missing = sorted(expected - set(raw))
+    if missing:
+        raise JsonConfigError(f"invalid BOT_CONFIG_FILE {Path(path)}: missing keys: {', '.join(missing)}")
+    try:
+        document = BotConfigDocument.model_validate(raw)
+    except ValidationError as exc:
+        raise JsonConfigError(f"invalid BOT_CONFIG_FILE {Path(path)}: {exc}") from None
+    return AppSettings.model_validate(document.model_dump(exclude={"version"}))
+
+
+__all__ = ["AppSettings", "BotConfigDocument", "load_app_settings"]

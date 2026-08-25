@@ -18,7 +18,16 @@ from ...config import (
     logger,
 )
 from ...runtime.process import run_exec
-from .models import FileIdentity
+from .models import FileIdentity, FileIdentityChangedError, FileRangeRead
+
+
+def _identity_from_stat(metadata: os.stat_result) -> FileIdentity:
+    return FileIdentity(
+        size=metadata.st_size,
+        mtime=datetime.fromtimestamp(metadata.st_mtime, tz=TZ),
+        device=metadata.st_dev,
+        inode=metadata.st_ino,
+    )
 
 
 def tail_text_file(path: str, n_lines: int, max_bytes: int = 2_000_000) -> str:
@@ -90,12 +99,7 @@ async def fail2ban_identity_with_sudo_async(path: str) -> FileIdentity | None:
     file_path = Path(path)
     try:
         stat = await asyncio.to_thread(file_path.stat)
-        return FileIdentity(
-            size=stat.st_size,
-            mtime=datetime.fromtimestamp(stat.st_mtime, tz=TZ),
-            device=stat.st_dev,
-            inode=stat.st_ino,
-        )
+        return _identity_from_stat(stat)
     except FileNotFoundError:
         raise
     except PermissionError:
@@ -138,15 +142,23 @@ async def read_text_range_with_sudo_async(
     path: str,
     offset: int,
     max_bytes: int,
-) -> tuple[str, int]:
+) -> FileRangeRead:
     normalized_offset = max(0, int(offset))
     byte_limit = max(1, min(int(max_bytes), 3_000_000))
 
-    def read_range() -> tuple[str, int]:
+    def read_range() -> FileRangeRead:
         with Path(path).open("rb") as handle:
+            before = _identity_from_stat(os.fstat(handle.fileno()))
             handle.seek(normalized_offset)
             data = handle.read(byte_limit)
-        return data.decode("utf-8", errors="replace"), len(data)
+            after = _identity_from_stat(os.fstat(handle.fileno()))
+        if not before.same_file_as(after) or after.size < before.size:
+            raise FileIdentityChangedError(f"fail2ban log changed while reading: {path}")
+        return FileRangeRead(
+            text=data.decode("utf-8", errors="replace"),
+            consumed=len(data),
+            identity=after,
+        )
 
     try:
         return await asyncio.to_thread(read_range)
@@ -159,7 +171,7 @@ async def read_text_range_with_sudo_async(
             SUDO_BIN,
             "-n",
             PRIVILEGED_HELPER_BIN,
-            "file-read",
+            "file-read-meta",
             path,
             str(normalized_offset),
             str(byte_limit),
@@ -169,16 +181,32 @@ async def read_text_range_with_sudo_async(
     )
     if return_code != 0:
         error = (stderr or stdout or "").lower()
+        if "file changed during read" in error:
+            raise FileIdentityChangedError(f"fail2ban log changed while reading: {path}")
         if "no such file" in error:
             raise FileNotFoundError(path)
         raise PermissionError(path)
     try:
-        data = base64.b64decode(stdout.strip(), validate=True) if stdout.strip() else b""
+        header, separator, encoded = stdout.partition("\n")
+        if not separator:
+            raise ValueError("missing metadata header")
+        size, modified_at, device, inode = header.split("|")
+        data = base64.b64decode(encoded.strip(), validate=True) if encoded.strip() else b""
+        identity = FileIdentity(
+            size=int(size),
+            mtime=datetime.fromtimestamp(int(modified_at), tz=TZ),
+            device=int(device),
+            inode=int(inode),
+        )
     except (binascii.Error, ValueError) as exc:
         raise RuntimeError("invalid base64 from privileged file reader") from exc
     if len(data) > byte_limit:
         raise RuntimeError("privileged file reader exceeded requested byte limit")
-    return data.decode("utf-8", errors="replace"), len(data)
+    return FileRangeRead(
+        text=data.decode("utf-8", errors="replace"),
+        consumed=len(data),
+        identity=identity,
+    )
 
 
 __all__ = [

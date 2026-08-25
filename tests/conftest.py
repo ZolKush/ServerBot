@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import atexit
+import json
 import os
 import shutil
 import tempfile
@@ -12,35 +13,45 @@ import pytest
 
 _TEST_ROOT = Path(tempfile.mkdtemp(prefix="maintbot-tests-"))
 atexit.register(shutil.rmtree, _TEST_ROOT, True)
-_TEST_INVENTORY = _TEST_ROOT / "servers.toml"
-_TEST_INVENTORY.write_text(
-    """version = 1
-
-[servers.local]
-label = "Local server"
-flag = ""
-
-[servers.local.connection]
-transport = "local"
-
-[servers.local.monitoring]
-source = "system"
-""",
+_TEST_CONFIG_DIR = _TEST_ROOT / "conf"
+_TEST_SERVER_DIR = _TEST_CONFIG_DIR / "servers"
+_TEST_SERVER_DIR.mkdir(parents=True)
+_BOT_CONFIG = json.loads(
+    (Path(__file__).resolve().parents[1] / "deploy" / "conf" / "bot.json").read_text(encoding="utf-8")
+)
+_BOT_CONFIG.update(
+    {
+        "DATA_DIR": str(_TEST_ROOT / "data"),
+        "INSTANCE_LOCK_PATH": str(_TEST_ROOT / "maintbot.lock"),
+        "PTB_PERSISTENCE_PATH": str(_TEST_ROOT / "data" / "telegram" / "persistence.pickle"),
+    }
+)
+(_TEST_CONFIG_DIR / "bot.json").write_text(
+    json.dumps(_BOT_CONFIG),
+    encoding="utf-8",
+)
+(_TEST_SERVER_DIR / "anything.json").write_text(
+    json.dumps(
+        {
+            "version": 1,
+            "key": "local",
+            "label": "Local server",
+            "flag": "",
+            "connection": {"transport": "local", "target": ""},
+            "monitoring": {"source": "system", "node_uuid": ""},
+        }
+    ),
     encoding="utf-8",
 )
 
 os.environ.update(
     {
-        "ENV_PATH": str(_TEST_ROOT / "missing.env"),
+        "MAINTBOT_CONFIG_DIR": str(_TEST_CONFIG_DIR),
         "SECRETS_ENV_PATH": str(_TEST_ROOT / "missing.secrets"),
         "BOT_TOKEN": "123456:TEST_TOKEN_NOT_USED_BY_TESTS_ABCDEFGHIJKLMNOPQRSTUVWXYZ",
         "ADMIN_PASSWORD": "test-admin-password-that-is-never-used",
         "OWNER_PASSWORD": "test-owner-password-that-is-never-used",
-        "DATA_DIR": str(_TEST_ROOT / "data"),
-        "INSTANCE_LOCK_PATH": str(_TEST_ROOT / "maintbot.lock"),
-        "PTB_PERSISTENCE_PATH": str(_TEST_ROOT / "data" / "telegram" / "persistence.pickle"),
         "PTB_TIMEDELTA": "1",
-        "SERVER_INVENTORY_FILE": str(_TEST_INVENTORY),
     }
 )
 

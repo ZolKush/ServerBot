@@ -1,59 +1,62 @@
 from __future__ import annotations
 
-import os
-import stat
-import subprocess
-import sys
+import json
 from pathlib import Path
 
 import pytest
 
-from app.config.inventory import InventoryError, load_inventory_document
+from app.config import inventory as inventory_module
+from app.config.inventory import InventoryError, load_inventory_directory, load_inventory_document
 from app.config.servers import load_servers
-from tools.migrate_server_inventory import _write_exclusive, migrate, render
-
-ROOT = Path(__file__).resolve().parents[1]
 
 
-def _write(tmp_path: Path, text: str) -> Path:
-    path = tmp_path / "servers.toml"
-    path.write_text(text, encoding="utf-8")
+def _server(*, key: str = "nl", transport: str = "ssh") -> dict[str, object]:
+    target = "maintbot@example.com:1606" if transport == "ssh" else ""
+    return {
+        "version": 1,
+        "key": key,
+        "label": "Netherlands",
+        "flag": "NL",
+        "display_order": 20 if key == "nl" else 10,
+        "connection": {"transport": transport, "target": target},
+        "monitoring": {
+            "source": "remnawave",
+            "node_uuid": "00000000-0000-0000-0000-000000000001",
+        },
+        "dns": {"expected_a_ip": "192.0.2.10"},
+        "domains": [
+            {
+                "host": "ZERONET-MONITOR.EMBEDDEDCONTROLSINC.COM.",
+                "checks": ["dns", "tls"],
+                "tls_primary_port": 443,
+                "tls_fallback_ports": [8443],
+            }
+        ],
+        "docker": {"containers": ["remnanode", "remnawave-nginx"]},
+        "fail2ban": {
+            "enabled": True,
+            "log_path": "/var/log/fail2ban.log",
+            "timezone": "Europe/Amsterdam",
+        },
+    }
+
+
+def _write(directory: Path, name: str, document: dict[str, object]) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / name
+    path.write_text(json.dumps(document), encoding="utf-8")
     return path
 
 
-def test_inventory_keeps_each_server_and_tls_policy_together(tmp_path: Path) -> None:
-    path = _write(
-        tmp_path,
-        """version = 1
+def test_inventory_scans_arbitrarily_named_json_files_in_stable_order(tmp_path: Path) -> None:
+    directory = tmp_path / "servers"
+    _write(directory, "00 arbitrary name.json", _server(key="nl"))
+    _write(directory, "zz-not-the-key.JSON", _server(key="main", transport="local"))
+    (directory / "README.txt").write_text("ignored", encoding="utf-8")
 
-[servers.nl]
-label = "Netherlands"
-flag = "NL"
-[servers.nl.connection]
-transport = "ssh"
-target = "maintbot@example.com:1606"
-[servers.nl.monitoring]
-source = "remnawave"
-node_uuid = "00000000-0000-0000-0000-000000000001"
-[servers.nl.dns]
-expected_a_ip = "192.0.2.10"
-[[servers.nl.domains]]
-host = "ZERONET-MONITOR.EMBEDDEDCONTROLSINC.COM."
-checks = ["dns", "tls"]
-tls_primary_port = 443
-tls_fallback_ports = [8443]
-[servers.nl.docker]
-containers = ["remnanode", "remnawave-nginx"]
-[servers.nl.fail2ban]
-enabled = true
-log_path = "/var/log/fail2ban.log"
-timezone = "Europe/Amsterdam"
-""",
-    )
+    servers = load_servers(directory, timezone_name="Europe/Moscow")
 
-    servers = load_servers(path, timezone_name="Europe/Moscow")
-
-    assert list(servers) == ["nl"]
+    assert list(servers) == ["main", "nl"]
     server = servers["nl"]
     assert server.ssh_target == "maintbot@example.com:1606"
     assert server.monitoring_source == "remnawave"
@@ -64,162 +67,101 @@ timezone = "Europe/Amsterdam"
 
 
 @pytest.mark.parametrize(
-    ("fragment", "message"),
+    ("change", "message"),
     [
-        ("tls_fallback_ports = [443]", "must not repeat"),
-        ("tls_fallback_ports = [70000]", "range 1..65535"),
-        ('unknown_option = "typo"', "Extra inputs"),
+        ("repeated_port", "must not repeat"),
+        ("invalid_port", "range 1..65535"),
+        ("unknown", "Extra inputs"),
     ],
 )
-def test_inventory_rejects_unsafe_or_unknown_tls_options(tmp_path: Path, fragment: str, message: str) -> None:
-    path = _write(
-        tmp_path,
-        f"""version = 1
-[servers.main]
-label = "Main"
-[servers.main.connection]
-transport = "local"
-[[servers.main.domains]]
-host = "example.com"
-checks = ["tls"]
-tls_primary_port = 443
-{fragment}
-""",
-    )
+def test_inventory_rejects_unsafe_or_unknown_options(tmp_path: Path, change: str, message: str) -> None:
+    document = _server()
+    domains = document["domains"]
+    assert isinstance(domains, list) and isinstance(domains[0], dict)
+    if change == "repeated_port":
+        domains[0]["tls_fallback_ports"] = [443]
+    elif change == "invalid_port":
+        domains[0]["tls_primary_port"] = 70000
+    else:
+        document["unknown_option"] = "typo"
+    path = _write(tmp_path, "server.json", document)
 
     with pytest.raises(InventoryError, match=message):
         load_inventory_document(path)
 
 
 def test_inventory_requires_uuid_for_remnawave_source(tmp_path: Path) -> None:
-    path = _write(
-        tmp_path,
-        """version = 1
-[servers.main]
-label = "Main"
-[servers.main.connection]
-transport = "local"
-[servers.main.monitoring]
-source = "remnawave"
-""",
-    )
+    document = _server()
+    document["monitoring"] = {"source": "remnawave", "node_uuid": ""}
+    path = _write(tmp_path, "server.json", document)
 
     with pytest.raises(InventoryError, match="node_uuid is required"):
         load_inventory_document(path)
 
 
-def test_one_shot_migration_renders_parseable_inventory_with_explicit_fallback(tmp_path: Path) -> None:
-    legacy = {
-        "TZ": "Europe/Moscow",
-        "LOCAL_SERVER_CODE": "main",
-        "LOCAL_SERVER_LABEL": "Main",
-        "CHECK_A_DOMAINS": "main.example.com",
-        "REMOTE_SERVER_ENABLED": "true",
-        "REMOTE_SERVER_SSH_TARGETS": "maintbot@nl.example:1606",
-        "REMOTE_SERVER_CODES": "nl",
-        "REMOTE_SERVER_LABELS": "Netherlands",
-        "REMOTE_SERVER_FLAGS": "NL",
-        "REMOTE_SERVER_DOMAINS": "zeronet-monitor.embeddedcontrolsinc.com",
-        "REMOTE_SERVER_MONITOR_CONTAINERS_BY_SERVER": "remnanode,remnawave-nginx",
-    }
-    servers = migrate(
-        legacy,
-        fallbacks={"zeronet-monitor.embeddedcontrolsinc.com": [8443]},
-    )
-    path = _write(tmp_path, render(servers))
+def test_inventory_rejects_duplicate_logical_keys_across_files(tmp_path: Path) -> None:
+    _write(tmp_path, "first.json", _server(key="same"))
+    _write(tmp_path, "completely-different-name.json", _server(key="same"))
 
-    loaded = load_servers(path, timezone_name="Europe/Moscow")
-
-    assert list(loaded) == ["main", "nl"]
-    assert loaded["nl"].tls_endpoints[0].fallback_ports == (8443,)
+    with pytest.raises(InventoryError, match="duplicate server key 'same'"):
+        load_inventory_directory(tmp_path)
 
 
-def test_one_shot_migration_never_copies_secrets_to_inventory() -> None:
-    marker = "SECRET-MUST-NOT-BE-RENDERED"
-    servers = migrate(
-        {
-            "BOT_TOKEN": marker,
-            "REMNAWAVE_METRICS_PASS": marker,
-            "LOCAL_SERVER_CODE": "main",
-            "LOCAL_SERVER_LABEL": "Main",
-        },
-        fallbacks={},
-    )
-
-    assert marker not in render(servers)
-
-
-def test_migration_cli_creates_private_inventory_once(tmp_path: Path) -> None:
-    source = tmp_path / "legacy.env"
-    source.write_text("LOCAL_SERVER_CODE=main\nLOCAL_SERVER_LABEL=Main\n", encoding="utf-8")
-    output = tmp_path / "private" / "servers.toml"
-    env = os.environ.copy()
-    env["PYTHONUTF8"] = "1"
-
-    result = subprocess.run(
-        [
-            sys.executable,
-            "tools/migrate_server_inventory.py",
-            "--env",
-            str(source),
-            "--output",
-            str(output),
-        ],
-        cwd=ROOT,
-        env=env,
-        capture_output=True,
-        text=True,
+def test_inventory_rejects_duplicate_json_keys(tmp_path: Path) -> None:
+    path = tmp_path / "duplicate.json"
+    path.write_text(
+        '{"version":1,"key":"one","key":"two","label":"Server","connection":{"transport":"local","target":""}}',
         encoding="utf-8",
-        check=False,
     )
 
-    assert result.returncode == 0, result.stderr
-    assert "[servers.main]" in output.read_text(encoding="utf-8")
-    if os.name != "nt":
-        assert stat.S_IMODE(output.stat().st_mode) == 0o600
+    with pytest.raises(InventoryError, match="duplicate JSON key: key"):
+        load_inventory_document(path)
 
 
-def test_migration_cli_never_overwrites_existing_inventory(tmp_path: Path) -> None:
-    source = tmp_path / "legacy.env"
-    source.write_text("LOCAL_SERVER_CODE=main\n", encoding="utf-8")
-    output = tmp_path / "servers.toml"
-    marker = "existing inventory must stay unchanged\n"
-    output.write_text(marker, encoding="utf-8")
-    env = os.environ.copy()
-    env["PYTHONUTF8"] = "1"
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("display_order", "20"), ("flag", 42)],
+)
+def test_inventory_rejects_coerced_json_types(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    document = _server()
+    document[field] = value
+    path = _write(tmp_path, "server.json", document)
 
-    result = subprocess.run(
-        [
-            sys.executable,
-            "tools/migrate_server_inventory.py",
-            "--env",
-            str(source),
-            "--output",
-            str(output),
-        ],
-        cwd=ROOT,
-        env=env,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        check=False,
-    )
-
-    assert result.returncode == 1
-    assert output.read_text(encoding="utf-8") == marker
-    assert "Ошибка миграции: выходной файл уже существует" in result.stderr
-    assert "Traceback" not in result.stderr
+    with pytest.raises(InventoryError):
+        load_inventory_document(path)
 
 
-def test_exclusive_inventory_write_removes_partial_file_on_failure(tmp_path: Path, monkeypatch) -> None:
-    output = tmp_path / "servers.toml"
+def test_inventory_rejects_empty_or_missing_directory(tmp_path: Path) -> None:
+    with pytest.raises(InventoryError, match="not found"):
+        load_inventory_directory(tmp_path / "missing")
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    with pytest.raises(InventoryError, match="contains no .json"):
+        load_inventory_directory(empty)
 
-    def fail_sync(_descriptor: int) -> None:
-        raise OSError("simulated sync failure")
 
-    monkeypatch.setattr(os, "fsync", fail_sync)
+def test_inventory_rejects_multiple_local_servers(tmp_path: Path) -> None:
+    _write(tmp_path, "one.json", _server(key="one", transport="local"))
+    _write(tmp_path, "two.json", _server(key="two", transport="local"))
 
-    with pytest.raises(OSError, match="simulated sync failure"):
-        _write_exclusive(output, "version = 1\n")
+    with pytest.raises(InventoryError, match="only one server"):
+        load_inventory_directory(tmp_path)
 
-    assert not output.exists()
+
+def test_inventory_fails_if_directory_changes_during_scan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write(tmp_path, "one.json", _server(key="one"))
+    original = inventory_module.load_json_object
+
+    def add_file_while_loading(path: Path, *, field_name: str):
+        result = original(path, field_name=field_name)
+        _write(tmp_path, "two.json", _server(key="two"))
+        return result
+
+    monkeypatch.setattr(inventory_module, "load_json_object", add_file_while_loading)
+
+    with pytest.raises(InventoryError, match="changed while it was being read"):
+        load_inventory_directory(tmp_path)

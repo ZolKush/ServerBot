@@ -7,9 +7,9 @@ import hashlib
 from datetime import datetime, timedelta
 from typing import Any
 
-from ...config import FAIL2BAN_DIGEST_MAX_BYTES, TZ
+from ...config import FAIL2BAN_DIGEST_MAX_BYTES, TZ, server_monitoring_fingerprint
 from ...storage import outbox_snapshot
-from .models import Fail2banEvent, FileIdentity
+from .models import Fail2banEvent, FileIdentity, FileIdentityChangedError
 from .parser import parse_fail2ban_events
 from .source import (
     file_identity,
@@ -41,7 +41,7 @@ def cursor_has_pending_delivery(server_key: str) -> bool:
     return False
 
 
-async def read_fail2ban_increment(
+async def _read_fail2ban_increment_once(
     server_key: str,
     cursor: dict[str, Any] | None,
 ) -> tuple[list[Fail2banEvent], dict[str, Any], datetime, bool]:
@@ -83,12 +83,16 @@ async def read_fail2ban_increment(
         offset = max(0, current_identity.size - FAIL2BAN_DIGEST_MAX_BYTES)
         drop_prefix = offset > 0
 
-    text, consumed = await read_range(
+    read_result = await read_range(
         server_key,
         source_path,
         offset,
         FAIL2BAN_DIGEST_MAX_BYTES,
+        source_identity,
     )
+    text = read_result.text
+    consumed = read_result.consumed
+    source_identity = read_result.identity
     if drop_prefix and "\n" in text:
         text = text.split("\n", 1)[1]
     elif drop_prefix:
@@ -152,8 +156,26 @@ async def read_fail2ban_increment(
             *previous_fingerprints[-100:],
             *new_fingerprints,
         ][-200:],
+        "_config_fingerprint": server_monitoring_fingerprint(server),
     }
     return deduplicated, next_cursor, since, has_more
+
+
+async def read_fail2ban_increment(
+    server_key: str,
+    cursor: dict[str, Any] | None,
+) -> tuple[list[Fail2banEvent], dict[str, Any], datetime, bool]:
+    """Read a stable increment, retrying path changes caused by logrotate."""
+
+    last_error: FileIdentityChangedError | None = None
+    for _ in range(3):
+        try:
+            return await _read_fail2ban_increment_once(server_key, cursor)
+        except FileIdentityChangedError as exc:
+            last_error = exc
+    if last_error is None:  # pragma: no cover - the loop always executes
+        raise RuntimeError("fail2ban read retry loop did not execute")
+    raise last_error
 
 
 __all__ = ["cursor_has_pending_delivery", "read_fail2ban_increment"]

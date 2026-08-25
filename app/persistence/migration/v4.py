@@ -21,6 +21,12 @@ from ..aggregate_fields import (
 from ..errors import MigrationError
 from ..io import decode_json
 from ..layout import STORE_SPECS
+from .v4_semantics import (
+    canonicalize_audit_log,
+    canonicalize_outbox,
+    canonicalize_service_requests,
+    canonicalize_tls_certificates,
+)
 
 USER_TOP_LEVEL_KEYS = {
     "schema_version",
@@ -48,6 +54,11 @@ IMPORTANT_TOP_LEVEL_KEYS = {
 # deployed. Their absence is therefore expected and must not turn a valid v4
 # backup into an unmigratable source.
 OPTIONAL_V4_PRODUCT_SETTINGS = {"payment_message"}
+OPTIONAL_V4_USER_DEFAULTS: dict[str, Any] = {
+    "review_messages": {},
+    "trial_end_at": None,
+    "trial_duration_hours": None,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,7 +127,7 @@ def transform_v4(source: V4Source) -> V4Transform:
     grants: dict[str, Any] = {}
     accounts: dict[str, Any] = {}
     for raw_user_id, raw_meta in users.items():
-        meta = _mapping(raw_meta, f"authorized_users.{raw_user_id}")
+        meta = copy.deepcopy(_mapping(raw_meta, f"authorized_users.{raw_user_id}"))
         unknown = sorted(set(meta) - KNOWN_USER_FIELDS)
         if unknown:
             raise MigrationError(f"authorized_users.{raw_user_id} has unknown fields: {unknown}")
@@ -129,6 +140,8 @@ def transform_v4(source: V4Source) -> V4Transform:
         enabled = meta.get("enabled")
         if not isinstance(enabled, bool) or enabled != (access_state == "approved"):
             raise MigrationError(f"authorized_users.{raw_user_id}.enabled is inconsistent with access_state")
+        for field, default in OPTIONAL_V4_USER_DEFAULTS.items():
+            meta.setdefault(field, copy.deepcopy(default))
         profiles[str(user_id)] = _select_fields(meta, PROFILE_FIELDS)
         grants[str(user_id)] = _select_fields(meta, ACCESS_FIELDS)
         accounts[str(user_id)] = _select_fields(meta, SUBSCRIPTION_FIELDS)
@@ -142,10 +155,26 @@ def transform_v4(source: V4Source) -> V4Transform:
     if unknown_settings or missing_settings:
         raise MigrationError(f"product_settings field mismatch; missing={missing_settings}, unknown={unknown_settings}")
 
-    user_outbox = _validated_outbox(source.user_data["outbox"], "user_data.outbox")
-    important_outbox = _validated_outbox(source.important_data["outbox"], "important_data.outbox")
+    request_seq = _non_negative_int(source.user_data["request_seq"], "request_seq")
+    service_requests = _validated_indexed_records(
+        source.user_data["service_requests"],
+        next_id=request_seq,
+        label="service_requests",
+    )
+    service_requests = canonicalize_service_requests(service_requests)
+    tickets_seq = _non_negative_int(source.important_data["tickets_seq"], "tickets_seq")
+    validated_tickets = _validated_indexed_records(
+        source.important_data["tickets"],
+        next_id=tickets_seq,
+        label="tickets",
+    )
+
+    user_outbox = canonicalize_outbox(source.user_data["outbox"], "user_data.outbox")
+    important_outbox = canonicalize_outbox(source.important_data["outbox"], "important_data.outbox")
     merged_outbox, collisions = _merge_outboxes(user_outbox, important_outbox)
-    ticket_items, ticket_messages = _split_tickets(source.important_data["tickets"])
+    ticket_items, ticket_messages = _split_tickets(validated_tickets)
+    audit_log = canonicalize_audit_log(source.user_data["audit_log"])
+    tls_certificates = canonicalize_tls_certificates(source.important_data["tls_certificates"])
 
     billing_settings = _select_fields(product_settings, BILLING_FIELDS)
     billing_settings.setdefault("payment_message", None)
@@ -154,13 +183,13 @@ def transform_v4(source: V4Source) -> V4Transform:
         "access.grants": grants,
         "subscriptions.accounts": accounts,
         "subscriptions.requests": {
-            "next_id": _non_negative_int(source.user_data["request_seq"], "request_seq"),
-            "items": copy.deepcopy(_mapping(source.user_data["service_requests"], "service_requests")),
+            "next_id": request_seq,
+            "items": service_requests,
         },
         "subscriptions.billing_settings": billing_settings,
         "settings.help_and_contacts": _select_fields(product_settings, HELP_FIELDS),
         "support.tickets": {
-            "next_id": _non_negative_int(source.important_data["tickets_seq"], "tickets_seq"),
+            "next_id": tickets_seq,
             "items": ticket_items,
         },
         "support.ticket_messages": ticket_messages,
@@ -171,13 +200,13 @@ def transform_v4(source: V4Source) -> V4Transform:
             ),
         },
         "messaging.outbox": merged_outbox,
-        "audit.events": copy.deepcopy(_sequence(source.user_data["audit_log"], "audit_log")),
+        "audit.events": audit_log,
         "monitoring.dns_cache": copy.deepcopy(_mapping(source.important_data["dns_status"], "dns_status")),
         "monitoring.node_status_cache": copy.deepcopy(
             _mapping(source.important_data["daily_node_status"], "daily_node_status")
         ),
         "monitoring.docker_cache": _convert_docker(source.important_data["docker_status"]),
-        "monitoring.tls_state": copy.deepcopy(_mapping(source.important_data["tls_certificates"], "tls_certificates")),
+        "monitoring.tls_state": tls_certificates,
         "monitoring.fail2ban_cursors": copy.deepcopy(
             _mapping(source.important_data["fail2ban_cursors"], "fail2ban_cursors")
         ),
@@ -222,20 +251,31 @@ def _non_negative_int(value: Any, label: str) -> int:
     return value
 
 
+def _validated_indexed_records(value: Any, *, next_id: int, label: str) -> dict[str, Any]:
+    records = _mapping(value, label)
+    result: dict[str, Any] = {}
+    seen_ids: set[int] = set()
+    max_id = 0
+    for raw_key, raw_record in records.items():
+        key = str(raw_key)
+        record = _mapping(raw_record, f"{label}.{key}")
+        declared_id = record.get("id")
+        if isinstance(declared_id, bool) or not isinstance(declared_id, int) or declared_id <= 0:
+            raise MigrationError(f"{label}.{key}.id must be a positive integer")
+        if declared_id in seen_ids:
+            raise MigrationError(f"{label} contains colliding id {declared_id}")
+        if key != str(declared_id):
+            raise MigrationError(f"{label}.{key} key/id mismatch; keys must be canonical decimal ids")
+        seen_ids.add(declared_id)
+        max_id = max(max_id, declared_id)
+        result[key] = copy.deepcopy(record)
+    if next_id < max_id:
+        raise MigrationError(f"{label} sequence {next_id} is smaller than maximum record id {max_id}")
+    return result
+
+
 def _select_fields(source: dict[str, Any], fields: Collection[str]) -> dict[str, Any]:
     return {key: copy.deepcopy(source[key]) for key in sorted(fields) if key in source}
-
-
-def _validated_outbox(value: Any, label: str) -> dict[str, Any]:
-    outbox = _mapping(value, label)
-    result: dict[str, Any] = {}
-    for raw_id, raw_event in outbox.items():
-        event_id = str(raw_id)
-        event = _mapping(raw_event, f"{label}.{event_id}")
-        if event.get("id") != event_id:
-            raise MigrationError(f"{label}.{event_id} id does not match its key")
-        result[event_id] = copy.deepcopy(event)
-    return result
 
 
 def _merge_outboxes(

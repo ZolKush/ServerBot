@@ -99,6 +99,18 @@ def get_fail2ban_cursor(server_key: str) -> dict[str, Any] | None:
     return _FACADE.cache_item("fail2ban_cursors", server_key)
 
 
+def _stamp_server_cache(server_key: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Bind cached data to the exact monitoring configuration that produced it."""
+
+    from .config import SERVERS, server_monitoring_fingerprint
+
+    clean = copy.deepcopy(payload)
+    server = SERVERS.get(str(server_key))
+    if server is not None:
+        clean["_config_fingerprint"] = server_monitoring_fingerprint(server)
+    return clean
+
+
 async def upsert_user_meta(user_id: int, meta: dict[str, Any]) -> dict[str, Any]:
     def apply(aggregate: UserData) -> dict[str, Any]:
         normalized = UserData._normalize_user(meta)
@@ -138,18 +150,18 @@ async def clear_scheduled_maintenance_record() -> None:
 
 
 async def set_dns_status_cache(server_key: str, payload: dict[str, Any]) -> dict[str, Any]:
-    return await _set_mapping_item("dns_status", server_key, payload)
+    return await _set_mapping_item("dns_status", server_key, _stamp_server_cache(server_key, payload))
 
 
 async def set_daily_node_status_cache(server_key: str, payload: dict[str, Any]) -> dict[str, Any]:
-    return await _set_mapping_item("daily_node_status", server_key, payload)
+    return await _set_mapping_item("daily_node_status", server_key, _stamp_server_cache(server_key, payload))
 
 
 async def set_docker_status_cache(server_key: str, payload: dict[str, Any]) -> dict[str, Any]:
     key = str(server_key)
 
     def apply(aggregate: ImportantData) -> dict[str, Any]:
-        normalized = _normalize_docker_status({key: payload})
+        normalized = _normalize_docker_status({key: _stamp_server_cache(key, payload)})
         clean = normalized.get(key, {"updated_at": None, "containers": []})
         aggregate.docker_status[key] = clean
         return copy.deepcopy(clean)
@@ -171,8 +183,9 @@ async def set_fail2ban_cursor(server_key: str, cursor: dict[str, Any]) -> dict[s
     key = str(server_key)
 
     def apply(aggregate: ImportantData) -> dict[str, Any]:
-        aggregate.fail2ban_cursors[key] = copy.deepcopy(cursor)
-        return copy.deepcopy(cursor)
+        clean = _stamp_server_cache(key, cursor)
+        aggregate.fail2ban_cursors[key] = clean
+        return copy.deepcopy(clean)
 
     return await update_important_data(apply)
 

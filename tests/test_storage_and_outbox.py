@@ -83,6 +83,9 @@ def test_malformed_outbox_state_is_normalized_without_crash() -> None:
             "next_attempt_at": "",
             "last_error": "",
             "delivered_at": "",
+            "delivered_chat_id": None,
+            "delivered_message_id": None,
+            "dead_lettered_at": "",
         }
     }
 

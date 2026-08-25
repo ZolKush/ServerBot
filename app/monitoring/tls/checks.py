@@ -46,16 +46,25 @@ async def _fetch_der_certificate(domain: str, port: int) -> bytes:
     return certificate
 
 
-async def _verify_certificate_trust(domain: str, port: int) -> tuple[bool, str | None]:
+async def _fetch_der_with_trust(domain: str, port: int) -> tuple[bytes, bool, str | None]:
+    """Return the certificate from the handshake that established trust.
+
+    A verified connection is attempted first.  Its DER is used directly for
+    every subsequent certificate check, so a load balancer cannot make us
+    inspect one backend while trusting another.  An unverified diagnostic
+    handshake is needed only when OpenSSL rejects the chain and therefore does
+    not expose the peer certificate through ``asyncio.open_connection``.
+    """
+
     context = ssl.create_default_context()
     context.check_hostname = False
     try:
-        await _open_tls(domain, port, context)
+        certificate = await _open_tls(domain, port, context)
     except ssl.SSLCertVerificationError as exc:
-        return False, str(exc.verify_message or exc)
-    except (TimeoutError, OSError, ssl.SSLError) as exc:
-        return False, str(exc)
-    return True, None
+        return await _fetch_der_certificate(domain, port), False, str(exc.verify_message or exc)
+    if not certificate:
+        raise RuntimeError("server did not return a certificate")
+    return certificate, True, None
 
 
 def _dns_pattern_matches(pattern: str, hostname: str) -> bool:
@@ -127,12 +136,11 @@ async def check_tls_endpoint(domain: str, port: int, server_keys: list[str]) -> 
         "failure_kind": "",
     }
     try:
-        certificate_der = await _fetch_der_certificate(domain, port)
+        certificate_der, trust_valid, trust_error = await _fetch_der_with_trust(domain, port)
         certificate = x509.load_der_x509_certificate(certificate_der)
         not_before = _certificate_time(certificate, "not_valid_before")
         not_after = _certificate_time(certificate, "not_valid_after")
         remaining = not_after - checked_at
-        trust_valid, trust_error = await _verify_certificate_trust(domain, port)
         hostname_valid = _hostname_matches(certificate, domain)
         if remaining <= timedelta(0):
             status = "expired"

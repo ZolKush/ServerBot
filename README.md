@@ -58,7 +58,7 @@ app/
   access/                  вход, заявки на доступ, защита от перебора
   administration/          настройки сервиса и профили сотрудников
   bot/                     композиция PTB, маршруты, jobs, меню и UI
-  config/                  runtime env, TOML inventory, секреты и preflight
+  config/                  строгие JSON-конфиги, секреты и preflight
   maintenance/             активные и запланированные техработы
   messaging/               outbox, FloodWait и очистка сообщений
   monitoring/
@@ -122,14 +122,16 @@ app/
 
 ## Новая установка
 
-Нужен Python 3.10 или новее.
+Нужен Python 3.10 или новее. Проект проверяется также на актуальной поддерживаемой версии Python; зависимости
+зафиксированы совместимым набором, а не обновляются автоматически до любого нового major-релиза.
 
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install -r app/requirements.txt
-cp app/.env.example app/.env
 cp app/env.secrets.example app/env.secrets
-cp deploy/servers.toml.example app/servers.toml
+mkdir -p data/conf/servers
+cp deploy/conf/bot.json data/conf/bot.json
+cp deploy/conf/servers/*.json data/conf/servers/
 ```
 
 В `app/env.secrets` обязательны:
@@ -143,7 +145,9 @@ REMNAWAVE_METRICS_PASS=необязательно
 ```
 
 Оба пароля должны содержать не менее 16 символов и отличаться друг от друга. Логин и пароль RemnaWave задаются только вместе либо оба остаются пустыми; неизвестные ключи в `env.secrets` считаются ошибкой конфигурации.
-Для локальной установки укажите в `.env` `SERVER_INVENTORY_FILE=app/servers.toml`. В production inventory рекомендуется хранить как `/etc/maintbot/servers.toml`.
+Несекретные настройки больше не читаются из `.env`. По умолчанию бот открывает `data/conf/bot.json` и сканирует
+все непосредственные файлы `data/conf/servers/*.json`. Для нестандартного расположения задаётся только bootstrap-
+переменная `MAINTBOT_CONFIG_DIR`; секретный файл по-прежнему можно перенести через `SECRETS_ENV_PATH`.
 
 Для совершенно новой установки создайте пустой layout явной командой:
 
@@ -200,46 +204,55 @@ REMNAWAVE_METRICS_PASS=необязательно
 
 Повторный dry-run должен вернуть `already_migrated=true`. Только после проверки и пробного запуска перенесите старые `user_data.json`, `important_data.json`, `ptb_persistence`, их `.lock` и `important_data.fail2ban_state.*.json` из рабочего `DATA_DIR` в закрытый архив. Не удаляйте checksum-проверенную резервную копию.
 
-## Настройка окружения
+## Конфигурация
 
-Полный перечень и безопасные значения приведены в `app/.env.example`. Основные группы:
+`data/conf/bot.json` содержит полный набор несекретных настроек процесса: пути, расписания, лимиты, SSH,
+RemnaWave endpoint, retry/cache intervals, очистку панелей и защиту входа. Документ имеет `version: 1`; пропущенный,
+лишний или дублирующийся ключ, неверный тип, неизвестная timezone, некорректный URL/IP либо повреждённый JSON
+останавливает запуск. Логин и пароль RemnaWave, Telegram token и пароли ролей остаются только в
+`app/env.secrets` или переменных окружения процесса.
 
-- пути: `DATA_DIR`, `SERVER_INVENTORY_FILE`, `PTB_PERSISTENCE_PATH`, `INSTANCE_LOCK_PATH`;
-- защита входа: `AUTH_*`, `ACCESS_REQUEST_COOLDOWN_SEC`;
-- доставка: `OUTBOX_PROCESS_INTERVAL_SEC`, `ERROR_NOTIFY_INTERVAL_SEC`;
-- очистка только навигационных панелей: `NAVIGATION_CLEANUP_*`;
-- DNS и fail2ban: `DNS_*`, `FAIL2BAN_*`;
-- SSH: `SSH_IDENTITY_FILE`, `SSH_KNOWN_HOSTS_FILE`, `SSH_STRICT_HOST_KEY_CHECKING=yes`;
-- RemnaWave endpoint и лимиты: публичные `REMNAWAVE_*`, кроме логина и пароля;
-- лимиты subprocess, HTTP-ответов и cache.
+Каждый непосредственный файл `data/conf/servers/*.json` описывает ровно один сервер целиком: `key`,
+`display_order`, подпись/флаг, transport и SSH target, monitoring source/UUID, ожидаемый IP, домены и TLS-порты,
+Docker-контейнеры, fail2ban path/timezone. Имена файлов произвольны и не используются как server key. При старте
+каталог сортируется и читается как единый snapshot; повреждение любого JSON, повторный `key`, более одного local-
+сервера или изменение каталога во время чтения приводит к отказу без частично загруженного inventory. Поддерживается
+до 256 файлов. Добавление, удаление или изменение сервера применяется после рестарта бота.
 
-Секретный файл содержит только `BOT_TOKEN`, два пароля ролей и необязательные `REMNAWAVE_METRICS_USER/PASS`. Серверы больше не задаются синхронными массивами `.env`: каждый блок `[servers.<key>]` в TOML содержит transport, SSH target, источник мониторинга, UUID ноды, DNS, домены, TLS-порты, контейнеры и fail2ban. Режим приложения выводится автоматически: наличие хотя бы одного `monitoring.source = "remnawave"` включает mixed monitoring.
+Порядок интерфейса задаёт `display_order`, затем `key`. Для каждого домена отдельно задаются `tls_primary_port` и
+`tls_fallback_ports`. Fallback используется только после сетевой/TLS-handshake ошибки основного порта и не маскирует
+полученный просроченный, недоверенный или не соответствующий hostname сертификат.
 
-Для каждого домена отдельно задаются `tls_primary_port` и `tls_fallback_ports`. Например, только `zeronet-monitor.embeddedcontrolsinc.com` сначала проверяется на 443 и при сетевой/TLS-handshake ошибке повторяется на 8443. Полученный на 443 просроченный, недоверенный или не соответствующий hostname сертификат fallback не маскирует.
+При удалении сервера либо изменении его transport/host/UUID/domains/cache-sensitive настроек startup reconciliation
+удаляет несовместимые DNS, node, Docker, TLS и fail2ban projections. Старые данные не показываются новому серверу,
+которому повторно присвоили прежний `key`.
 
-Одноразовая миграция старой конфигурации выполняется до замены env-файлов:
+### Миграция прежних `.env` + `servers.toml`
+
+Остановите сервис и сделайте закрытую резервную копию `DATA_DIR`, `.env`, `env.secrets` и `servers.toml`. Затем:
 
 ```bash
-.venv/bin/python tools/migrate_server_inventory.py \
+.venv/bin/python tools/migrate_config_layout.py \
   --env app/.env \
-  --output /tmp/maintbot-servers.toml \
-  --tls-fallback zeronet-monitor.embeddedcontrolsinc.com:8443
+  --inventory app/servers.toml \
+  --output-dir data/conf
 
-.venv/bin/python tools/migrate_runtime_env.py \
-  --env app/.env \
-  --secrets app/env.secrets \
-  --output-env /tmp/maintbot.env \
-  --output-secrets /tmp/maintbot.secrets \
-  --server-inventory-file /etc/maintbot/servers.toml
+.venv/bin/python -m app.config_check
 ```
 
-Оба инструмента отказываются перезаписывать существующий output. Сначала проверьте созданные файлы и сохраните закрытую резервную копию прежних env; затем установите новые файлы и запустите `app.config_check`. Runtime старый позиционный формат не поддерживает и сообщает об оставшихся или неизвестных ключах.
+Мигратор не меняет источники, не копирует секреты, отказывается перезаписывать `data/conf`, пишет файлы с закрытыми
+правами во временный каталог, выполняет `fsync` и публикует весь каталог атомарно. Старые
+`migrate_server_inventory.py` и `migrate_runtime_env.py` сохранены только как первый этап обновления ещё более старой
+позиционной v4-конфигурации; их результат затем обязательно переводится командой выше.
 
-Для нестандартных env-файлов задайте `ENV_PATH` и `SECRETS_ENV_PATH` в окружении процесса до запуска Python.
+Для другого каталога конфигурации экспортируйте `MAINTBOT_CONFIG_DIR`; для другого secret-файла —
+`SECRETS_ENV_PATH`. Относительные bootstrap-пути разрешаются от корня проекта, а не от случайного текущего каталога.
+Остальные несекретные переменные окружения намеренно не переопределяют `bot.json`.
 
 ## Production-развёртывание
 
-Код и venv должны принадлежать root, `data/` — отдельному сервисному пользователю.
+Код и venv должны принадлежать root, изменяемая часть `data/` — отдельному сервисному пользователю. Подкаталог
+`data/conf` лучше оставить root-owned и доступным сервису только для чтения.
 
 ```bash
 sudo useradd --system --home /nonexistent --shell /usr/sbin/nologin maintbot
@@ -250,13 +263,17 @@ sudo python3 -m venv /opt/maintbot/.venv
 sudo /opt/maintbot/.venv/bin/python -m pip install -r /opt/maintbot/app/requirements.txt
 ```
 
-Env-файлы должны быть доступны root и группе сервиса, но не остальным пользователям:
+Установите JSON-конфигурацию и secret-файл без доступа для остальных пользователей:
 
 ```bash
-sudo chown root:maintbot /opt/maintbot/app/.env /opt/maintbot/app/env.secrets
-sudo chmod 0640 /opt/maintbot/app/.env /opt/maintbot/app/env.secrets
+sudo install -d -o root -g maintbot -m 0750 \
+  /opt/maintbot/data/conf /opt/maintbot/data/conf/servers
 sudo install -o root -g maintbot -m 0640 \
-  /tmp/maintbot-servers.toml /etc/maintbot/servers.toml
+  /opt/maintbot/deploy/conf/bot.json /opt/maintbot/data/conf/bot.json
+sudo install -o root -g maintbot -m 0640 \
+  /opt/maintbot/deploy/conf/servers/*.json /opt/maintbot/data/conf/servers/
+sudo chown root:maintbot /opt/maintbot/app/env.secrets
+sudo chmod 0640 /opt/maintbot/app/env.secrets
 ```
 
 ### Привилегированный helper
@@ -269,12 +286,19 @@ sudo install -o root -g root -m 0755 \
   /opt/maintbot/deploy/maintbot-helper /usr/local/libexec/maintbot-helper
 sudo install -o root -g root -m 0644 \
   /opt/maintbot/deploy/fail2ban-paths.example /etc/maintbot/fail2ban-paths
+sudo install -o root -g root -m 0644 \
+  /opt/maintbot/deploy/docker-containers.example /etc/maintbot/docker-containers
 sudo install -o root -g root -m 0440 \
   /opt/maintbot/deploy/maintbot-sudoers /etc/sudoers.d/maintbot
 sudo visudo -cf /etc/sudoers.d/maintbot
 ```
 
-Helper проверяет каждое действие и разрешает только read-only UFW, Docker и ограниченное чтение настроенных fail2ban-логов. Такой же helper нужен на SSH-серверах, где используются эти проверки.
+Helper проверяет каждое действие и разрешает только read-only UFW, Docker и ограниченное чтение настроенных
+fail2ban-логов. Docker `ps`, `inspect` и `logs` доступны только для точных имён из root-owned
+`/etc/maintbot/docker-containers`; `inspect` возвращает ограниченный набор полей без `Config.Env`, mounts и labels.
+Обновляйте allowlist вместе с `docker.containers` в JSON сервера. Не добавляйте локального или SSH-пользователя бота
+в группу `docker`: это обошло бы ограничения helper. Такой же helper и policy-файлы нужны на SSH-серверах, где
+используются эти проверки.
 
 ### SSH
 
@@ -285,9 +309,13 @@ sudo install -d -o root -g maintbot -m 0750 /etc/maintbot/ssh
 sudo ssh-keygen -t ed25519 -N '' -C maintbot -f /etc/maintbot/ssh/id_ed25519
 sudo chown maintbot:maintbot /etc/maintbot/ssh/id_ed25519
 sudo chmod 0600 /etc/maintbot/ssh/id_ed25519
+sudo install -o root -g maintbot -m 0640 \
+  /root/verified-maintbot-known_hosts /etc/maintbot/ssh/known_hosts
 ```
 
-Проверяйте fingerprint host key через доверенный канал. В production обязательны `SSH_STRICT_HOST_KEY_CHECKING=yes`, явные `SSH_IDENTITY_FILE` и `SSH_KNOWN_HOSTS_FILE`.
+Сначала сформируйте `/root/verified-maintbot-known_hosts` и проверьте fingerprint каждого host key через доверенный
+канал; не копируйте непроверенный результат `ssh-keyscan` вслепую. В production обязательны
+`SSH_STRICT_HOST_KEY_CHECKING=yes`, явные `SSH_IDENTITY_FILE` и `SSH_KNOWN_HOSTS_FILE`.
 
 Боту не нужен входящий Telegram-порт: polling использует исходящий HTTPS. Для удалённых серверов разрешайте SSH только с IP хоста бота.
 
@@ -299,7 +327,10 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now maintbot.service
 ```
 
-Unit запускает `app.config_check` до приложения, предоставляет запись только в `/opt/maintbot/data`, использует `ProtectSystem=strict`, private tmp/devices, `UMask=0077` и лимиты ресурсов. Второй экземпляр завершается с кодом 75 и не запускает Telegram polling.
+Unit запускает `app.config_check` через `ExecStartPre` до приложения, поэтому повреждённая конфигурация переводит
+unit в состояние failed, а не выглядит как успешно пропущенный запуск. Unit предоставляет запись только в
+`/opt/maintbot/data` (конфигурационный подкаталог остаётся read-only), использует `ProtectSystem=strict`, private
+tmp/devices, `UMask=0077` и лимиты ресурсов. Второй экземпляр завершается с кодом 75 и не запускает Telegram polling.
 
 Проверка:
 
@@ -314,9 +345,26 @@ sudo journalctl -u maintbot.service -n 200 --no-pager
 
 Уведомление сначала фиксируется в persisted outbox одной транзакцией с изменением состояния, а затем отправляется в Telegram. Временные ошибки повторяются с backoff и общим FloodWait gate. Семантика доставки — «как минимум один раз»: редкий сбой после отправки, но до фиксации результата может создать дубль, однако не должен молча потерять событие.
 
+Временная сетевая ошибка активно повторяется не более 72 раз и не дольше семи дней. После этого адресат остаётся
+в persisted `dead_letter`: событие не удаляется и не создаёт retry-шторм. После устранения причины остановите сервис,
+сделайте backup `DATA_DIR` и явно верните событие в очередь:
+
+```bash
+.venv/bin/python -m app.messaging.outbox_redrive \
+  --data-dir /opt/maintbot/data --source user --event-id <event-id>
+```
+
+Для review-карточек координаты уже отправленного Telegram-сообщения фиксируются до регистрации ссылки. Ошибка
+storage/restart повторяет только регистрацию, не вторую отправку карточки.
+
 Курсор fail2ban сдвигается после завершения доставки. Учитываются inode/device, copytruncate и ротация `.1`; чтение ограничено по строкам и байтам.
 
 В PTB persistence сохраняются только явно зарегистрированные навигационные панели бота, включая временные экраны подтверждения и ввода. При старте они удаляются, чтобы старые inline-меню не конфликтовали с новым процессом; периодическая очистка удаляет устаревшие панели и сохраняет последнюю актуальную. Рассылки, уведомления, содержимое и переписка тикетов, пользовательские сообщения и произвольные ответы бота в этот реестр не попадают и не удаляются.
+
+PTB persistence публикуется через временный файл, `fsync` и атомарный `replace`; перед заменой сохраняется последний
+валидный образ `.bak`. Если основной pickle оборван из-за `SIGKILL`, нехватки места или сбоя записи, следующий старт
+восстанавливает его из backup. Транзакции split JSON сначала полностью проверяют staged-файлы, затем публикуют их;
+корректный pending journal допускается preflight-проверкой и завершается launcher recovery до запуска Telegram.
 
 Карточки заявок сохраняют координаты доставленных сообщений у каждого администратора. После решения, смены этапа, отмены ввода или освобождения зависшей заявки бот обновляет все сохранённые карточки до одного текущего статуса; недоступные или удалённые сообщения безопасно исключаются из реестра.
 
@@ -349,27 +397,32 @@ sudo journalctl -u maintbot.service -n 200 --no-pager
 
 ## Разработка и проверки
 
+GitHub Actions повторяет обязательные проверки на Python 3.10 и 3.14. Локально используйте SDK проекта:
+
 ```bash
 .venv/bin/python -m pip install -r app/requirements-dev.txt
-.venv/bin/python -m ruff format --check app tests
-.venv/bin/python -m ruff check app tests
+.venv/bin/python -m ruff format --check app tests tools
+.venv/bin/python -m ruff check .
 .venv/bin/python -m mypy app
 .venv/bin/python -m pytest -q
-.venv/bin/python -m bandit -r app -q
+.venv/bin/python -m bandit -r app tools -q
 .venv/bin/python -m vulture app --min-confidence 90 --ignore-names cls
-.venv/bin/python -m compileall -q app tests
+.venv/bin/python -m compileall -q app tests tools
 .venv/bin/python -m pip check
 .venv/bin/python -m pip_audit -r app/requirements.txt
 ```
 
-`pyproject.toml`, тесты и `app/requirements-dev.txt` должны находиться под контролем Git. `data/`, env-файлы, реальный `app/servers.toml`, IDE/cache/build-артефакты и локальная `docs/` исключены через `.gitignore`; в Git хранится только обезличенный `deploy/servers.toml.example`.
+`pyproject.toml`, тесты, `app/requirements-dev.txt` и обезличенные примеры `deploy/conf/` должны находиться под
+контролем Git. `data/`, env-файлы, legacy production inventory, SSH-ключи, IDE/cache/build-артефакты и локальная
+`docs/` исключены через `.gitignore`. `app/.env.example` и `deploy/servers.toml.example` оставлены только для
+двухэтапной миграции старых установок и не являются текущей runtime-конфигурацией.
 
 ## Обновление и откат
 
 Перед обновлением:
 
 1. остановите сервис;
-2. скопируйте весь `DATA_DIR` в закрытый каталог вне рабочей директории;
+2. скопируйте весь `DATA_DIR` (включая `conf`) и secret-файл в закрытый каталог вне рабочей директории;
 3. замените root-owned код;
 4. обновите venv по `app/requirements.txt`;
 5. выполните требуемую явную миграцию;
@@ -381,7 +434,11 @@ sudo journalctl -u maintbot.service -n 200 --no-pager
 ## Границы безопасности
 
 - Содержимое `data/`, env-файлы, реальный server inventory, SSH-ключи, Telegram file ID и тексты тикетов являются приватными.
+- Известные runtime-токен и пароли централизованно редактируются в text/JSON-логах, включая traceback; это не заменяет очистку остальных персональных данных.
 - Не публикуйте production-логи без очистки ID, username, адресов и обращений.
 - Docker daemon и sudo helper остаются чувствительными даже при read-only интерфейсе.
+- Счётчики защиты `/auth` process-local и обнуляются при рестарте; для нескольких экземпляров или restart-resistant rate limit нужен внешний backend. Штатный deploy намеренно запрещает второй экземпляр process lock-файлом.
+- `data/telegram/persistence.pickle` является доверенным локальным файлом: атомарная запись защищает от обрыва, но не делает pickle безопасным для данных, доступных на запись постороннему пользователю.
+- Process-tree termination полностью обеспечивается в production Linux через отдельную process group; Windows остаётся средой разработки, где принудительное завершение потомков после уже завершившегося родителя является best effort.
 - Локальное окончание подписки или теста ограничивает функции MaintBot и убирает ссылку из бота, но без отдельной интеграции не отключает пользователя в RemnaWave.
 - Никогда не коммитьте production-данные или секреты.

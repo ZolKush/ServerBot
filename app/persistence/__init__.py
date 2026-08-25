@@ -6,8 +6,10 @@ must construct :class:`SplitJsonBackend` after acquiring the process lock.
 
 from .backend import SplitJsonBackend
 from .errors import (
+    CommittedTransactionError,
     MigrationError,
     PersistenceError,
+    PreparedTransactionError,
     RecoveryError,
     SchemaError,
     StorageConflictError,
@@ -18,9 +20,11 @@ from .unit_of_work import JsonUnitOfWork
 
 __all__ = [
     "BackendSnapshot",
+    "CommittedTransactionError",
     "JsonUnitOfWork",
     "MigrationError",
     "PersistenceError",
+    "PreparedTransactionError",
     "RecoveryError",
     "SchemaError",
     "SplitJsonBackend",

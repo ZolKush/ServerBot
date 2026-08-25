@@ -5,15 +5,8 @@ import re
 SERVER_KEY_PATTERN = r"[a-z0-9_-]{1,12}"
 
 _SSH_TARGET_RE = re.compile(r"^[A-Za-z0-9_.:@\-\[\]]{1,255}$")
-_SERVER_CODE_RE = re.compile(r"[^a-z0-9_-]+")
 _CONTAINER_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.\-]{0,62}$")
 _UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
-
-
-def normalize_server_key(value: str, fallback: str) -> str:
-    raw = (value or fallback or "srv").strip().lower()
-    raw = _SERVER_CODE_RE.sub("-", raw).strip("-_")
-    return (raw or "srv")[:12]
 
 
 def validate_ssh_target(value: str) -> str:
@@ -54,6 +47,5 @@ __all__ = [
     "SERVER_KEY_PATTERN",
     "is_container_name",
     "is_uuid",
-    "normalize_server_key",
     "validate_ssh_target",
 ]

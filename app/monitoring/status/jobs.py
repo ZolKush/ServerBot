@@ -138,31 +138,34 @@ async def daily_node_status_refresh(
     if BOT_MODE != "mixed":
         return
 
+    semaphore = asyncio.Semaphore(4)
+
     async def refresh(server: ServerTarget) -> None:
-        started = time.monotonic()
-        try:
-            payload = await collect_disk_ufw(server, admin_mode=True)
-            if payload.get("ok"):
-                await set_daily_node_status_cache(server.key, payload)
-                invalidate_status_cache(server.key)
-            logger.info(
-                "Daily node status refreshed source=scheduled server=%s ok=%s duration_ms=%s",
-                server.key,
-                payload.get("ok"),
-                round((time.monotonic() - started) * 1000),
-                extra={
-                    "action": "daily_node_status_refresh",
-                    "source": "scheduled",
-                    "server_key": server.key,
-                    "ok": bool(payload.get("ok")),
-                    "duration_ms": round((time.monotonic() - started) * 1000),
-                },
-            )
-        except Exception:
-            logger.exception(
-                "Daily node status refresh failed for server=%s",
-                server.key,
-            )
+        async with semaphore:
+            started = time.monotonic()
+            try:
+                payload = await collect_disk_ufw(server, admin_mode=True)
+                if payload.get("ok"):
+                    await set_daily_node_status_cache(server.key, payload)
+                    invalidate_status_cache(server.key)
+                logger.info(
+                    "Daily node status refreshed source=scheduled server=%s ok=%s duration_ms=%s",
+                    server.key,
+                    payload.get("ok"),
+                    round((time.monotonic() - started) * 1000),
+                    extra={
+                        "action": "daily_node_status_refresh",
+                        "source": "scheduled",
+                        "server_key": server.key,
+                        "ok": bool(payload.get("ok")),
+                        "duration_ms": round((time.monotonic() - started) * 1000),
+                    },
+                )
+            except Exception:
+                logger.exception(
+                    "Daily node status refresh failed for server=%s",
+                    server.key,
+                )
 
     await asyncio.gather(*(refresh(server) for server in SERVERS.values()))
 

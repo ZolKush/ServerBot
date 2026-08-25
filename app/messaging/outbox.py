@@ -5,8 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import re
-from collections.abc import Callable
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from io import BytesIO
 from typing import Any
 
@@ -16,25 +15,24 @@ from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter, Time
 
 from ..config import logger
 from ..storage import finalize_outbox_event, get_user_meta_copy, mutate_outbox_event, outbox_snapshot
+from .outbox_redrive import redrive_outbox_dead_letters as _redrive_outbox_dead_letters
+from .outbox_state import (
+    ACTIVE_RECIPIENT_STATUSES,
+    DEAD_LETTER_STATUS,
+    delivery_coordinates,
+    parse_time,
+    recipient_mutation,
+    should_dead_letter,
+)
+from .review_delivery import complete_review_registration
 from .telegram_rate import extend_flood_gate, retry_after_seconds, wait_flood_gate
 
 _PROCESS_LOCK = asyncio.Lock()
 MAX_DELIVERIES_PER_RUN = 100
-MAX_ATTEMPTS = 12
 
 
 def _retry_after_seconds(exc: RetryAfter) -> float:
     return retry_after_seconds(exc, minimum=1.0)
-
-
-def _parse_time(value: object) -> datetime:
-    try:
-        parsed = datetime.fromisoformat(str(value or ""))
-        if parsed.tzinfo is None:
-            return parsed.replace(tzinfo=timezone.utc)
-        return parsed.astimezone(timezone.utc)
-    except (TypeError, ValueError):
-        return datetime.min.replace(tzinfo=timezone.utc)
 
 
 def _markup_from_descriptor(raw: object) -> InlineKeyboardMarkup | None:
@@ -153,52 +151,6 @@ async def _deliver(bot, uid: int, payload: dict[str, Any]) -> Any:
     raise BadRequest(f"unsupported outbox method: {method}")
 
 
-def _mark_recipient(
-    event: dict[str, Any],
-    uid: int,
-    *,
-    status: str,
-    attempts: int,
-    error: str = "",
-    retry_after: float = 0,
-) -> dict[str, Any]:
-    recipients = event.get("recipients")
-    if not isinstance(recipients, dict) or not isinstance(recipients.get(str(uid)), dict):
-        return event
-    state = dict(recipients[str(uid)])
-    state["status"] = status
-    state["attempts"] = attempts
-    state["last_error"] = error[:500]
-    if status == "delivered":
-        state["delivered_at"] = datetime.now(timezone.utc).isoformat()
-    if status == "pending":
-        state["next_attempt_at"] = (datetime.now(timezone.utc) + timedelta(seconds=retry_after)).isoformat()
-    recipients[str(uid)] = state
-    event["recipients"] = recipients
-    return event
-
-
-def _recipient_mutation(
-    uid: int,
-    *,
-    status: str,
-    attempts: int,
-    error: str = "",
-    retry_after: float = 0,
-) -> Callable[[dict[str, Any]], dict[str, Any]]:
-    def _apply(current: dict[str, Any]) -> dict[str, Any]:
-        return _mark_recipient(
-            current,
-            uid,
-            status=status,
-            attempts=attempts,
-            error=error,
-            retry_after=retry_after,
-        )
-
-    return _apply
-
-
 async def _finalize_if_done(source: str, event_id: str, event: dict[str, Any] | None) -> bool:
     if not isinstance(event, dict):
         return False
@@ -206,7 +158,9 @@ async def _finalize_if_done(source: str, event_id: str, event: dict[str, Any] | 
     if not isinstance(recipients, dict) or not recipients:
         return False
     statuses = [state.get("status") for state in recipients.values() if isinstance(state, dict)]
-    if len(statuses) != len(recipients) or any(status == "pending" for status in statuses):
+    if len(statuses) != len(recipients) or any(
+        status in ACTIVE_RECIPIENT_STATUSES or status == DEAD_LETTER_STATUS for status in statuses
+    ):
         return False
     success = all(status == "delivered" for status in statuses)
     completion = event.get("completion")
@@ -243,13 +197,30 @@ async def process_outbox(bot) -> int:
             for uid_text, raw_state in list(recipients.items()):
                 if processed >= MAX_DELIVERIES_PER_RUN:
                     break
-                if not isinstance(raw_state, dict) or raw_state.get("status") != "pending":
+                if not isinstance(raw_state, dict) or raw_state.get("status") not in ACTIVE_RECIPIENT_STATUSES:
                     continue
-                if _parse_time(raw_state.get("next_attempt_at")) > now:
+                if parse_time(raw_state.get("next_attempt_at")) > now:
                     continue
                 try:
                     uid = int(uid_text)
                 except (TypeError, ValueError):
+                    continue
+                try:
+                    attempts = max(0, int(raw_state.get("attempts", 0) or 0)) + 1
+                except (TypeError, ValueError):
+                    attempts = 1
+                if raw_state.get("status") == "delivered_pending_registration":
+                    updated_event = await complete_review_registration(
+                        bot,
+                        source=source,
+                        event_id=event_id,
+                        event=event,
+                        uid=uid,
+                        state=raw_state,
+                        attempts=attempts,
+                    )
+                    await _finalize_if_done(source, event_id, updated_event)
+                    processed += 1
                     continue
                 meta = get_user_meta_copy(uid)
                 if (
@@ -260,7 +231,7 @@ async def process_outbox(bot) -> int:
                     updated_event = await mutate_outbox_event(
                         source,
                         event_id,
-                        _recipient_mutation(
+                        recipient_mutation(
                             uid,
                             status="terminal",
                             attempts=max(0, int(raw_state.get("attempts", 0) or 0)),
@@ -271,58 +242,57 @@ async def process_outbox(bot) -> int:
                     processed += 1
                     continue
                 try:
-                    attempts = max(0, int(raw_state.get("attempts", 0) or 0)) + 1
-                except (TypeError, ValueError):
-                    attempts = 1
-                try:
                     delivered_message = await _deliver(bot, uid, payload)
                 except RetryAfter as exc:
                     delay = _retry_after_seconds(exc) + 0.5
                     await _extend_flood_gate(delay)
+                    dead_letter = should_dead_letter(event, attempts=attempts, now=now)
                     updated_event = await mutate_outbox_event(
                         source,
                         event_id,
-                        _recipient_mutation(
+                        recipient_mutation(
                             uid,
-                            status="pending",
+                            status=DEAD_LETTER_STATUS if dead_letter else "pending",
                             attempts=attempts,
                             error="RetryAfter",
                             retry_after=delay,
                         ),
                     )
                 except (Forbidden, BadRequest) as exc:
+                    status = "terminal" if isinstance(exc, Forbidden) else DEAD_LETTER_STATUS
                     logger.warning(
-                        "Outbox terminal delivery error event=%s recipient=%s type=%s",
+                        "Outbox permanent delivery error event=%s recipient=%s type=%s status=%s",
                         event_id,
                         uid,
                         exc.__class__.__name__,
-                        extra={"user_id": uid, "action": "outbox_terminal"},
+                        status,
+                        extra={"user_id": uid, "action": f"outbox_{status}"},
                     )
                     updated_event = await mutate_outbox_event(
                         source,
                         event_id,
-                        _recipient_mutation(uid, status="terminal", attempts=attempts, error=str(exc)),
+                        recipient_mutation(uid, status=status, attempts=attempts, error=exc.__class__.__name__),
                     )
                 except (TimedOut, NetworkError, OSError) as exc:
-                    terminal = attempts >= MAX_ATTEMPTS
+                    dead_letter = should_dead_letter(event, attempts=attempts, now=now)
                     delay = min(3600.0, 2.0 ** min(attempts, 10))
-                    if terminal:
+                    if dead_letter:
                         logger.warning(
-                            "Outbox retries exhausted event=%s recipient=%s type=%s attempts=%s",
+                            "Outbox moved to dead letter event=%s recipient=%s type=%s attempts=%s",
                             event_id,
                             uid,
                             exc.__class__.__name__,
                             attempts,
-                            extra={"user_id": uid, "action": "outbox_terminal"},
+                            extra={"user_id": uid, "action": "outbox_dead_letter"},
                         )
                     updated_event = await mutate_outbox_event(
                         source,
                         event_id,
-                        _recipient_mutation(
+                        recipient_mutation(
                             uid,
-                            status="terminal" if terminal else "pending",
+                            status=DEAD_LETTER_STATUS if dead_letter else "pending",
                             attempts=attempts,
-                            error=str(exc),
+                            error=exc.__class__.__name__,
                             retry_after=delay,
                         ),
                     )
@@ -331,31 +301,69 @@ async def process_outbox(bot) -> int:
                     updated_event = await mutate_outbox_event(
                         source,
                         event_id,
-                        _recipient_mutation(uid, status="terminal", attempts=attempts, error=str(exc)),
+                        recipient_mutation(
+                            uid,
+                            status=DEAD_LETTER_STATUS,
+                            attempts=attempts,
+                            error=exc.__class__.__name__,
+                        ),
                     )
                 else:
                     completion = event.get("completion")
                     if isinstance(completion, dict) and completion.get("type") == "review_card":
-                        try:
-                            from .review_sync import record_review_delivery
-
-                            await record_review_delivery(bot, completion, uid, delivered_message)
-                        except Exception:
-                            # Delivery already happened. Never resend a card merely because
-                            # recording/editing its synchronization reference failed.
-                            logger.exception(
-                                "Could not record review-card delivery event=%s recipient=%s",
+                        coordinates = delivery_coordinates(delivered_message, uid)
+                        if coordinates is None:
+                            updated_event = await mutate_outbox_event(
+                                source,
                                 event_id,
-                                uid,
+                                recipient_mutation(
+                                    uid,
+                                    status=DEAD_LETTER_STATUS,
+                                    attempts=attempts,
+                                    error="Telegram response has no message coordinates",
+                                ),
                             )
-                    updated_event = await mutate_outbox_event(
-                        source,
-                        event_id,
-                        _recipient_mutation(uid, status="delivered", attempts=attempts),
-                    )
+                        else:
+                            chat_id, message_id = coordinates
+                            pending_registration = await mutate_outbox_event(
+                                source,
+                                event_id,
+                                recipient_mutation(
+                                    uid,
+                                    status="delivered_pending_registration",
+                                    attempts=attempts,
+                                    chat_id=chat_id,
+                                    message_id=message_id,
+                                ),
+                            )
+                            if isinstance(pending_registration, dict):
+                                pending_state = (pending_registration.get("recipients") or {}).get(str(uid), {})
+                                updated_event = await complete_review_registration(
+                                    bot,
+                                    source=source,
+                                    event_id=event_id,
+                                    event=pending_registration,
+                                    uid=uid,
+                                    state=pending_state,
+                                    attempts=attempts,
+                                )
+                            else:
+                                updated_event = pending_registration
+                    else:
+                        updated_event = await mutate_outbox_event(
+                            source,
+                            event_id,
+                            recipient_mutation(uid, status="delivered", attempts=attempts),
+                        )
                 await _finalize_if_done(source, event_id, updated_event)
                 processed += 1
     return processed
+
+
+async def redrive_outbox_dead_letters(source: str, event_id: str) -> bool:
+    """Compatibility facade for the explicit dead-letter redrive service."""
+
+    return await _redrive_outbox_dead_letters(source, event_id)
 
 
 async def process_outbox_job(context) -> None:

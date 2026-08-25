@@ -1,22 +1,19 @@
-"""Strict TOML schema for the server inventory."""
+"""Strict schema and directory loader for per-server JSON configuration."""
 
 from __future__ import annotations
 
 import ipaddress
 import re
-import sys
 from pathlib import Path
 from typing import Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
+from .json_files import JsonConfigError, load_json_object
 from .validators import SERVER_KEY_PATTERN, is_container_name, is_uuid, validate_ssh_target
 
-if sys.version_info >= (3, 11):  # pragma: no branch - version-specific import
-    import tomllib
-else:  # pragma: no cover - exercised on Python 3.10
-    import tomli as tomllib
+MAX_SERVER_FILES = 256
 
 
 class InventoryError(RuntimeError):
@@ -24,7 +21,7 @@ class InventoryError(RuntimeError):
 
 
 class _StrictModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, hide_input_in_errors=True)
+    model_config = ConfigDict(extra="forbid", strict=True, str_strip_whitespace=True, hide_input_in_errors=True)
 
 
 class ConnectionInventory(_StrictModel):
@@ -174,6 +171,7 @@ class Fail2BanInventory(_StrictModel):
 class ServerInventory(_StrictModel):
     label: str
     flag: str = ""
+    display_order: int = 100
     connection: ConnectionInventory
     monitoring: MonitoringInventory = Field(default_factory=MonitoringInventory)
     dns: DnsInventory = Field(default_factory=DnsInventory)
@@ -196,6 +194,13 @@ class ServerInventory(_StrictModel):
             raise ValueError("server flag must be an ISO 3166-1 alpha-2 code")
         return flag
 
+    @field_validator("display_order")
+    @classmethod
+    def _validate_display_order(cls, value: int) -> int:
+        if isinstance(value, bool) or not 0 <= int(value) <= 10_000:
+            raise ValueError("server display_order must be in range 0..10000")
+        return int(value)
+
     @model_validator(mode="after")
     def _validate_domains(self) -> ServerInventory:
         hosts = [item.host for item in self.domains]
@@ -206,43 +211,99 @@ class ServerInventory(_StrictModel):
         return self
 
 
-class ServerInventoryDocument(_StrictModel):
-    version: Literal[1]
-    servers: dict[str, ServerInventory]
+class ServerConfigDocument(ServerInventory):
+    """One complete server definition stored in one JSON file."""
 
-    @field_validator("servers")
+    version: Literal[1]
+    key: str
+
+    @field_validator("key")
     @classmethod
-    def _validate_server_keys(cls, value: dict[str, ServerInventory]) -> dict[str, ServerInventory]:
-        if not value:
-            raise ValueError("at least one server must be configured")
+    def _validate_server_key(cls, value: str) -> str:
         pattern = re.compile(rf"^{SERVER_KEY_PATTERN}$")
-        invalid = [key for key in value if not pattern.fullmatch(key)]
-        if invalid:
-            raise ValueError(f"invalid server keys: {', '.join(invalid)}")
-        local_count = sum(item.connection.transport == "local" for item in value.values())
-        if local_count > 1:
-            raise ValueError("only one server may use connection.transport='local'")
+        if not pattern.fullmatch(value):
+            raise ValueError(f"invalid server key: {value}")
         return value
 
 
-def load_inventory_document(path: str | Path) -> ServerInventoryDocument:
-    inventory_path = Path(path)
-    if not inventory_path.is_file():
-        raise InventoryError(f"SERVER_INVENTORY_FILE not found: {inventory_path}")
+def _discover_json_files(directory: Path) -> list[Path]:
+    if not directory.exists():
+        raise InventoryError(f"SERVER_CONFIG_DIR not found: {directory}")
+    if not directory.is_dir():
+        raise InventoryError(f"SERVER_CONFIG_DIR is not a directory: {directory}")
     try:
-        with inventory_path.open("rb") as stream:
-            raw = tomllib.load(stream)
-    except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
-        raise InventoryError(f"cannot read SERVER_INVENTORY_FILE {inventory_path}: {exc}") from exc
+        files = sorted(
+            (path for path in directory.iterdir() if path.suffix.lower() == ".json"),
+            key=lambda path: (path.name.casefold(), path.name),
+        )
+    except OSError as exc:
+        raise InventoryError(f"cannot scan SERVER_CONFIG_DIR {directory}: {exc}") from exc
+    non_files = [path.name for path in files if not path.is_file()]
+    if non_files:
+        raise InventoryError(f"SERVER_CONFIG_DIR contains non-file JSON entries: {', '.join(non_files)}")
+    if not files:
+        raise InventoryError(f"SERVER_CONFIG_DIR contains no .json server files: {directory}")
+    if len(files) > MAX_SERVER_FILES:
+        raise InventoryError(f"SERVER_CONFIG_DIR contains more than {MAX_SERVER_FILES} server files")
+    return files
+
+
+def _fingerprint(files: list[Path]) -> tuple[tuple[str, int, int, int, int], ...]:
     try:
-        return ServerInventoryDocument.model_validate(raw)
-    except Exception as exc:
-        raise InventoryError(f"invalid SERVER_INVENTORY_FILE {inventory_path}: {exc}") from None
+        return tuple(
+            (path.name, stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+            for path in files
+            for stat in (path.stat(),)
+        )
+    except OSError as exc:
+        raise InventoryError(f"cannot stat a server configuration file: {exc}") from exc
+
+
+def load_inventory_directory(path: str | Path) -> dict[str, ServerConfigDocument]:
+    """Load every immediate ``*.json`` file as one deterministic inventory."""
+
+    directory = Path(path)
+    files = _discover_json_files(directory)
+    initial_fingerprint = _fingerprint(files)
+    servers: dict[str, ServerConfigDocument] = {}
+    sources: dict[str, str] = {}
+    for config_path in files:
+        try:
+            raw = load_json_object(config_path, field_name="server configuration")
+            document = ServerConfigDocument.model_validate(raw)
+        except (JsonConfigError, ValidationError) as exc:
+            raise InventoryError(f"invalid server configuration {config_path.name}: {exc}") from None
+        if document.key in servers:
+            raise InventoryError(
+                f"duplicate server key '{document.key}' in {sources[document.key]} and {config_path.name}"
+            )
+        servers[document.key] = document
+        sources[document.key] = config_path.name
+
+    final_files = _discover_json_files(directory)
+    if _fingerprint(final_files) != initial_fingerprint:
+        raise InventoryError(f"SERVER_CONFIG_DIR changed while it was being read: {directory}")
+    local_count = sum(item.connection.transport == "local" for item in servers.values())
+    if local_count > 1:
+        raise InventoryError("only one server may use connection.transport='local'")
+    return servers
+
+
+def load_inventory_document(path: str | Path) -> ServerConfigDocument:
+    """Load one server file; retained as a small public validation helper."""
+
+    try:
+        raw = load_json_object(path, field_name="server configuration")
+        return ServerConfigDocument.model_validate(raw)
+    except (JsonConfigError, ValidationError) as exc:
+        raise InventoryError(f"invalid server configuration {Path(path)}: {exc}") from None
 
 
 __all__ = [
     "DomainInventory",
     "InventoryError",
-    "ServerInventoryDocument",
+    "MAX_SERVER_FILES",
+    "ServerConfigDocument",
+    "load_inventory_directory",
     "load_inventory_document",
 ]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import copy
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -9,6 +10,7 @@ import pytest
 from telegram.constants import ChatType
 
 from app.main import build_app
+from app.messaging import message_cleanup as cleanup_module
 from app.messaging.message_cleanup import (
     MessageTracker,
     TrackingExtBot,
@@ -144,6 +146,63 @@ async def test_navigation_edit_result_uses_callback_message_coordinates() -> Non
     await record_navigation_result(update, True)
 
     assert await tracker.snapshot() == {42: [78]}
+
+
+@pytest.mark.asyncio
+async def test_navigation_edit_refreshes_panel_activity_for_cleanup() -> None:
+    now = datetime.now(timezone.utc)
+    tracker = MessageTracker(enabled=True, retention=timedelta(hours=24))
+    tracker.bind({})
+    await _record(tracker, 42, 79, now - timedelta(hours=1))
+    bot = SimpleNamespace(
+        message_tracker=tracker,
+        delete_messages=AsyncMock(return_value=True),
+    )
+    callback_message = SimpleNamespace(
+        message_id=78,
+        date=now - timedelta(hours=30),
+        edit_date=None,
+        chat=SimpleNamespace(id=42, type=ChatType.PRIVATE),
+    )
+    update = SimpleNamespace(
+        callback_query=SimpleNamespace(message=callback_message),
+        get_bot=lambda: bot,
+    )
+
+    await record_navigation_result(update, True)
+    stats = await tracker.cleanup(bot, now=now + timedelta(seconds=1))
+
+    bot.delete_messages.assert_not_awaited()
+    assert stats.deleted == 0
+    assert await tracker.snapshot() == {42: [78, 79]}
+
+
+@pytest.mark.asyncio
+async def test_cleanup_revalidates_panel_activity_before_delete(monkeypatch: pytest.MonkeyPatch) -> None:
+    now = datetime(2026, 7, 15, 12, 0, tzinfo=timezone.utc)
+    tracker = MessageTracker(enabled=True, retention=timedelta(hours=24))
+    tracker.bind({})
+    await _record(tracker, 42, 1, now - timedelta(hours=30))
+    await _record(tracker, 42, 2, now - timedelta(hours=1))
+    gate_entered = asyncio.Event()
+    release_gate = asyncio.Event()
+
+    async def paused_flood_gate() -> None:
+        gate_entered.set()
+        await release_gate.wait()
+
+    monkeypatch.setattr(cleanup_module, "wait_flood_gate", paused_flood_gate)
+    bot = SimpleNamespace(delete_messages=AsyncMock(return_value=True))
+    cleanup_task = asyncio.create_task(tracker.cleanup(bot, now=now))
+    await gate_entered.wait()
+    await _record(tracker, 42, 1, now)
+    release_gate.set()
+
+    stats = await cleanup_task
+
+    bot.delete_messages.assert_not_awaited()
+    assert stats.deleted == 0
+    assert await tracker.snapshot() == {42: [1, 2]}
 
 
 @pytest.mark.asyncio

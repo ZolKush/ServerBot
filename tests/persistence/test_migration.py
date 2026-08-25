@@ -87,8 +87,12 @@ def test_one_shot_migration_backs_up_and_publishes_verified_layout(tmp_path: Pat
     assert report.outbox_collisions == {"shared": "shared~important"}
     snapshot = SplitJsonBackend(root).snapshot()
     assert snapshot.revision == 1
-    assert snapshot.data("subscriptions.requests")["items"] == user["service_requests"]
-    assert snapshot.data("monitoring.tls_state") == important["tls_certificates"]
+    migrated_request = snapshot.data("subscriptions.requests")["items"]["3"]
+    assert all(migrated_request[key] == value for key, value in user["service_requests"]["3"].items())
+    migrated_tls = snapshot.data("monitoring.tls_state")["example.com:443"]
+    assert migrated_tls["domain"] == "example.com"
+    assert migrated_tls["primary_port"] == 443
+    assert migrated_tls["status"] == important["tls_certificates"]["example.com:443"]["status"]
     assert (root / PTB_TARGET_FILE).read_bytes() == original_ptb
 
     backup = Path(report.backup_path or "")
@@ -160,6 +164,91 @@ def test_migrator_rejects_any_schema_except_exact_v4(tmp_path: Path) -> None:
     with pytest.raises(MigrationError, match="exactly 4"):
         migrate_v4_to_split(root, dry_run=True)
     assert not (root / "storage_layout.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("document_name", "sequence_field", "records_field"),
+    [
+        ("user_data.json", "request_seq", "service_requests"),
+        ("important_data.json", "tickets_seq", "tickets"),
+    ],
+)
+def test_migration_rejects_index_sequence_below_existing_id(
+    tmp_path: Path,
+    document_name: str,
+    sequence_field: str,
+    records_field: str,
+) -> None:
+    root = tmp_path / "data"
+    write_v4_source(root)
+    path = root / document_name
+    document = json.loads(path.read_text(encoding="utf-8"))
+    document[sequence_field] = 0
+    assert document[records_field]
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(MigrationError, match="smaller than maximum record id"):
+        migrate_v4_to_split(root, dry_run=True)
+
+
+@pytest.mark.parametrize(
+    ("document_name", "records_field"),
+    [
+        ("user_data.json", "service_requests"),
+        ("important_data.json", "tickets"),
+    ],
+)
+def test_migration_rejects_index_key_id_mismatch(
+    tmp_path: Path,
+    document_name: str,
+    records_field: str,
+) -> None:
+    root = tmp_path / "data"
+    write_v4_source(root)
+    path = root / document_name
+    document = json.loads(path.read_text(encoding="utf-8"))
+    record = next(iter(document[records_field].values()))
+    record["id"] += 1
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(MigrationError, match="key/id mismatch"):
+        migrate_v4_to_split(root, dry_run=True)
+
+
+def test_migration_rejects_colliding_canonical_record_ids(tmp_path: Path) -> None:
+    root = tmp_path / "data"
+    write_v4_source(root)
+    path = root / "user_data.json"
+    document = json.loads(path.read_text(encoding="utf-8"))
+    existing = next(iter(document["service_requests"].values()))
+    document["service_requests"]["03"] = dict(existing)
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(MigrationError, match="colliding id 3"):
+        migrate_v4_to_split(root, dry_run=True)
+
+
+@pytest.mark.parametrize(
+    ("argument_name", "source_name"),
+    [
+        ("user_path", "user_data.json"),
+        ("important_path", "important_data.json"),
+        ("ptb_path", "ptb_persistence"),
+    ],
+)
+def test_migration_rejects_explicit_source_outside_backup_scope(
+    tmp_path: Path,
+    argument_name: str,
+    source_name: str,
+) -> None:
+    root = tmp_path / "data"
+    write_v4_source(root)
+    external = tmp_path / "external" / source_name
+    external.parent.mkdir()
+    external.write_bytes((root / source_name).read_bytes())
+
+    with pytest.raises(MigrationError, match="must be inside DATA_DIR"):
+        migrate_v4_to_split(root, dry_run=True, **{argument_name: external})
 
 
 def test_unknown_user_field_is_rejected_instead_of_dropped(tmp_path: Path) -> None:

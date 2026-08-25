@@ -35,7 +35,7 @@ class StateLock:
     def __init__(self, data_root: Path) -> None:
         self.path = data_root / STATE_LOCK_FILE
         self._state = _shared_state(self.path)
-        self._entered = False
+        self._local_depth = 0
 
     def __enter__(self) -> StateLock:
         self._state.mutex.acquire()
@@ -64,14 +64,14 @@ class StateLock:
                 tighten_file_permissions(self.path)
                 self._state.handle = handle
             self._state.depth += 1
-            self._entered = True
+            self._local_depth += 1
             return self
         except BaseException:
             self._state.mutex.release()
             raise
 
     def __exit__(self, _exc_type: object, _exc: object, _traceback: object) -> None:
-        if not self._entered:
+        if self._local_depth == 0:
             return
         try:
             self._state.depth -= 1
@@ -92,7 +92,7 @@ class StateLock:
                     finally:
                         handle.close()
         finally:
-            self._entered = False
+            self._local_depth -= 1
             self._state.mutex.release()
 
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from dotenv import dotenv_values
+from dotenv.parser import parse_stream
 from pydantic import BaseModel, ConfigDict, ValidationError, ValidationInfo, field_validator, model_validator
 
 _REQUIRED_SECRET_KEYS = ("BOT_TOKEN", "ADMIN_PASSWORD", "OWNER_PASSWORD")
@@ -53,17 +53,24 @@ def _load_env_file_values(path: Path) -> dict[str, str]:
         return {}
     if not path.is_file():
         raise RuntimeError(f"Путь к env-файлу не является файлом: {path}")
-    result: dict[str, str] = {}
     try:
-        raw = dotenv_values(path)
-    except Exception as exc:
+        with path.open("r", encoding="utf-8-sig", newline="") as stream:
+            result: dict[str, str] = {}
+            for binding in parse_stream(stream):
+                if binding.error:
+                    raise RuntimeError(f"Некорректный синтаксис secret env {path}, строка {binding.original.line}")
+                if binding.key is None:
+                    continue
+                key = str(binding.key)
+                if key in result:
+                    raise RuntimeError(f"Повторяющийся ключ в secret env {path}: {key}")
+                if binding.value is None:
+                    raise RuntimeError(f"Ключ без присвоенного значения в secret env {path}: {key}")
+                result[key] = str(binding.value).strip()
+    except RuntimeError:
+        raise
+    except (OSError, UnicodeError) as exc:
         raise RuntimeError(f"Не удалось прочитать env-файл {path}: {exc}") from exc
-    for key, value in raw.items():
-        if value is None:
-            continue
-        normalized = str(value).strip()
-        if normalized:
-            result[str(key)] = normalized
     return result
 
 

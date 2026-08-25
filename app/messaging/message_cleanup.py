@@ -196,7 +196,7 @@ class MessageTracker:
         now_ts = current.astimezone(timezone.utc).timestamp()
         retention_cutoff = now_ts - self.retention.total_seconds()
         expiry_cutoff = now_ts - _DELETE_MAX_AGE.total_seconds()
-        plans: list[tuple[int, list[int]]] = []
+        plans: list[tuple[int, list[tuple[int, float]]]] = []
 
         async with self._cleanup_lock:
             async with self._lock:
@@ -225,22 +225,41 @@ class MessageTracker:
                         chats.pop(chat_id_text, None)
                         continue
                     candidates = [
-                        message_id
+                        (message_id, sent_at)
                         for message_id, sent_at in ordered
                         if message_id != latest_id
                         and expiry_cutoff < sent_at
                         and (startup or sent_at <= retention_cutoff)
                     ]
                     if startup and latest_id not in expired_ids:
-                        candidates.append(latest_id)
+                        candidates.append((latest_id, float(messages[str(latest_id)])))
                     if candidates:
                         plans.append((int(chat_id_text), candidates))
                         stats.candidates += len(candidates)
 
-            for chat_id, message_ids in plans:
-                for offset in range(0, len(message_ids), _DELETE_BATCH_SIZE):
-                    chunk = message_ids[offset : offset + _DELETE_BATCH_SIZE]
+            for chat_id, planned_messages in plans:
+                for offset in range(0, len(planned_messages), _DELETE_BATCH_SIZE):
+                    planned_chunk = planned_messages[offset : offset + _DELETE_BATCH_SIZE]
                     await wait_flood_gate()
+                    async with self._lock:
+                        registry = self._registry()
+                        chats = registry.get("chats") if isinstance(registry, dict) else None
+                        chat = chats.get(str(chat_id)) if isinstance(chats, dict) else None
+                        messages = chat.get("messages") if isinstance(chat, dict) else None
+                        if not isinstance(messages, dict) or not messages:
+                            continue
+                        ordered_current = sorted(
+                            ((int(message_id), float(sent_at)) for message_id, sent_at in messages.items()),
+                            key=lambda item: (item[1], item[0]),
+                        )
+                        latest_id = ordered_current[-1][0]
+                        chunk = [
+                            message_id
+                            for message_id, planned_at in planned_chunk
+                            if messages.get(str(message_id)) == planned_at and (startup or message_id != latest_id)
+                        ]
+                    if not chunk:
+                        continue
                     try:
                         deleted = await bot.delete_messages(chat_id=chat_id, message_ids=chunk)
                     except RetryAfter as exc:
@@ -283,7 +302,12 @@ class TrackingExtBot(ExtBot):
         object.__setattr__(self, "message_tracker", message_tracker)
 
 
-async def record_navigation_message(bot: Any, message: Any) -> None:
+async def record_navigation_message(
+    bot: Any,
+    message: Any,
+    *,
+    activity_date: object | None = None,
+) -> None:
     """Register a panel explicitly; ordinary sends and incoming text stay untouched."""
 
     tracker = getattr(bot, "message_tracker", None)
@@ -293,7 +317,9 @@ async def record_navigation_message(bot: Any, message: Any) -> None:
     await tracker.record_message(
         chat_id=getattr(chat, "id", None),
         message_id=getattr(message, "message_id", None),
-        message_date=getattr(message, "date", datetime.now(timezone.utc)),
+        message_date=(
+            activity_date or getattr(message, "edit_date", None) or getattr(message, "date", datetime.now(timezone.utc))
+        ),
         chat_type=getattr(chat, "type", None),
     )
 
@@ -302,13 +328,15 @@ async def record_navigation_result(update: Any, result: Any) -> None:
     """Register the message returned by a navigation-panel send or edit."""
 
     message = result
+    activity_date = None
     if result is True:
         query = getattr(update, "callback_query", None)
         message = getattr(query, "message", None)
+        activity_date = datetime.now(timezone.utc)
     get_bot = getattr(update, "get_bot", None)
     if not callable(get_bot):
         return
-    await record_navigation_message(get_bot(), message)
+    await record_navigation_message(get_bot(), message, activity_date=activity_date)
 
 
 __all__ = [

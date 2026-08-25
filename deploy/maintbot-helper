@@ -12,15 +12,30 @@ import base64
 import os
 import re
 import shutil
+import stat
 import sys
 from pathlib import Path
 from typing import NoReturn
 
 CONTAINER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$")
 PATHS_FILE = Path("/etc/maintbot/fail2ban-paths")
+CONTAINERS_FILE = Path("/etc/maintbot/docker-containers")
 DEFAULT_LOG_PATHS = {Path("/var/log/fail2ban.log")}
 MAX_TAIL_LINES = 50_000
 MAX_READ_BYTES = 3_000_000
+MAX_POLICY_BYTES = 64 * 1024
+
+# Keep the result compatible with MaintBot's existing JSON parser while
+# deliberately excluding Config.Env, mounts, labels and other sensitive
+# low-level fields returned by an unrestricted ``docker inspect``.
+SAFE_INSPECT_FORMAT = (
+    '[{"Config":{"Image":{{json .Config.Image}}},'
+    '"State":{"Status":{{json .State.Status}},"Running":{{json .State.Running}},'
+    '"StartedAt":{{json .State.StartedAt}},"FinishedAt":{{json .State.FinishedAt}},'
+    '"ExitCode":{{json .State.ExitCode}}},'
+    '"RestartCount":{{json .RestartCount}},'
+    '"NetworkSettings":{"Ports":{{json .NetworkSettings.Ports}}}}]'
+)
 
 
 def fail(message: str, code: int = 64) -> NoReturn:
@@ -28,14 +43,94 @@ def fail(message: str, code: int = 64) -> NoReturn:
     raise SystemExit(code)
 
 
+def policy_lines(path: Path, *, label: str, required: bool) -> list[str]:
+    """Read a small root-controlled policy file without following symlinks."""
+
+    descriptor: int | None = None
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            fail(f"{label} policy must be a regular non-symlink file", 77)
+        if os.name != "nt" and (metadata.st_uid != 0 or stat.S_IMODE(metadata.st_mode) & 0o022):
+            fail(f"{label} policy must be root-owned and not group/world-writable", 77)
+        if metadata.st_size > MAX_POLICY_BYTES:
+            fail(f"{label} policy is too large", 77)
+        with os.fdopen(descriptor, "rb") as stream:
+            descriptor = None
+            data = stream.read(MAX_POLICY_BYTES + 1)
+        if len(data) > MAX_POLICY_BYTES:
+            fail(f"{label} policy is too large", 77)
+        text = data.decode("utf-8")
+    except FileNotFoundError:
+        if required:
+            fail(f"{label} policy file is missing", 78)
+        return []
+    except (OSError, UnicodeError) as exc:
+        fail(f"cannot read {label} policy: {type(exc).__name__}", 77)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    return [line.strip() for line in text.splitlines() if line.strip() and not line.lstrip().startswith("#")]
+
+
 def allowed_log_paths() -> set[Path]:
     configured: set[Path] = set()
-    if PATHS_FILE.is_file():
-        for raw in PATHS_FILE.read_text(encoding="utf-8").splitlines():
-            value = raw.strip()
-            if value and not value.startswith("#") and Path(value).is_absolute():
-                configured.add(Path(value).resolve(strict=False))
+    for value in policy_lines(PATHS_FILE, label="fail2ban paths", required=False):
+        path = Path(value)
+        if not path.is_absolute():
+            fail("fail2ban paths policy contains a non-absolute path", 77)
+        configured.add(path.resolve(strict=False))
     return configured or {path.resolve(strict=False) for path in DEFAULT_LOG_PATHS}
+
+
+def parse_container_names(lines: list[str]) -> set[str]:
+    configured: set[str] = set()
+    for value in lines:
+        if not CONTAINER_RE.fullmatch(value):
+            fail("docker containers policy contains an invalid name", 77)
+        configured.add(value)
+    if not configured:
+        fail("docker containers policy contains no active names", 77)
+    return configured
+
+
+def allowed_container_names() -> set[str]:
+    return parse_container_names(policy_lines(CONTAINERS_FILE, label="docker containers", required=True))
+
+
+def checked_container_name(raw: str, *, allowed: set[str] | None = None) -> str:
+    if not CONTAINER_RE.fullmatch(raw):
+        fail("invalid container name")
+    names = allowed if allowed is not None else allowed_container_names()
+    if raw not in names:
+        fail("container is not allow-listed", 77)
+    return raw
+
+
+def docker_ps_argv(binary: str, *, allowed: set[str] | None = None) -> list[str]:
+    names = allowed if allowed is not None else allowed_container_names()
+    if not names:
+        fail("docker containers policy contains no active names", 77)
+    argv = [binary, "ps", "-a"]
+    for name in sorted(names):
+        # Docker's name filter accepts regular expressions. Container names in
+        # the daemon are prefixed with '/', hence the anchored form below.
+        argv.extend(["--filter", f"name=^/{re.escape(name)}$"])
+    argv.extend(["--format", "{{.Names}}|{{.Status}}"])
+    return argv
+
+
+def docker_inspect_argv(binary: str, raw_name: str, *, allowed: set[str] | None = None) -> list[str]:
+    name = checked_container_name(raw_name, allowed=allowed)
+    return [binary, "inspect", "--type", "container", "--format", SAFE_INSPECT_FORMAT, name]
+
+
+def docker_logs_argv(binary: str, raw_name: str, raw_lines: str, *, allowed: set[str] | None = None) -> list[str]:
+    name = checked_container_name(raw_name, allowed=allowed)
+    lines = checked_int(raw_lines, 1, 1000, "tail lines")
+    return [binary, "logs", "--tail", str(lines), name]
 
 
 def checked_log_path(raw: str) -> Path:
@@ -91,16 +186,15 @@ def main(argv: list[str]) -> int:
 
     if action == "docker-ps" and not args:
         binary = executable("/usr/bin/docker", "/usr/local/bin/docker")
-        exec_command([binary, "ps", "-a", "--format", "{{.Names}}|{{.Status}}"])
+        exec_command(docker_ps_argv(binary))
 
-    if action == "docker-inspect" and len(args) == 1 and CONTAINER_RE.fullmatch(args[0]):
+    if action == "docker-inspect" and len(args) == 1:
         binary = executable("/usr/bin/docker", "/usr/local/bin/docker")
-        exec_command([binary, "inspect", args[0]])
+        exec_command(docker_inspect_argv(binary, args[0]))
 
-    if action == "docker-logs" and len(args) == 2 and CONTAINER_RE.fullmatch(args[0]):
-        lines = checked_int(args[1], 1, 1000, "tail lines")
+    if action == "docker-logs" and len(args) == 2:
         binary = executable("/usr/bin/docker", "/usr/local/bin/docker")
-        exec_command([binary, "logs", "--tail", str(lines), args[0]])
+        exec_command(docker_logs_argv(binary, args[0], args[1]))
 
     if action == "file-tail" and len(args) in {2, 3}:
         path = checked_log_path(args[0])
@@ -119,6 +213,21 @@ def main(argv: list[str]) -> int:
         path = checked_log_path(args[0])
         stat = path.stat()
         print(f"{stat.st_size}|{int(stat.st_mtime)}|{stat.st_dev}|{stat.st_ino}")
+        return 0
+
+    if action == "file-read-meta" and len(args) == 3:
+        path = checked_log_path(args[0])
+        offset = checked_int(args[1], 0, 2**63 - 1, "offset")
+        limit = checked_int(args[2], 1, MAX_READ_BYTES, "read limit")
+        with path.open("rb") as handle:
+            before = os.fstat(handle.fileno())
+            handle.seek(offset)
+            data = handle.read(limit)
+            after = os.fstat(handle.fileno())
+        if before.st_dev != after.st_dev or before.st_ino != after.st_ino or after.st_size < before.st_size:
+            fail("file changed during read", 75)
+        header = f"{after.st_size}|{int(after.st_mtime)}|{after.st_dev}|{after.st_ino}\n"
+        sys.stdout.buffer.write(header.encode("ascii") + base64.b64encode(data))
         return 0
 
     if action == "file-read" and len(args) == 3:

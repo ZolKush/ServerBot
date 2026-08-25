@@ -100,6 +100,40 @@ def test_unknown_secret_key_is_rejected_without_exposing_its_value(
     assert marker not in str(captured.value)
 
 
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        (
+            "BOT_TOKEN=first\nBOT_TOKEN=second\nADMIN_PASSWORD=admin-password-long-enough\n"
+            "OWNER_PASSWORD=owner-password-long-enough\n",
+            "Повторяющийся ключ.*BOT_TOKEN",
+        ),
+        (
+            'BOT_TOKEN=token\nADMIN_PASSWORD="unterminated\nOWNER_PASSWORD=owner-password-long-enough\n',
+            "Некорректный синтаксис",
+        ),
+        (
+            "BOT_TOKEN=token\nADMIN_PASSWORD=admin-password-long-enough\n"
+            "OWNER_PASSWORD=owner-password-long-enough\nUNKNOWN_KEY=\n",
+            "UNKNOWN_KEY",
+        ),
+    ],
+)
+def test_secret_file_rejects_duplicates_syntax_errors_and_empty_unknown_keys(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    payload: str,
+    message: str,
+) -> None:
+    path = tmp_path / "secrets.env"
+    path.write_text(payload, encoding="utf-8")
+    for key in ("BOT_TOKEN", "ADMIN_PASSWORD", "OWNER_PASSWORD"):
+        monkeypatch.delenv(key, raising=False)
+
+    with pytest.raises(RuntimeError, match=message):
+        load_required_secrets(path)
+
+
 def test_remnawave_credentials_must_be_configured_as_a_pair(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

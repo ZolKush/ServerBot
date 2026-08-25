@@ -49,6 +49,12 @@ def migrate_v4_to_split(
     """
 
     root = Path(data_root).resolve()
+    _ensure_explicit_sources_are_backed_up(
+        root,
+        user_path=user_path,
+        important_path=important_path,
+        ptb_path=ptb_path,
+    )
     backend = SplitJsonBackend(root, failpoint=failpoint)
     if dry_run:
         return _dry_run(
@@ -176,6 +182,27 @@ def _optional_source(
         important_path=important_path,
         ptb_path=ptb_path,
     )
+
+
+def _ensure_explicit_sources_are_backed_up(
+    root: Path,
+    *,
+    user_path: Path | None,
+    important_path: Path | None,
+    ptb_path: Path | None,
+) -> None:
+    for label, selected in (
+        ("user_path", user_path),
+        ("important_path", important_path),
+        ("ptb_path", ptb_path),
+    ):
+        if selected is None:
+            continue
+        resolved = Path(selected).resolve()
+        if root not in resolved.parents:
+            raise MigrationError(
+                f"explicit {label} must be inside DATA_DIR so the verified backup includes it: {resolved}"
+            )
 
 
 def _existing_report(

@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import contextlib
 from datetime import timedelta
-from pathlib import Path
 
 from telegram import Update
 from telegram.ext import (
@@ -12,7 +10,6 @@ from telegram.ext import (
     ApplicationBuilder,
     CallbackQueryHandler,
     MessageHandler,
-    PicklePersistence,
     TypeHandler,
 )
 
@@ -24,11 +21,13 @@ from ..config import (
     NAVIGATION_RETENTION_HOURS,
     PTB_PERSISTENCE_PATH,
     SERVER_KEY_PATTERN,
+    SERVERS,
     logger,
 )
 from ..messaging.message_cleanup import MessageCleanupStats, MessageTracker, TrackingExtBot
 from ..messaging.review_navigation import retire_review_card_for_navigation
 from ..monitoring.remnawave.client import close_metrics_client
+from ..monitoring.status.reconciliation import reconcile_configured_servers
 from ..runtime.lock import ALREADY_RUNNING_EXIT_CODE, InstanceAlreadyRunning, SingleInstanceLock
 from ..subscriptions.requests.flow_cleanup import abandon_product_flow
 from .conversations import reset_navigation_state
@@ -36,21 +35,8 @@ from .easter_eggs import RANEPA_TEXT, ranepa_easter_egg
 from .errors import blocked_user_guard, fallback_text, on_error, unhandled_callback
 from .flow_routes import PRIVATE_TEXT
 from .jobs import register_jobs
+from .persistence import build_atomic_persistence
 from .routes import register_routes
-
-
-def _build_persistence(path: str) -> PicklePersistence:
-    persistence_path = Path(path)
-    persistence_dir = persistence_path.parent
-    persistence_dir.mkdir(parents=True, exist_ok=True)
-    with contextlib.suppress(OSError):
-        persistence_dir.chmod(0o700)
-    if persistence_path.exists():
-        if not persistence_path.is_file():
-            raise RuntimeError(f"PTB_PERSISTENCE_PATH не является файлом: {persistence_path}")
-        with contextlib.suppress(OSError):
-            persistence_path.chmod(0o600)
-    return PicklePersistence(filepath=str(persistence_path))
 
 
 def _log_message_cleanup(stats: MessageCleanupStats, *, reason: str) -> None:
@@ -80,7 +66,7 @@ async def _post_shutdown(_application: Application) -> None:
 def build_application(*, bot_mode: str = BOT_MODE) -> Application:
     """Build the complete PTB application without starting network polling."""
     if not BOT_TOKEN:
-        raise RuntimeError("Не задан BOT_TOKEN в app/env.secrets, app/.env или переменных окружения")
+        raise RuntimeError("Не задан BOT_TOKEN в app/env.secrets или переменных окружения")
 
     message_tracker = MessageTracker(
         enabled=NAVIGATION_CLEANUP_ENABLED,
@@ -90,6 +76,22 @@ def build_application(*, bot_mode: str = BOT_MODE) -> Application:
 
     async def post_init(application: Application) -> None:
         message_tracker.bind(application.bot_data)
+        try:
+            removed = await reconcile_configured_servers(SERVERS)
+        except Exception:
+            logger.exception(
+                "Could not reconcile monitoring cache with configured servers",
+                extra={"action": "monitoring_cache_reconcile_failed"},
+            )
+        else:
+            total_removed = sum(removed.values())
+            if total_removed:
+                logger.info(
+                    "Removed %s stale monitoring cache records: %s",
+                    total_removed,
+                    removed,
+                    extra={"action": "monitoring_cache_reconciled", "total": total_removed},
+                )
         if not NAVIGATION_CLEANUP_ENABLED:
             return
         try:
@@ -116,7 +118,7 @@ def build_application(*, bot_mode: str = BOT_MODE) -> Application:
     application: Application = (
         ApplicationBuilder()
         .bot(bot)
-        .persistence(_build_persistence(PTB_PERSISTENCE_PATH))
+        .persistence(build_atomic_persistence(PTB_PERSISTENCE_PATH))
         .post_init(post_init)
         .post_shutdown(_post_shutdown)
         .build()

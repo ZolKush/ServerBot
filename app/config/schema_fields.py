@@ -1,20 +1,20 @@
 from __future__ import annotations
 
-from pydantic import Field
-from pydantic_settings import BaseSettings
+from pydantic import BaseModel, ConfigDict, Field
 
 from .locations import ROOT_DIR
 
 
-class SettingsFields(BaseSettings):
-    """Non-secret process settings loaded from ``app/.env``."""
+class SettingsFields(BaseModel):
+    """Non-secret process settings loaded from ``data/conf/bot.json``."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, str_strip_whitespace=True, hide_input_in_errors=True)
 
     TZ: str = "Europe/Moscow"
     LOG_LEVEL: str = "INFO"
     LOG_JSON: bool = False
 
     DATA_DIR: str = str(ROOT_DIR / "data")
-    SERVER_INVENTORY_FILE: str = "/etc/maintbot/servers.toml"
 
     DNS_RESOLVERS: list[str] = Field(default_factory=lambda: ["1.1.1.1", "8.8.8.8", "77.88.8.8"])
     DNS_DAILY_REFRESH_AT: str = "03:05"

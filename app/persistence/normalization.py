@@ -21,6 +21,9 @@ SERVICE_REQUEST_STATUSES = {
     "rejected",
     "cancelled",
 }
+OUTBOX_RECIPIENT_STATUSES = frozenset(
+    {"pending", "delivered_pending_registration", "delivered", "terminal", "dead_letter"}
+)
 
 
 def normalize_bool(value: Any, truthy: set[str]) -> bool:
@@ -198,7 +201,7 @@ def normalize_outbox(raw: Any) -> dict[str, dict[str, Any]]:
                 continue
             state = dict(raw_state) if isinstance(raw_state, dict) else {}
             status = str(state.get("status") or "pending")
-            if status not in {"pending", "delivered", "terminal"}:
+            if status not in OUTBOX_RECIPIENT_STATUSES:
                 status = "pending"
             try:
                 attempts = max(0, int(state.get("attempts", 0) or 0))
@@ -212,6 +215,9 @@ def normalize_outbox(raw: Any) -> dict[str, dict[str, Any]]:
                 "next_attempt_at": str(state.get("next_attempt_at") or ""),
                 "last_error": str(state.get("last_error") or "")[:500],
                 "delivered_at": str(state.get("delivered_at") or ""),
+                "delivered_chat_id": optional_int(state.get("delivered_chat_id")),
+                "delivered_message_id": optional_int(state.get("delivered_message_id")),
+                "dead_lettered_at": str(state.get("dead_lettered_at") or ""),
             }
         if not clean_recipients:
             continue
@@ -341,6 +347,7 @@ def normalize_docker_status(raw: Any) -> dict[str, dict[str, Any]]:
         result[server_key] = {
             "updated_at": optional_text(raw_item.get("updated_at"), limit=80),
             "containers": containers,
+            "_config_fingerprint": optional_text(raw_item.get("_config_fingerprint"), limit=64),
         }
     return result
 
@@ -348,6 +355,9 @@ def normalize_docker_status(raw: Any) -> dict[str, dict[str, Any]]:
 __all__ = [
     "ACCESS_STATES",
     "ADMIN_LEVELS",
+    "OUTBOX_RECIPIENT_STATUSES",
+    "SERVICE_REQUEST_KINDS",
+    "SERVICE_REQUEST_STATUSES",
     "SERVICE_TIERS",
     "normalize_audit_log",
     "normalize_bool",

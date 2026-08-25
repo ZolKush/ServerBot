@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import os
 import shutil
 import uuid
@@ -119,15 +118,4 @@ def _validate_existing_backup(
             raise MigrationError(f"backup checksum mismatch: {relative_path}")
 
 
-def remove_incomplete_backups(backup_root: Path) -> None:
-    """Remove only abandoned migration-owned incomplete backup directories."""
-
-    if not backup_root.exists():
-        return
-    for path in backup_root.iterdir():
-        if path.is_dir() and path.name.startswith(".pre-split-v4-") and ".incomplete-" in path.name:
-            with contextlib.suppress(OSError):
-                shutil.rmtree(path)
-
-
-__all__ = ["BACKUP_MANIFEST_FILE", "create_verified_backup", "remove_incomplete_backups"]
+__all__ = ["BACKUP_MANIFEST_FILE", "create_verified_backup"]

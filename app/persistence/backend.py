@@ -8,7 +8,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .errors import SchemaError, StorageConflictError
+from .errors import CommittedTransactionError, SchemaError, StorageConflictError
 from .io import decode_json, resolve_inside
 from .layout import LAYOUT_FILE, STORE_SPECS, default_store_data
 from .locking import StateLock
@@ -53,16 +53,23 @@ class SplitJsonBackend:
         with StateLock(self.data_root):
             return self._transactions.recover_all()
 
-    def inspect(self) -> BackendSnapshot:
-        """Read and verify a stable layout without writes or recovery.
+    def verify_recovery(self) -> list[str]:
+        """Read-only validation that pending redo/cleanup can complete safely."""
 
-        This method intentionally takes no lock and is meant for read-only
-        preflight/dry-run commands. Runtime callers should use ``snapshot``.
+        return self._transactions.validate_pending()
+
+    def inspect(self) -> BackendSnapshot:
+        """Read and verify a stable layout without recovery or data writes.
+
+        The same process/file lock as commits prevents a check-then-load race,
+        but pending journals are never applied. Runtime callers should use
+        ``snapshot`` when recovery is permitted.
         """
 
-        if self._transactions.has_pending_transactions():
-            raise StorageConflictError("pending transaction requires recovery before read-only inspection")
-        return self._load()
+        with StateLock(self.data_root):
+            if self._transactions.has_pending_transactions():
+                raise StorageConflictError("pending transaction requires recovery before read-only inspection")
+            return self._load()
 
     def snapshot(self) -> BackendSnapshot:
         with StateLock(self.data_root):
@@ -122,7 +129,7 @@ class SplitJsonBackend:
                 base_revision=0,
                 target_revision=1,
             )
-            return self._load()
+            return self._load_committed(tx_id)
 
     def commit(
         self,
@@ -175,7 +182,7 @@ class SplitJsonBackend:
                 base_revision=current.revision,
                 target_revision=current.revision + 1,
             )
-            return self._load()
+            return self._load_committed(tx_id)
 
     def unit_of_work(self) -> JsonUnitOfWork:
         from .unit_of_work import JsonUnitOfWork
@@ -209,6 +216,12 @@ class SplitJsonBackend:
         payload = path.read_bytes()
         raw = decode_json(payload, source=str(path))
         return parse_store_document(name, raw, payload)
+
+    def _load_committed(self, transaction_id: str) -> BackendSnapshot:
+        try:
+            return self._load()
+        except Exception as exc:
+            raise CommittedTransactionError(transaction_id) from exc
 
 
 def _snapshot_from_documents(

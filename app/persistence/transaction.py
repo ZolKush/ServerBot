@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .errors import RecoveryError, SchemaError, StorageConflictError
+from .errors import PreparedTransactionError, RecoveryError, SchemaError, StorageConflictError
 from .io import (
     encode_json,
     read_json,
@@ -112,17 +112,26 @@ class TransactionCoordinator:
             )
             write_bytes_durable(tx_root / _JOURNAL_FILE, _encode_journal(journal), exclusive=True)
             prepared = True
-            self._hit("after_prepare")
-            self._install(tx_root, journal)
+            try:
+                self._hit("after_prepare")
+                self._install(tx_root, journal)
+            except Exception:
+                # PREPARED is the durable commit point.  A normal, recoverable
+                # filesystem error after it must not be reported as an aborted
+                # mutation: retry redo once while the state lock is still held.
+                # If redo still cannot finish, expose a distinct outcome so a
+                # caller cannot safely interpret the operation as retryable.
+                try:
+                    self._install(tx_root, journal, recovering=True)
+                except Exception as recovery_error:
+                    raise PreparedTransactionError(tx_id) from recovery_error
             return tx_id
         finally:
             if not prepared:
                 _remove_transaction_tree(tx_root)
 
     def recover_all(self) -> list[str]:
-        if not self.transactions_root.exists():
-            return []
-        transaction_dirs = sorted(path for path in self.transactions_root.iterdir() if path.is_dir())
+        transaction_dirs = self._transaction_directories()
         prepared: list[tuple[Path, TransactionJournal]] = []
         recovered: list[str] = []
         for tx_root in transaction_dirs:
@@ -134,6 +143,7 @@ class TransactionCoordinator:
             if journal.transaction_id != tx_root.name:
                 raise RecoveryError(f"transaction id/path mismatch in {journal_path}")
             if journal.state == "COMMITTED":
+                self._validate_committed_targets(journal)
                 _remove_transaction_tree(tx_root)
                 continue
             prepared.append((tx_root, journal))
@@ -148,10 +158,42 @@ class TransactionCoordinator:
             self.transactions_root.rmdir()
         return recovered
 
+    def validate_pending(self) -> list[str]:
+        """Verify, without writes, that every pending transaction is recoverable."""
+
+        transaction_dirs = self._transaction_directories()
+        prepared: list[tuple[Path, TransactionJournal]] = []
+        pending: list[str] = []
+        for tx_root in transaction_dirs:
+            journal_path = tx_root / _JOURNAL_FILE
+            pending.append(tx_root.name)
+            if not journal_path.exists():
+                # Recovery can safely remove debris created before PREPARED.
+                continue
+            journal = _parse_journal(read_json(journal_path))
+            if journal.transaction_id != tx_root.name:
+                raise RecoveryError(f"transaction id/path mismatch in {journal_path}")
+            if journal.state == "COMMITTED":
+                self._validate_committed_targets(journal)
+                continue
+            prepared.append((tx_root, journal))
+        if len(prepared) > 1:
+            ids = [journal.transaction_id for _, journal in prepared]
+            raise RecoveryError(f"multiple prepared transactions require manual recovery: {ids}")
+        if prepared:
+            self._preflight_install(*prepared[0], recovering=True)
+        return pending
+
     def has_pending_transactions(self) -> bool:
+        return bool(self._transaction_directories())
+
+    def _transaction_directories(self) -> list[Path]:
         if not self.transactions_root.exists():
-            return False
-        return any(path.is_dir() for path in self.transactions_root.iterdir())
+            return []
+        try:
+            return sorted(path for path in self.transactions_root.iterdir() if path.is_dir())
+        except OSError as exc:
+            raise RecoveryError(f"cannot inspect transaction directory {self.transactions_root}: {exc}") from exc
 
     def _install(
         self,
@@ -160,20 +202,8 @@ class TransactionCoordinator:
         *,
         recovering: bool = False,
     ) -> None:
-        ordinary = [item for item in journal.files if not item.manifest]
-        manifests = [item for item in journal.files if item.manifest]
-        if len(manifests) != 1 or manifests[0].target != LAYOUT_FILE:
-            raise RecoveryError("prepared transaction has no unique layout manifest")
-        for item in [*ordinary, *manifests]:
-            target = resolve_inside(self.data_root, item.target)
-            staged = resolve_inside(tx_root, item.staged)
-            if target.exists() and sha256_file(target) == item.sha256:
-                continue
-            if not staged.exists() or sha256_file(staged) != item.sha256:
-                phase = "recovery" if recovering else "commit"
-                raise RecoveryError(
-                    f"{phase} cannot install {item.target}: neither target nor staging has the expected content"
-                )
+        installs = self._preflight_install(tx_root, journal, recovering=recovering)
+        for item, target, staged in installs:
             replace_durable(staged, target)
             self._hit(f"after_install:{item.target}")
         self._hit("after_manifest")
@@ -191,9 +221,64 @@ class TransactionCoordinator:
         with contextlib.suppress(OSError):
             self.transactions_root.rmdir()
 
+    def _preflight_install(
+        self,
+        tx_root: Path,
+        journal: TransactionJournal,
+        *,
+        recovering: bool,
+    ) -> list[tuple[FileInstall, Path, Path]]:
+        ordinary = [item for item in journal.files if not item.manifest]
+        manifests = [item for item in journal.files if item.manifest]
+        if len(manifests) != 1 or manifests[0].target != LAYOUT_FILE:
+            raise RecoveryError("prepared transaction has no unique layout manifest")
+        installs: list[tuple[FileInstall, Path, Path]] = []
+        targets: set[Path] = set()
+        staged_paths: set[Path] = set()
+        for item in [*ordinary, *manifests]:
+            target = resolve_inside(self.data_root, item.target)
+            staged = resolve_inside(tx_root, item.staged)
+            if target in targets:
+                raise RecoveryError(f"transaction journal aliases target path: {item.target}")
+            if staged in staged_paths:
+                raise RecoveryError(f"transaction journal aliases staged path: {item.staged}")
+            targets.add(target)
+            staged_paths.add(staged)
+            if _matches_checksum(target, item.sha256, label=item.target):
+                continue
+            if not _matches_checksum(staged, item.sha256, label=item.staged):
+                phase = "recovery" if recovering else "commit"
+                raise RecoveryError(
+                    f"{phase} cannot install {item.target}: neither target nor staging has the expected content"
+                )
+            installs.append((item, target, staged))
+        return installs
+
+    def _validate_committed_targets(self, journal: TransactionJournal) -> None:
+        manifests = [item for item in journal.files if item.manifest]
+        if len(manifests) != 1 or manifests[0].target != LAYOUT_FILE:
+            raise RecoveryError("committed transaction has no unique layout manifest")
+        targets: set[Path] = set()
+        for item in journal.files:
+            target = resolve_inside(self.data_root, item.target)
+            if target in targets:
+                raise RecoveryError(f"transaction journal aliases target path: {item.target}")
+            targets.add(target)
+            if not _matches_checksum(target, item.sha256, label=item.target):
+                raise RecoveryError(
+                    f"committed transaction {journal.transaction_id} has an invalid target: {item.target}"
+                )
+
     def _hit(self, name: str) -> None:
         if self.failpoint is not None:
             self.failpoint(name)
+
+
+def _matches_checksum(path: Path, expected: str, *, label: str) -> bool:
+    try:
+        return path.is_file() and sha256_file(path) == expected
+    except OSError as exc:
+        raise RecoveryError(f"cannot verify transaction file {label}: {exc}") from exc
 
 
 def _encode_journal(journal: TransactionJournal) -> bytes:
@@ -239,6 +324,7 @@ def _parse_journal(raw: Any) -> TransactionJournal:
         raise RecoveryError("transaction journal has no files")
     files: list[FileInstall] = []
     targets: set[str] = set()
+    staged_paths: set[str] = set()
     for raw_file in raw_files:
         if not isinstance(raw_file, dict) or set(raw_file) != _FILE_KEYS:
             raise RecoveryError("transaction journal contains an invalid file entry")
@@ -251,6 +337,12 @@ def _parse_journal(raw: Any) -> TransactionJournal:
         if target in targets:
             raise RecoveryError(f"transaction journal repeats target: {target}")
         targets.add(target)
+        expected_staged = str(Path("staged") / target).replace("\\", "/")
+        if staged != expected_staged:
+            raise RecoveryError(f"transaction journal has a non-canonical staged path for {target}")
+        if staged in staged_paths:
+            raise RecoveryError(f"transaction journal repeats staged path: {staged}")
+        staged_paths.add(staged)
         if not isinstance(digest, str) or len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
             raise RecoveryError(f"invalid transaction checksum for {target}")
         if not isinstance(manifest, bool):

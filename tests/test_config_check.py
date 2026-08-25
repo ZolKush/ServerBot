@@ -5,6 +5,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from app import config
 from app.config.checks import _check_split_storage
 from app.config.servers import ServerTarget
@@ -13,6 +15,10 @@ from app.persistence.backend import SplitJsonBackend
 from app.persistence.layout import default_store_data
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+class SimulatedCrash(BaseException):
+    pass
 
 
 def test_config_check_rejects_malformed_or_non_object_json(tmp_path: Path) -> None:
@@ -47,13 +53,13 @@ def test_config_check_rejects_insecure_ssh_host_key_mode(monkeypatch) -> None:
     assert "SSH_STRICT_HOST_KEY_CHECKING должен быть yes для удалённых серверов" in errors
 
 
-def test_config_check_requires_readable_server_inventory(tmp_path: Path, monkeypatch) -> None:
-    missing = tmp_path / "missing-servers.toml"
-    monkeypatch.setattr(config, "SERVER_INVENTORY_FILE", str(missing))
+def test_config_check_requires_readable_server_directory(tmp_path: Path, monkeypatch) -> None:
+    missing = tmp_path / "missing-servers"
+    monkeypatch.setattr(config, "SERVER_CONFIG_DIR", missing)
 
     errors = validate_configuration()
 
-    assert any("SERVER_INVENTORY_FILE: файл не найден" in error for error in errors)
+    assert any("SERVER_CONFIG_DIR: каталог не найден" in error for error in errors)
 
 
 def test_config_check_requires_migrated_split_layout(tmp_path: Path) -> None:
@@ -76,11 +82,32 @@ def test_config_check_rejects_multiple_owners_across_split_access_store(tmp_path
     assert any("несколько руководителей" in error for error in errors)
 
 
+def test_config_check_allows_a_verified_pending_redo_for_launcher_recovery(tmp_path: Path) -> None:
+    root = tmp_path / "data"
+    SplitJsonBackend(root).bootstrap()
+
+    def crash(name: str) -> None:
+        if name == "after_prepare":
+            raise SimulatedCrash
+
+    backend = SplitJsonBackend(root, failpoint=crash)
+    with backend.unit_of_work() as uow:
+        uow.profiles.put(42, {"user_id": 42})
+        with pytest.raises(SimulatedCrash):
+            uow.commit()
+
+    assert _check_split_storage(str(root)) == []
+    assert SplitJsonBackend(root).has_pending_transactions() is True
+
+
 def test_config_check_cli_catches_inventory_import_failure_without_traceback(tmp_path: Path) -> None:
-    inventory = tmp_path / "broken-servers.toml"
-    inventory.write_text("version = [broken", encoding="utf-8")
+    config_dir = tmp_path / "conf"
+    server_dir = config_dir / "servers"
+    server_dir.mkdir(parents=True)
+    (config_dir / "bot.json").write_text(config.BOT_CONFIG_FILE.read_text(encoding="utf-8"), encoding="utf-8")
+    (server_dir / "broken.json").write_text("{broken", encoding="utf-8")
     env = os.environ.copy()
-    env.update({"PYTHONUTF8": "1", "SERVER_INVENTORY_FILE": str(inventory)})
+    env.update({"PYTHONUTF8": "1", "MAINTBOT_CONFIG_DIR": str(config_dir)})
 
     result = subprocess.run(
         [sys.executable, "-m", "app.config_check"],

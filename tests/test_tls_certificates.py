@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import ssl
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -140,21 +141,17 @@ async def test_tls_endpoint_distinguishes_expiring_and_not_yet_valid(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     now = datetime.now(timezone.utc)
-
-    async def _trusted(domain: str, port: int) -> tuple[bool, None]:
-        return True, None
-
-    monkeypatch.setattr(tls_checks, "_verify_certificate_trust", _trusted)
     expiring_der = _certificate_der(
         "vpn.example.com",
         not_before=now - timedelta(days=1),
         not_after=now + timedelta(days=2),
     )
+    current_der = expiring_der
 
-    async def _fetch_expiring(domain: str, port: int) -> bytes:
-        return expiring_der
+    async def _fetch_with_trust(domain: str, port: int) -> tuple[bytes, bool, None]:
+        return current_der, True, None
 
-    monkeypatch.setattr(tls_checks, "_fetch_der_certificate", _fetch_expiring)
+    monkeypatch.setattr(tls_checks, "_fetch_der_with_trust", _fetch_with_trust)
     expiring = await tls_checks.check_tls_endpoint("vpn.example.com", 443, ["main"])
 
     assert expiring["status"] == "expiring"
@@ -166,15 +163,46 @@ async def test_tls_endpoint_distinguishes_expiring_and_not_yet_valid(
         not_before=now + timedelta(days=1),
         not_after=now + timedelta(days=10),
     )
-
-    async def _fetch_future(domain: str, port: int) -> bytes:
-        return future_der
-
-    monkeypatch.setattr(tls_checks, "_fetch_der_certificate", _fetch_future)
+    current_der = future_der
     future = await tls_checks.check_tls_endpoint("vpn.example.com", 443, ["main"])
 
     assert future["status"] == "invalid"
     assert "ещё не начался" in future["error"]
+
+
+@pytest.mark.asyncio
+async def test_tls_analyzes_certificate_from_the_verified_handshake(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(timezone.utc)
+    unverified_backend_der = _certificate_der(
+        "other.example.com",
+        not_before=now - timedelta(days=1),
+        not_after=now + timedelta(days=30),
+    )
+    verified_backend_der = _certificate_der(
+        "vpn.example.com",
+        not_before=now - timedelta(days=1),
+        not_after=now + timedelta(days=30),
+    )
+    handshakes: list[ssl.VerifyMode] = []
+
+    async def _open_tls(domain: str, port: int, context: ssl.SSLContext) -> bytes:
+        handshakes.append(context.verify_mode)
+        if context.verify_mode == ssl.CERT_REQUIRED:
+            return verified_backend_der
+        return unverified_backend_der
+
+    monkeypatch.setattr(tls_checks, "_open_tls", _open_tls)
+
+    result = await tls_checks.check_tls_endpoint("vpn.example.com", 443, ["main"])
+
+    expected = x509.load_der_x509_certificate(verified_backend_der)
+    assert handshakes == [ssl.CERT_REQUIRED]
+    assert result["fingerprint"] == expected.fingerprint(hashes.SHA256()).hex()
+    assert result["hostname_valid"] is True
+    assert result["trust_valid"] is True
+    assert result["status"] == "ok"
 
 
 @pytest.mark.asyncio

@@ -1,4 +1,4 @@
-"""One-shot migration from legacy positional .env server fields to TOML."""
+"""Legacy stage 1: convert positional .env server fields to intermediate TOML."""
 
 from __future__ import annotations
 
@@ -11,7 +11,29 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
-from dotenv import dotenv_values
+from dotenv.parser import parse_stream
+
+
+def _load_legacy_env(path: Path) -> dict[str, str]:
+    if not path.is_file():
+        raise ValueError(f"legacy env is not a regular file: {path}")
+    result: dict[str, str] = {}
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as stream:
+            for binding in parse_stream(stream):
+                if binding.error:
+                    raise ValueError(f"legacy env has invalid syntax at line {binding.original.line}")
+                if binding.key is None:
+                    continue
+                key = str(binding.key)
+                if key in result:
+                    raise ValueError(f"legacy env has duplicate key: {key}")
+                if binding.value is None:
+                    raise ValueError(f"legacy env key has no assigned value: {key}")
+                result[key] = str(binding.value)
+    except UnicodeError as exc:
+        raise ValueError(f"legacy env is not valid UTF-8: {path}") from exc
+    return result
 
 
 def _list(raw: object, *, keep_empty: bool = False) -> list[str]:
@@ -284,7 +306,7 @@ def main() -> int:
     parser.add_argument("--tls-fallback", action="append", default=[], metavar="HOST:PORT")
     args = parser.parse_args()
     try:
-        raw = {str(key): str(value) for key, value in dotenv_values(args.env).items() if value is not None}
+        raw = _load_legacy_env(args.env)
         servers = migrate(raw, fallbacks=_fallback_map(args.tls_fallback))
         args.output.parent.mkdir(parents=True, exist_ok=True)
         _write_exclusive(args.output, render(servers))
@@ -292,7 +314,7 @@ def main() -> int:
         print(f"Ошибка миграции: {_safe_migration_error(exc, args.output)}", file=sys.stderr)
         return 1
     print(f"Created {args.output} with {len(servers)} server blocks.")
-    print("Now set SERVER_INVENTORY_FILE, move Remnawave credentials to env.secrets, and remove legacy server keys.")
+    print("Next run tools/migrate_config_layout.py with this TOML; MaintBot does not read TOML at runtime.")
     return 0
 
 

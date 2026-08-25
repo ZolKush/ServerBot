@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -125,3 +126,45 @@ async def test_unified_refresh_updates_dns_and_forces_primary_metrics_once(monke
     await status_handlers._refresh_status_screen(SimpleNamespace(callback_query=Query()), server_key=server.key)
 
     assert calls == {"dns": 1, "metrics": 1, "saved": 1, "invalidated": 1}
+
+
+@pytest.mark.asyncio
+async def test_unified_refresh_cancels_all_parallel_work_with_handler(monkeypatch) -> None:
+    server = _server()
+    dns_started = asyncio.Event()
+    metrics_started = asyncio.Event()
+    dns_cancelled = asyncio.Event()
+    metrics_cancelled = asyncio.Event()
+
+    async def _blocked(started: asyncio.Event, cancelled: asyncio.Event):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    async def _dns(_server):
+        return await _blocked(dns_started, dns_cancelled)
+
+    async def _metrics(*, force_refresh: bool = False):
+        assert force_refresh is True
+        return await _blocked(metrics_started, metrics_cancelled)
+
+    class Query:
+        async def answer(self, *_args, **_kwargs):
+            return None
+
+    monkeypatch.setattr(status_handlers, "get_server_target", lambda _key: server)
+    monkeypatch.setattr(status_handlers, "build_dns_status_payload_live", _dns)
+    monkeypatch.setattr(status_handlers, "get_metrics_snapshot", _metrics)
+
+    task = asyncio.create_task(
+        status_handlers._refresh_status_screen(SimpleNamespace(callback_query=Query()), server_key=server.key)
+    )
+    await asyncio.gather(dns_started.wait(), metrics_started.wait())
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert dns_cancelled.is_set()
+    assert metrics_cancelled.is_set()

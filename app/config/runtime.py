@@ -6,14 +6,14 @@ import shutil
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from .locations import BASE_DIR, ENV_FILE, ROOT_DIR, SECRETS_ENV_FILE
+from .locations import BASE_DIR, BOT_CONFIG_FILE, CONFIG_DIR, ROOT_DIR, SECRETS_ENV_FILE, SERVER_CONFIG_DIR
 from .parsing import resolve_bin, resolve_path
-from .schema import AppSettings
+from .schema import AppSettings, load_app_settings
 from .secrets import load_required_secrets
-from .servers import ServerTarget, TLSEndpoint, load_servers
+from .servers import ServerTarget, TLSEndpoint, load_servers, server_monitoring_fingerprint
 from .validators import SERVER_KEY_PATTERN
 
-SETTINGS = AppSettings()
+SETTINGS: AppSettings = load_app_settings(BOT_CONFIG_FILE)
 SECRETS = load_required_secrets(SECRETS_ENV_FILE)
 
 BOT_TOKEN = SECRETS.BOT_TOKEN
@@ -24,8 +24,7 @@ TZ_NAME = SETTINGS.TZ.strip() or "Europe/Moscow"
 TZ = ZoneInfo(TZ_NAME)
 
 DATA_DIR = resolve_path(SETTINGS.DATA_DIR, ROOT_DIR)
-SERVER_INVENTORY_FILE = resolve_path(SETTINGS.SERVER_INVENTORY_FILE, ROOT_DIR)
-SERVERS: dict[str, ServerTarget] = load_servers(SERVER_INVENTORY_FILE, timezone_name=TZ_NAME)
+SERVERS: dict[str, ServerTarget] = load_servers(SERVER_CONFIG_DIR, timezone_name=TZ_NAME)
 BOT_MODE = "mixed" if any(server.monitoring_source == "remnawave" for server in SERVERS.values()) else "ssh"
 
 DNS_RESOLVERS = list(SETTINGS.DNS_RESOLVERS)
@@ -81,7 +80,7 @@ REMNAWAVE_METRICS_MAX_BYTES = int(SETTINGS.REMNAWAVE_METRICS_MAX_BYTES)
 REMNAWAVE_HIDDEN_UUIDS = list(SETTINGS.REMNAWAVE_HIDDEN_UUIDS)
 DAILY_NODE_STATUS_REFRESH_AT = SETTINGS.DAILY_NODE_STATUS_REFRESH_AT
 if BOT_MODE == "mixed" and not REMNAWAVE_METRICS_URL:
-    raise RuntimeError("SERVER_INVENTORY_FILE uses monitoring.source='remnawave', but REMNAWAVE_METRICS_URL is empty")
+    raise RuntimeError("a server JSON uses monitoring.source='remnawave', but REMNAWAVE_METRICS_URL is empty")
 
 SSH_STRICT_HOST_KEY_CHECKING = (SETTINGS.SSH_STRICT_HOST_KEY_CHECKING or "").strip() or "yes"
 SSH_KNOWN_HOSTS_FILE = (
@@ -99,15 +98,16 @@ __all__ = [
     "AUTH_MAX_FAILS_IN_WINDOW",
     "AUTH_PRUNE_INTERVAL_SEC",
     "BASE_DIR",
+    "BOT_CONFIG_FILE",
     "BOT_MODE",
     "BOT_TOKEN",
+    "CONFIG_DIR",
     "DAILY_NODE_STATUS_REFRESH_AT",
     "DATA_DIR",
     "DNS_DAILY_REFRESH_AT",
     "DNS_RESOLVERS",
     "DNS_STARTUP_REFRESH_DELAY_SEC",
     "DOCKER_BIN",
-    "ENV_FILE",
     "ERROR_NOTIFY_INTERVAL_SEC",
     "FAIL2BAN_DAILY_AT",
     "FAIL2BAN_DIGEST_MAX_BYTES",
@@ -134,7 +134,7 @@ __all__ = [
     "ROOT_DIR",
     "SECRETS",
     "SECRETS_ENV_FILE",
-    "SERVER_INVENTORY_FILE",
+    "SERVER_CONFIG_DIR",
     "SERVER_KEY_PATTERN",
     "SERVERS",
     "SETTINGS",
@@ -152,4 +152,5 @@ __all__ = [
     "TZ",
     "TZ_NAME",
     "UFW_BIN",
+    "server_monitoring_fingerprint",
 ]

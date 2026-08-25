@@ -63,6 +63,24 @@ def _check_private_data_permissions(path_value: str, field_name: str) -> list[st
     return errors
 
 
+def _check_operator_config_permissions(path_value: str, field_name: str) -> list[str]:
+    """Allow owner/group reads while forbidding group writes and all other access."""
+
+    if os.name == "nt":
+        return []
+    path = Path(path_value)
+    if not path.exists():
+        return []
+    try:
+        mode = stat.S_IMODE(path.stat().st_mode)
+    except OSError as exc:
+        return [f"{field_name}: не удалось проверить права доступа: {path} ({exc})"]
+    forbidden = 0o027 if path.is_dir() else 0o037
+    if mode & forbidden:
+        return [f"{field_name}: конфигурация не должна быть доступна остальным или изменяема группой: {path}"]
+    return []
+
+
 def _check_json_object(path_value: str, field_name: str) -> list[str]:
     """Validate a JSON object without rewriting it."""
     path = Path(path_value)
@@ -96,20 +114,26 @@ def _check_split_storage(data_dir: str) -> list[str]:
             f"DATA_DIR: split-layout v1 не найден ({root / LAYOUT_FILE}); "
             "сначала выполните python -m app.persistence.migration"
         ]
+    pending = backend.has_pending_transactions()
     try:
-        snapshot = backend.inspect()
+        if pending:
+            backend.verify_recovery()
+            snapshot = None
+        else:
+            snapshot = backend.inspect()
     except (PersistenceError, OSError, UnicodeError, ValueError) as exc:
         return [f"DATA_DIR: split-layout v1 повреждён или требует recovery: {exc}"]
 
-    grants = snapshot.data("access.grants")
-    owners = sum(
-        1
-        for meta in grants.values()
-        if isinstance(meta, dict) and meta.get("role") == "admin" and meta.get("admin_level") == "owner"
-    )
     errors: list[str] = []
-    if owners > 1:
-        errors.append("DATA_DIR: найдено несколько руководителей сервиса")
+    if snapshot is not None:
+        grants = snapshot.data("access.grants")
+        owners = sum(
+            1
+            for meta in grants.values()
+            if isinstance(meta, dict) and meta.get("role") == "admin" and meta.get("admin_level") == "owner"
+        )
+        if owners > 1:
+            errors.append("DATA_DIR: найдено несколько руководителей сервиса")
     errors.extend(_check_private_data_permissions(str(root / LAYOUT_FILE), "DATA_DIR"))
     for spec in STORE_SPECS.values():
         errors.extend(_check_private_data_permissions(str(root / spec.relative_path), spec.name))
@@ -120,26 +144,44 @@ def validate_configuration() -> list[str]:
     # Resolve the public package at call time so diagnostic tests and one-shot
     # deployment checks can safely override settings.
     from . import (
+        BOT_CONFIG_FILE,
         BOT_TOKEN,
         DATA_DIR,
         INSTANCE_LOCK_PATH,
         PRIVILEGED_HELPER_BIN,
         PTB_PERSISTENCE_PATH,
-        SERVER_INVENTORY_FILE,
+        SERVER_CONFIG_DIR,
         SERVERS,
         SSH_IDENTITY_FILE,
         SSH_KNOWN_HOSTS_FILE,
         SSH_STRICT_HOST_KEY_CHECKING,
         SUDO_BIN,
     )
-    from .locations import ENV_FILE, SECRETS_ENV_FILE
+    from .locations import SECRETS_ENV_FILE
 
     errors: list[str] = []
     if ":" not in BOT_TOKEN or len(BOT_TOKEN) < 20:
         errors.append("BOT_TOKEN: значение не похоже на токен Telegram")
     if not SERVERS:
         errors.append("не настроено ни одного сервера")
-    errors.extend(_readable_file(SERVER_INVENTORY_FILE, "SERVER_INVENTORY_FILE"))
+    errors.extend(_readable_file(str(BOT_CONFIG_FILE), "BOT_CONFIG_FILE"))
+    server_dir = Path(SERVER_CONFIG_DIR)
+    server_files: list[Path] = []
+    if not server_dir.is_dir():
+        errors.append(f"SERVER_CONFIG_DIR: каталог не найден: {server_dir}")
+    elif not os.access(server_dir, os.R_OK | os.X_OK):
+        errors.append(f"SERVER_CONFIG_DIR: каталог недоступен для чтения: {server_dir}")
+    else:
+        try:
+            server_files = sorted(
+                (path for path in server_dir.iterdir() if path.suffix.lower() == ".json"),
+                key=lambda path: (path.name.casefold(), path.name),
+            )
+        except OSError as exc:
+            errors.append(f"SERVER_CONFIG_DIR: не удалось прочитать каталог {server_dir}: {exc}")
+        else:
+            for server_file in server_files:
+                errors.extend(_readable_file(str(server_file), f"SERVER_CONFIG_DIR/{server_file.name}"))
     for key, server in SERVERS.items():
         if server.mode == "ssh" and not server.ssh_target:
             errors.append(f"SERVERS[{key}]: отсутствует SSH target")
@@ -173,7 +215,11 @@ def validate_configuration() -> list[str]:
     errors.extend(_check_private_data_permissions(PTB_PERSISTENCE_PATH, "PTB_PERSISTENCE_PATH"))
 
     if os.name != "nt":
-        for path, name in ((ENV_FILE, "ENV_PATH"), (SECRETS_ENV_FILE, "SECRETS_ENV_PATH")):
+        errors.extend(_check_operator_config_permissions(str(BOT_CONFIG_FILE), "BOT_CONFIG_FILE"))
+        errors.extend(_check_operator_config_permissions(str(SERVER_CONFIG_DIR), "SERVER_CONFIG_DIR"))
+        for server_file in server_files:
+            errors.extend(_check_operator_config_permissions(str(server_file), f"SERVER_CONFIG_DIR/{server_file.name}"))
+        for path, name in ((SECRETS_ENV_FILE, "SECRETS_ENV_PATH"),):
             if path.exists() and stat.S_IMODE(path.stat().st_mode) & 0o007:
                 errors.append(f"{name}: env-файл не должен быть доступен остальным пользователям: {path}")
     return list(dict.fromkeys(errors))

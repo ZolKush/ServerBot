@@ -39,7 +39,12 @@ def run_application(*, instance_lock: SingleInstanceLock | None = None) -> None:
 
 
 def main() -> None:
-    run_application()
+    # Keep every process entry point on the same startup path.  Importing the
+    # launcher lazily preserves this module's side-effect-free import contract
+    # while ensuring storage recovery happens only after the instance lock.
+    from app.launcher import main as launch
+
+    launch()
 
 
 if __name__ == "__main__":

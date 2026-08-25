@@ -1,10 +1,11 @@
-"""Safely migrate legacy MaintBot dotenv files to the canonical split layout.
+"""Legacy stage 1: normalize old MaintBot dotenv files before JSON migration.
 
-The canonical public and secret key sets come from ``app/.env.example`` and
+The intermediate public and secret key sets come from ``app/.env.example`` and
 ``app/env.secrets.example``.  Server-specific legacy keys are accepted only so
 they can be discarded after ``migrate_server_inventory.py`` has produced the
-TOML inventory.  Output files are always created exclusively; this tool never
-overwrites an existing file.
+intermediate TOML inventory.  Output files are always created exclusively; this
+tool never overwrites an existing file.  Finish with ``migrate_config_layout.py``;
+MaintBot no longer reads the generated public dotenv or TOML at runtime.
 """
 
 from __future__ import annotations
@@ -348,8 +349,9 @@ def main() -> int:
         )
     except (MigrationError, OSError) as exc:
         parser.error(str(exc))
-    print(f"Created canonical public env: {args.output_env}")
-    print(f"Created canonical secret env: {args.output_secrets}")
+    print(f"Created intermediate public env: {args.output_env}")
+    print(f"Created secret env: {args.output_secrets}")
+    print("Next run tools/migrate_config_layout.py; MaintBot does not read the public env at runtime.")
     return 0
 
 

@@ -1,6 +1,6 @@
-# Copy to /etc/maintbot/servers.toml and edit as root.
-# Each server is self-contained: adding a node means copying one [servers.*]
-# block instead of editing several position-dependent .env lists.
+# LEGACY MIGRATION INPUT ONLY. The runtime scans data/conf/servers/*.json;
+# use deploy/conf/servers/*.json as current examples. This TOML file remains
+# available only as input for tools/migrate_config_layout.py when upgrading.
 version = 1
 
 [servers.main]

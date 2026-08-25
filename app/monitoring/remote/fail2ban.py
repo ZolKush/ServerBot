@@ -16,7 +16,7 @@ from ...config import (
     TZ,
     logger,
 )
-from ..fail2ban.models import Fail2banEvent, FileIdentity
+from ..fail2ban.models import Fail2banEvent, FileIdentity, FileIdentityChangedError, FileRangeRead
 from ..fail2ban.parser import parse_fail2ban_events
 from .transport import ssh_run_shell
 
@@ -103,9 +103,14 @@ async def remote_read_text_range(
     path: str,
     offset: int,
     max_bytes: int,
-) -> tuple[str, int]:
+    *,
+    expected_identity: FileIdentity | None = None,
+) -> FileRangeRead:
     offset = max(0, int(offset))
     limit = max(1, min(int(max_bytes), 3_000_000))
+    before = await remote_fail2ban_identity(ssh_target, path)
+    if before is None or (expected_identity is not None and not before.same_file_as(expected_identity)):
+        raise FileIdentityChangedError(f"remote fail2ban log changed before read: {path}")
     quoted, sudo_bin, helper_bin = _file_access_commands(path)
     direct = f"tail -c +{offset + 1} -- {quoted} | head -c {limit}"
     privileged = f"{sudo_bin} -n {helper_bin} file-read {quoted} {offset} {limit}"
@@ -123,7 +128,7 @@ async def remote_read_text_range(
         max_output_bytes=encoded_limit,
     )
     if stdout.startswith("__FNF__"):
-        raise FileNotFoundError(path)
+        raise FileIdentityChangedError(f"remote fail2ban log disappeared during read: {path}")
     if return_code != 0:
         raise RuntimeError((stderr or "remote file read failed").strip())
     try:
@@ -132,7 +137,14 @@ async def remote_read_text_range(
         raise RuntimeError("invalid base64 from remote file reader") from exc
     if len(data) > limit:
         raise RuntimeError("remote file reader exceeded requested byte limit")
-    return data.decode("utf-8", errors="replace"), len(data)
+    after = await remote_fail2ban_identity(ssh_target, path)
+    if after is None or not before.same_file_as(after) or after.size < before.size:
+        raise FileIdentityChangedError(f"remote fail2ban log changed during read: {path}")
+    return FileRangeRead(
+        text=data.decode("utf-8", errors="replace"),
+        consumed=len(data),
+        identity=after,
+    )
 
 
 async def remote_fail2ban_events(

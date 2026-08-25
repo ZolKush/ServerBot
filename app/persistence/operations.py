@@ -48,6 +48,9 @@ def make_outbox_event(
                 "next_attempt_at": now,
                 "last_error": "",
                 "delivered_at": "",
+                "delivered_chat_id": None,
+                "delivered_message_id": None,
+                "dead_lettered_at": "",
             }
             for uid in sorted(valid_ids)
         },

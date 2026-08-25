@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Collection
-from datetime import timedelta
+from collections.abc import Awaitable, Collection
 from typing import Any
 
 from telegram.constants import ParseMode
@@ -19,6 +18,7 @@ from .review_refs import (
     remove_review_reference,
     review_completion,
 )
+from .telegram_rate import extend_flood_gate, retry_after_seconds, wait_flood_gate
 
 
 async def record_review_delivery(
@@ -26,37 +26,31 @@ async def record_review_delivery(
     completion: object,
     recipient_id: int,
     message: Any,
-) -> None:
+) -> bool:
     """Attach a delivered outbox message to its canonical request generation."""
 
     delivery = await register_review_reference(completion, recipient_id, message)
     if delivery is None:
-        return
+        return True
     scope, target_id, chat_id, message_id, registered = delivery
     if registered:
         if scope == "access":
-            await refresh_access_review_message(bot, target_id, recipient_id, chat_id, message_id)
+            result = await refresh_access_review_message(bot, target_id, recipient_id, chat_id, message_id)
         else:
-            await refresh_service_review_message(bot, target_id, recipient_id, chat_id, message_id)
-        return
-    await _edit_stale_delivery(bot, chat_id=chat_id, message_id=message_id)
+            result = await refresh_service_review_message(bot, target_id, recipient_id, chat_id, message_id)
+        return result != "retryable"
+    return await _edit_stale_delivery(bot, chat_id=chat_id, message_id=message_id)
 
 
-async def _edit_stale_delivery(bot: Any, *, chat_id: int, message_id: int) -> None:
-    try:
-        await bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=message_id,
-            text="⚠️ Эта карточка относится к уже завершённой или заменённой заявке.",
-            reply_markup=None,
-        )
-    except (BadRequest, Forbidden, NetworkError, RetryAfter, TimedOut):
-        logger.warning(
-            "Could not retire stale review card chat=%s message=%s",
-            chat_id,
-            message_id,
-            extra={"action": "review_card_stale"},
-        )
+async def _edit_stale_delivery(bot: Any, *, chat_id: int, message_id: int) -> bool:
+    result = await _edit_card(
+        bot,
+        chat_id=chat_id,
+        message_id=message_id,
+        text="⚠️ Эта карточка относится к уже завершённой или заменённой заявке.",
+        reply_markup=None,
+    )
+    return result != "retryable"
 
 
 def _is_not_modified(exc: BadRequest) -> bool:
@@ -91,6 +85,7 @@ async def _edit_card(
 ) -> str:
     attempts = 3
     for attempt in range(1, attempts + 1):
+        await wait_flood_gate()
         try:
             await bot.edit_message_text(
                 chat_id=chat_id,
@@ -107,7 +102,18 @@ async def _edit_card(
             error: BaseException = exc
         except Forbidden:
             return "terminal"
-        except (NetworkError, RetryAfter, TimedOut, OSError) as exc:
+        except RetryAfter as exc:
+            delay = retry_after_seconds(exc, minimum=1.0) + 0.5
+            await extend_flood_gate(delay)
+            logger.warning(
+                "Review card refresh rate-limited chat=%s message=%s retry_after=%s",
+                chat_id,
+                message_id,
+                round(delay, 3),
+                extra={"action": "review_card_edit_rate_limited"},
+            )
+            return "retryable"
+        except (NetworkError, TimedOut, OSError) as exc:
             error = exc
         else:
             return "ok"
@@ -127,11 +133,17 @@ async def _edit_card(
 
 
 def _retry_delay(error: BaseException, attempt: int) -> float:
-    if isinstance(error, RetryAfter):
-        raw_delay = error.retry_after
-        seconds = raw_delay.total_seconds() if isinstance(raw_delay, timedelta) else float(raw_delay)
-        return max(0.05, min(seconds, 2.0))
     return 0.2 * attempt
+
+
+async def _run_bounded(tasks: list[Awaitable[Any]], *, limit: int = 4) -> None:
+    semaphore = asyncio.Semaphore(max(1, limit))
+
+    async def run(task: Awaitable[Any]) -> None:
+        async with semaphore:
+            await task
+
+    await asyncio.gather(*(run(task) for task in tasks))
 
 
 async def refresh_access_review_message(
@@ -140,12 +152,12 @@ async def refresh_access_review_message(
     admin_id: int,
     chat_id: int,
     message_id: int,
-) -> None:
+) -> str:
     from ..access.views import access_request_card, access_request_markup
 
     meta = get_user_meta_copy(target_user_id)
     if not isinstance(meta, dict):
-        return
+        return "ok"
     result = await _edit_card(
         bot,
         chat_id=chat_id,
@@ -161,6 +173,7 @@ async def refresh_access_review_message(
             chat_id=chat_id,
             message_id=message_id,
         )
+    return result
 
 
 async def sync_access_review_messages(bot: Any, target_user_id: int) -> None:
@@ -170,6 +183,7 @@ async def sync_access_review_messages(bot: Any, target_user_id: int) -> None:
     refs = meta.get("review_messages")
     if not isinstance(refs, dict):
         return
+    tasks: list[Awaitable[Any]] = []
     for raw_admin_id, raw_refs in list(refs.items()):
         try:
             admin_id = int(raw_admin_id)
@@ -184,7 +198,8 @@ async def sync_access_review_messages(bot: Any, target_user_id: int) -> None:
                 message_id = int(ref.get("message_id", 0) or 0)
             except (TypeError, ValueError, OverflowError):
                 continue
-            await refresh_access_review_message(bot, target_user_id, admin_id, chat_id, message_id)
+            tasks.append(refresh_access_review_message(bot, target_user_id, admin_id, chat_id, message_id))
+    await _run_bounded(tasks)
 
 
 async def refresh_service_review_message(
@@ -193,12 +208,12 @@ async def refresh_service_review_message(
     admin_id: int,
     chat_id: int,
     message_id: int,
-) -> None:
+) -> str:
     from ..subscriptions.requests.views import request_card, request_markup
 
     request = service_requests_snapshot().get(str(request_id))
     if not isinstance(request, dict):
-        return
+        return "ok"
     user_meta = get_user_meta_copy(int(request.get("user_id", 0) or 0)) or {}
     actor_meta = get_user_meta_copy(admin_id) or {}
     markup = request_markup(request, actor_meta) if is_admin_meta(actor_meta) else None
@@ -217,6 +232,7 @@ async def refresh_service_review_message(
             chat_id=chat_id,
             message_id=message_id,
         )
+    return result
 
 
 async def sync_service_review_messages(
@@ -231,6 +247,7 @@ async def sync_service_review_messages(
     refs = request.get("review_messages")
     if not isinstance(refs, dict):
         return
+    tasks: list[Awaitable[Any]] = []
     for raw_admin_id, raw_refs in list(refs.items()):
         try:
             admin_id = int(raw_admin_id)
@@ -247,7 +264,8 @@ async def sync_service_review_messages(
                 continue
             if (chat_id, message_id) in exclude:
                 continue
-            await refresh_service_review_message(bot, request_id, admin_id, chat_id, message_id)
+            tasks.append(refresh_service_review_message(bot, request_id, admin_id, chat_id, message_id))
+    await _run_bounded(tasks)
 
 
 async def sync_service_review_messages_for_user(

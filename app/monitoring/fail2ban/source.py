@@ -13,7 +13,7 @@ from .local import (
     fail2ban_identity_with_sudo_async,
     read_text_range_with_sudo_async,
 )
-from .models import FileIdentity
+from .models import FileIdentity, FileIdentityChangedError, FileRangeRead
 
 
 def get_server(server_key: str) -> ServerTarget:
@@ -61,7 +61,8 @@ async def read_range(
     path: str,
     offset: int,
     limit: int,
-) -> tuple[str, int]:
+    expected_identity: FileIdentity,
+) -> FileRangeRead:
     server = get_server(server_key)
     if server.mode == "ssh":
         return await remote_read_text_range(
@@ -69,8 +70,12 @@ async def read_range(
             path,
             offset,
             limit,
+            expected_identity=expected_identity,
         )
-    return await read_text_range_with_sudo_async(path, offset, limit)
+    result = await read_text_range_with_sudo_async(path, offset, limit)
+    if not result.identity.same_file_as(expected_identity):
+        raise FileIdentityChangedError(f"fail2ban log changed before read: {path}")
+    return result
 
 
 __all__ = ["first_server_key", "get_server", "server_timezone"]

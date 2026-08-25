@@ -13,6 +13,20 @@ class FileIdentity:
     device: int
     inode: int
 
+    def same_file_as(self, other: FileIdentity) -> bool:
+        return self.device == other.device and self.inode == other.inode
+
+
+@dataclass(frozen=True, slots=True)
+class FileRangeRead:
+    text: str
+    consumed: int
+    identity: FileIdentity
+
+
+class FileIdentityChangedError(RuntimeError):
+    """The path stopped referring to the selected log while it was read."""
+
 
 @dataclass(frozen=True, slots=True)
 class Fail2banEvent:
@@ -23,4 +37,9 @@ class Fail2banEvent:
     raw: str
 
 
-__all__ = ["Fail2banEvent", "FileIdentity"]
+__all__ = [
+    "Fail2banEvent",
+    "FileIdentity",
+    "FileIdentityChangedError",
+    "FileRangeRead",
+]

@@ -5,6 +5,12 @@
 **/.env.*
 env.secrets
 **/env.secrets
+env.secrets.*
+**/env.secrets.*
+secrets.env
+**/secrets.env
+*.secrets
+*.secrets.*
 !.env.example
 !**/.env.example
 !env.secrets.example
@@ -12,6 +18,18 @@ env.secrets
 
 # environment-specific server inventory (generated from the legacy .env)
 app/servers.toml
+app/servers.*.toml
+**/servers.toml
+
+# private keys and certificate bundles
+id_rsa
+id_rsa.*
+id_ed25519
+id_ed25519.*
+*.key
+*.pem
+*.p12
+*.pfx
 
 # runtime data
 data/
@@ -23,7 +41,13 @@ venv/
 .mypy_cache/
 .ruff_cache/
 .coverage
+.coverage.*
 htmlcov/
+coverage.xml
+junit.xml
+.hypothesis/
+.tox/
+.nox/
 build/
 dist/
 *.egg-info/
@@ -38,3 +62,9 @@ docs/
 
 # Claude Code local settings
 **/settings.local.json
+
+# editor/OS leftovers and rejected patches
+.DS_Store
+Thumbs.db
+*.orig
+*.rej

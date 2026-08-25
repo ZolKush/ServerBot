@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Awaitable
+from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
@@ -176,30 +178,45 @@ async def _refresh_status_screen(update: Update, *, server_key: str) -> None:
     started = time.monotonic()
     async with lock:
         errors: list[str] = []
-        dns_task = asyncio.create_task(build_dns_status_payload_live(server))
-        metrics_task = (
-            asyncio.create_task(get_metrics_snapshot(force_refresh=True)) if server_uses_metrics(server) else None
-        )
-        try:
-            dns_result = await dns_task
-        except Exception as exc:
-            errors.append(f"DNS: {exc.__class__.__name__}")
+        refreshes: list[Awaitable[Any]] = [build_dns_status_payload_live(server)]
+        use_metrics = server_uses_metrics(server)
+        if use_metrics:
+            refreshes.append(get_metrics_snapshot(force_refresh=True))
+
+        async def capture(awaitable: Awaitable[Any]) -> Any:
+            try:
+                return await awaitable
+            except Exception as exc:
+                return exc
+
+        results = await asyncio.gather(*(capture(refresh) for refresh in refreshes))
+
+        dns_result = results[0]
+        if isinstance(dns_result, Exception):
+            errors.append(f"DNS: {dns_result.__class__.__name__}")
             logger.warning(
                 "Manual status refresh DNS failed server=%s error=%s",
                 server.key,
-                exc,
+                dns_result,
                 extra={"action": "status_refresh_dns_failed", "source": "manual", "server_key": server.key},
             )
         else:
-            await set_dns_status_cache(server.key, dns_result)
-        if metrics_task is not None:
             try:
-                metrics_result = await metrics_task
+                await set_dns_status_cache(server.key, dns_result)
             except Exception as exc:
-                errors.append(f"метрики: {exc.__class__.__name__}")
-            else:
-                if not metrics_result.ok:
-                    errors.append(f"метрики: {html_escape(metrics_result.error or 'ошибка')}")
+                errors.append(f"DNS cache: {exc.__class__.__name__}")
+                logger.warning(
+                    "Manual status refresh DNS cache write failed server=%s error=%s",
+                    server.key,
+                    exc,
+                    extra={"action": "status_refresh_dns_cache_failed", "source": "manual", "server_key": server.key},
+                )
+        if use_metrics:
+            metrics_result = results[1]
+            if isinstance(metrics_result, Exception):
+                errors.append(f"метрики: {metrics_result.__class__.__name__}")
+            elif not metrics_result.ok:
+                errors.append(f"метрики: {html_escape(metrics_result.error or 'ошибка')}")
         invalidate_status_cache(server.key)
         text, markup = await build_status_message(update, server_key=server.key)
         note = ui_error_text("; ".join(errors)) if errors else ui_info_text("Метрики и DNS обновлены.")

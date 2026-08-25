@@ -263,3 +263,42 @@ async def test_docker_cache_refresh_persists_inventory(monkeypatch) -> None:
 
     assert saved["server_key"] == "test"
     assert saved["payload"]["containers"] == [["api", True, "Up 6 hours (healthy)", "-"]]
+
+
+@pytest.mark.asyncio
+async def test_daily_node_refresh_bounds_server_concurrency(monkeypatch) -> None:
+    servers = {
+        f"srv{index}": ServerTarget(
+            key=f"srv{index}",
+            label=f"Server {index}",
+            flag="",
+            mode="ssh",
+            expected_a_ip="",
+            check_a_domains=[],
+            monitor_containers=[],
+            fail2ban_log_path="/var/log/fail2ban.log",
+            ssh_target=f"maintbot@srv{index}.example.com",
+        )
+        for index in range(12)
+    }
+    active = 0
+    peak = 0
+
+    async def fake_collect(_server, *, admin_mode: bool):
+        nonlocal active, peak
+        assert admin_mode is True
+        active += 1
+        peak = max(peak, active)
+        try:
+            await asyncio.sleep(0.01)
+            return {"ok": False}
+        finally:
+            active -= 1
+
+    monkeypatch.setattr(status_jobs, "BOT_MODE", "mixed")
+    monkeypatch.setattr(status_jobs, "SERVERS", servers)
+    monkeypatch.setattr(status_jobs, "collect_disk_ufw", fake_collect)
+
+    await status_jobs.daily_node_status_refresh(SimpleNamespace())
+
+    assert peak == 4

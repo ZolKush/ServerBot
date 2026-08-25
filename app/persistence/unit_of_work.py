@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from types import TracebackType
 from typing import Any, Protocol
 
+from .errors import CommittedTransactionError, PreparedTransactionError
 from .repositories import DocumentRepository, IndexedRepository, ListRepository, MappingRepository
 from .snapshots import BackendSnapshot
 
@@ -110,7 +111,11 @@ class JsonUnitOfWork:
             raise RuntimeError("Unit of Work has already been committed")
         exports = self._exports()
         changes = {store_name: value for store_name, value in exports.items() if value != self._original[store_name]}
-        self._snapshot = self.backend.commit(base_revision=snapshot.revision, changes=changes)
+        try:
+            self._snapshot = self.backend.commit(base_revision=snapshot.revision, changes=changes)
+        except (PreparedTransactionError, CommittedTransactionError):
+            self._committed = True
+            raise
         self._committed = True
 
     async def commit_async(self) -> None:
@@ -131,7 +136,14 @@ class JsonUnitOfWork:
         try:
             self._snapshot = await asyncio.shield(task)
         except asyncio.CancelledError:
-            self._snapshot = await task
+            try:
+                self._snapshot = await task
+            except (PreparedTransactionError, CommittedTransactionError):
+                self._committed = True
+                raise
+            self._committed = True
+            raise
+        except (PreparedTransactionError, CommittedTransactionError):
             self._committed = True
             raise
         else:
