@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import os
 import signal
+import sys
 from collections.abc import Sequence
 
 from ..config import SUBPROC_MAX_OUTPUT_BYTES
@@ -32,7 +33,7 @@ async def _read_limited(stream: asyncio.StreamReader | None, limit: int) -> tupl
 
 
 async def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
-    if os.name != "nt":
+    if sys.platform != "win32":
         killpg = getattr(os, "killpg", None)
         sigkill = getattr(signal, "SIGKILL", 9)
         with contextlib.suppress(ProcessLookupError, PermissionError):
@@ -63,7 +64,7 @@ async def run_exec(
         return 127, "", "empty command"
     limit = max(1024, min(int(max_output_bytes), 10_000_000))
     try:
-        if os.name == "nt":
+        if sys.platform == "win32":
             # Only the process-group creation flag is used; commands still go
             # through asyncio.create_subprocess_exec without a shell.
             import subprocess  # nosec B404

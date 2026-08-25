@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -45,7 +46,7 @@ class StateLock:
                 descriptor = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
                 handle = os.fdopen(descriptor, "r+b", buffering=0)
                 try:
-                    if os.name == "nt":
+                    if sys.platform == "win32":
                         import msvcrt
 
                         if os.fstat(handle.fileno()).st_size < 1:
@@ -80,7 +81,7 @@ class StateLock:
                 self._state.handle = None
                 if handle is not None:
                     try:
-                        if os.name == "nt":
+                        if sys.platform == "win32":
                             import msvcrt
 
                             handle.seek(0)

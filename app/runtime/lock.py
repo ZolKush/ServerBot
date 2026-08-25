@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import errno
 import os
+import sys
 from pathlib import Path
 from typing import IO, Any
 
@@ -38,14 +39,14 @@ class SingleInstanceLock:
             owner = ""
             with contextlib.suppress(OSError):
                 # Byte zero is the Windows lock range; metadata starts at byte one.
-                lock_file.seek(1 if os.name == "nt" else 0)
+                lock_file.seek(1 if sys.platform == "win32" else 0)
                 owner = lock_file.read(32).strip()
             lock_file.close()
             if exc.errno in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
                 raise InstanceAlreadyRunning(self.path, owner) from exc
             raise
 
-        lock_file.seek(1 if os.name == "nt" else 0)
+        lock_file.seek(1 if sys.platform == "win32" else 0)
         lock_file.truncate()
         lock_file.write(str(os.getpid()))
         lock_file.flush()
@@ -54,7 +55,7 @@ class SingleInstanceLock:
 
     @staticmethod
     def _lock_file(lock_file: IO[str]) -> None:
-        if os.name == "nt":
+        if sys.platform == "win32":
             import msvcrt
 
             if os.fstat(lock_file.fileno()).st_size < 1:
@@ -73,7 +74,7 @@ class SingleInstanceLock:
         if lock_file is None:
             return
         try:
-            if os.name == "nt":
+            if sys.platform == "win32":
                 import msvcrt
 
                 lock_file.seek(0)
