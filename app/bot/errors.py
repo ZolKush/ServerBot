@@ -17,7 +17,7 @@ from ..storage import get_user_meta_copy
 from .guards import authorized_ids, is_authorized, is_enabled, reply_need_auth
 from .ui import clip_html_message, html_escape
 
-_LAST_ERROR_NOTIFY_AT = 0.0
+_LAST_ERROR_NOTIFY_AT: float | None = None
 _ERROR_NOTIFY_LOCK: asyncio.Lock | None = None
 
 
@@ -48,12 +48,12 @@ async def on_error(update: object, context) -> None:
     global _LAST_ERROR_NOTIFY_AT
     now = time.monotonic()
     lock = _notification_lock()
-    if lock.locked() or now - _LAST_ERROR_NOTIFY_AT < ERROR_NOTIFY_INTERVAL_SEC:
+    if lock.locked() or (_LAST_ERROR_NOTIFY_AT is not None and now - _LAST_ERROR_NOTIFY_AT < ERROR_NOTIFY_INTERVAL_SEC):
         return
 
     async with lock:
         now = time.monotonic()
-        if now - _LAST_ERROR_NOTIFY_AT < ERROR_NOTIFY_INTERVAL_SEC:
+        if _LAST_ERROR_NOTIFY_AT is not None and now - _LAST_ERROR_NOTIFY_AT < ERROR_NOTIFY_INTERVAL_SEC:
             return
         # Start the cooldown before network fan-out. A total Telegram outage
         # must not turn every handler exception into another notification storm.
