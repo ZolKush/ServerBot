@@ -1,12 +1,12 @@
 {
   "version": 1,
-  "key": "nl",
-  "label": "Netherlands",
-  "flag": "NL",
+  "key": "remote",
+  "label": "Example remote server",
+  "flag": "",
   "display_order": 20,
   "connection": {
     "transport": "ssh",
-    "target": "maintbot@server-nl.example:1606"
+    "target": "maintbot@example-host.example:2222"
   },
   "monitoring": {
     "source": "remnawave",
@@ -17,7 +17,7 @@
   },
   "domains": [
     {
-      "host": "nextfiles.example.com",
+      "host": "remote-service.example.com",
       "checks": ["dns", "tls"],
       "tls_primary_port": 443,
       "tls_fallback_ports": []
@@ -30,11 +30,11 @@
     }
   ],
   "docker": {
-    "containers": ["remnanode", "remnawave-nginx"]
+    "containers": ["example-node", "example-proxy"]
   },
   "fail2ban": {
     "enabled": true,
     "log_path": "/var/log/fail2ban.log",
-    "timezone": "Europe/Amsterdam"
+    "timezone": "UTC"
   }
 }

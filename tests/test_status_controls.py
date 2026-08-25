@@ -36,7 +36,7 @@ def test_status_shows_only_one_ssh_fallback_when_primary_monitoring_failed() -> 
 def _server() -> ServerTarget:
     return ServerTarget(
         key="nl",
-        label="Netherlands",
+        label="Example remote server",
         flag="🇳🇱",
         mode="ssh",
         expected_a_ip="",

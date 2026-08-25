@@ -117,8 +117,8 @@ def test_privileged_docker_commands_are_allowlisted_and_inspect_is_redacted() ->
 def test_server_inventory_examples_are_valid_and_document_tls_fallback() -> None:
     inventory = load_inventory_directory(ROOT / "examples" / "conf" / "servers")
 
-    assert list(inventory) == ["main", "nl"]
-    fallback = next(item for item in inventory["nl"].domains if item.host == "tls-fallback.example.com")
+    assert list(inventory) == ["local", "remote"]
+    fallback = next(item for item in inventory["remote"].domains if item.host == "tls-fallback.example.com")
     assert fallback.tls_primary_port == 443
     assert fallback.tls_fallback_ports == [8443]
 
@@ -129,8 +129,14 @@ def test_configuration_examples_use_only_reserved_network_identifiers() -> None:
         ip_network(cidr) for cidr in ("192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24")
     )
 
+    assert {path.name for path in example_dir.glob("*.json")} == {
+        "local-example.json",
+        "remote-example.json",
+    }
     for path in example_dir.glob("*.json"):
         document = json.loads(path.read_text(encoding="utf-8"))
+        assert document["key"] in {"local", "remote"}
+        assert document["label"].startswith("Example ")
         target = document["connection"]["target"]
         if target:
             target_host = target.rsplit("@", 1)[-1].rsplit(":", 1)[0]

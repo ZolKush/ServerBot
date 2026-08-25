@@ -140,7 +140,7 @@ def test_repeated_long_docker_ssh_error_is_bounded_and_deduplicated_in_reports()
     containers = [DockerContainerView(f"container-{index}", False, long_error, "-") for index in range(30)]
 
     main_text = format_status_message(make_snapshot(containers=containers))
-    report_text = format_docker_report("Netherlands", containers, updated_at="07.08 23:13")
+    report_text = format_docker_report("Example remote server", containers, updated_at="07.08 23:13")
 
     for text in (main_text, report_text):
         assert len(text) < 4096
@@ -195,7 +195,7 @@ def test_full_tls_report_is_separate_and_shows_fallback_metadata() -> None:
         last_success_at="2026-08-07T23:13:31+00:00",
     )
 
-    text = format_tls_report("Netherlands", [certificate])
+    text = format_tls_report("Example remote server", [certificate])
 
     assert "tls-fallback.example.com:8443" in text
     assert "основной <code>443</code> → fallback <code>8443</code>" in text

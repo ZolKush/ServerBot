@@ -3,51 +3,51 @@
 # available only as input for tools/migrate_config_layout.py when upgrading.
 version = 1
 
-[servers.main]
-label = "Main server"
-flag = "DE"
+[servers.local]
+label = "Example local server"
+flag = ""
 
-[servers.main.connection]
+[servers.local.connection]
 transport = "local"
 
-[servers.main.monitoring]
+[servers.local.monitoring]
 source = "system"
 
-[servers.main.dns]
+[servers.local.dns]
 expected_a_ip = "192.0.2.10"
 
-[[servers.main.domains]]
-host = "main.example.com"
+[[servers.local.domains]]
+host = "local-service.example.com"
 checks = ["dns", "tls"]
 tls_primary_port = 443
 tls_fallback_ports = []
 
-[servers.main.docker]
-containers = ["remnawave", "remnawave-db"]
+[servers.local.docker]
+containers = ["example-app", "example-db"]
 
-[servers.main.fail2ban]
+[servers.local.fail2ban]
 enabled = true
 log_path = "/var/log/fail2ban.log"
-timezone = "Europe/Berlin"
+timezone = "UTC"
 
 
-[servers.nl]
-label = "Netherlands"
-flag = "NL"
+[servers.remote]
+label = "Example remote server"
+flag = ""
 
-[servers.nl.connection]
+[servers.remote.connection]
 transport = "ssh"
-target = "maintbot@server-nl.example:1606"
+target = "maintbot@example-host.example:2222"
 
-[servers.nl.monitoring]
+[servers.remote.monitoring]
 source = "remnawave"
 node_uuid = "00000000-0000-0000-0000-000000000001"
 
-[servers.nl.dns]
+[servers.remote.dns]
 expected_a_ip = "192.0.2.20"
 
-[[servers.nl.domains]]
-host = "nextfiles.example.com"
+[[servers.remote.domains]]
+host = "remote-service.example.com"
 checks = ["dns", "tls"]
 tls_primary_port = 443
 tls_fallback_ports = []
@@ -55,16 +55,16 @@ tls_fallback_ports = []
 # Only this endpoint tries 8443, and only after a transport/TLS-handshake
 # failure on 443. An invalid or expired certificate obtained on 443 is never
 # hidden by the fallback.
-[[servers.nl.domains]]
+[[servers.remote.domains]]
 host = "tls-fallback.example.com"
 checks = ["dns", "tls"]
 tls_primary_port = 443
 tls_fallback_ports = [8443]
 
-[servers.nl.docker]
-containers = ["remnanode", "remnawave-nginx"]
+[servers.remote.docker]
+containers = ["example-node", "example-proxy"]
 
-[servers.nl.fail2ban]
+[servers.remote.fail2ban]
 enabled = true
 log_path = "/var/log/fail2ban.log"
-timezone = "Europe/Amsterdam"
+timezone = "UTC"

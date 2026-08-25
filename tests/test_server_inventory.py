@@ -15,7 +15,7 @@ def _server(*, key: str = "nl", transport: str = "ssh") -> dict[str, object]:
     return {
         "version": 1,
         "key": key,
-        "label": "Netherlands",
+        "label": "Example remote server",
         "flag": "NL",
         "display_order": 20 if key == "nl" else 10,
         "connection": {"transport": transport, "target": target},
