@@ -41,7 +41,7 @@ def test_migration_creates_bot_file_and_one_json_per_server(tmp_path: Path) -> N
     count = migrate(
         env_path=env,
         inventory_path=inventory,
-        template_path=ROOT / "deploy" / "conf" / "bot.json",
+        template_path=ROOT / "examples" / "conf" / "bot.json",
         output_dir=output,
     )
 
@@ -67,7 +67,7 @@ def test_migration_refuses_to_overwrite_output(tmp_path: Path) -> None:
         migrate(
             env_path=env,
             inventory_path=inventory,
-            template_path=ROOT / "deploy" / "conf" / "bot.json",
+            template_path=ROOT / "examples" / "conf" / "bot.json",
             output_dir=output,
         )
 
@@ -91,7 +91,7 @@ def test_migration_rolls_back_partial_directory(tmp_path: Path, monkeypatch: pyt
         migrate(
             env_path=env,
             inventory_path=inventory,
-            template_path=ROOT / "deploy" / "conf" / "bot.json",
+            template_path=ROOT / "examples" / "conf" / "bot.json",
             output_dir=output,
         )
 
@@ -106,7 +106,7 @@ def test_migration_rejects_duplicate_or_secret_env_keys(tmp_path: Path) -> None:
         migrate(
             env_path=env,
             inventory_path=inventory,
-            template_path=ROOT / "deploy" / "conf" / "bot.json",
+            template_path=ROOT / "examples" / "conf" / "bot.json",
             output_dir=tmp_path / "first",
         )
 
@@ -115,7 +115,7 @@ def test_migration_rejects_duplicate_or_secret_env_keys(tmp_path: Path) -> None:
         migrate(
             env_path=env,
             inventory_path=inventory,
-            template_path=ROOT / "deploy" / "conf" / "bot.json",
+            template_path=ROOT / "examples" / "conf" / "bot.json",
             output_dir=tmp_path / "second",
         )
 

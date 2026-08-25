@@ -1,5 +1,5 @@
 # LEGACY MIGRATION INPUT ONLY. The runtime scans data/conf/servers/*.json;
-# use deploy/conf/servers/*.json as current examples. This TOML file remains
+# use examples/conf/servers/*.json as current examples. This TOML file remains
 # available only as input for tools/migrate_config_layout.py when upgrading.
 version = 1
 
@@ -56,7 +56,7 @@ tls_fallback_ports = []
 # failure on 443. An invalid or expired certificate obtained on 443 is never
 # hidden by the fallback.
 [[servers.nl.domains]]
-host = "zeronet-monitor.embeddedcontrolsinc.com"
+host = "tls-fallback.example.com"
 checks = ["dns", "tls"]
 tls_primary_port = 443
 tls_fallback_ports = [8443]

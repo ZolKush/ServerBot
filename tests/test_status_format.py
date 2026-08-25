@@ -184,7 +184,7 @@ def test_tls_details_are_admin_only() -> None:
 
 def test_full_tls_report_is_separate_and_shows_fallback_metadata() -> None:
     certificate = TLSCertificateView(
-        domain="zeronet-monitor.embeddedcontrolsinc.com",
+        domain="tls-fallback.example.com",
         port=8443,
         primary_port=443,
         fallback_ports=(8443,),
@@ -197,6 +197,6 @@ def test_full_tls_report_is_separate_and_shows_fallback_metadata() -> None:
 
     text = format_tls_report("Netherlands", [certificate])
 
-    assert "zeronet-monitor.embeddedcontrolsinc.com:8443" in text
+    assert "tls-fallback.example.com:8443" in text
     assert "основной <code>443</code> → fallback <code>8443</code>" in text
     assert "один раз в неделю" in text

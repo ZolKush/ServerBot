@@ -26,7 +26,7 @@ def _server(*, key: str = "nl", transport: str = "ssh") -> dict[str, object]:
         "dns": {"expected_a_ip": "192.0.2.10"},
         "domains": [
             {
-                "host": "ZERONET-MONITOR.EMBEDDEDCONTROLSINC.COM.",
+                "host": "TLS-FALLBACK.EXAMPLE.COM.",
                 "checks": ["dns", "tls"],
                 "tls_primary_port": 443,
                 "tls_fallback_ports": [8443],
@@ -60,7 +60,7 @@ def test_inventory_scans_arbitrarily_named_json_files_in_stable_order(tmp_path: 
     server = servers["nl"]
     assert server.ssh_target == "maintbot@example.com:1606"
     assert server.monitoring_source == "remnawave"
-    assert server.check_a_domains == ["zeronet-monitor.embeddedcontrolsinc.com"]
+    assert server.check_a_domains == ["tls-fallback.example.com"]
     assert server.monitor_containers == ["remnanode", "remnawave-nginx"]
     assert server.tls_endpoints[0].primary_port == 443
     assert server.tls_endpoints[0].fallback_ports == (8443,)

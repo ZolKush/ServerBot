@@ -23,7 +23,7 @@
       "tls_fallback_ports": []
     },
     {
-      "host": "zeronet-monitor.embeddedcontrolsinc.com",
+      "host": "tls-fallback.example.com",
       "checks": ["dns", "tls"],
       "tls_primary_port": 443,
       "tls_fallback_ports": [8443]

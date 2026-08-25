@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import runpy
+from ipaddress import ip_address, ip_network
 from pathlib import Path
 
 import pytest
@@ -114,9 +115,27 @@ def test_privileged_docker_commands_are_allowlisted_and_inspect_is_redacted() ->
 
 
 def test_server_inventory_examples_are_valid_and_document_tls_fallback() -> None:
-    inventory = load_inventory_directory(ROOT / "deploy" / "conf" / "servers")
+    inventory = load_inventory_directory(ROOT / "examples" / "conf" / "servers")
 
     assert list(inventory) == ["main", "nl"]
-    zeronet = next(item for item in inventory["nl"].domains if item.host.startswith("zeronet-monitor"))
-    assert zeronet.tls_primary_port == 443
-    assert zeronet.tls_fallback_ports == [8443]
+    fallback = next(item for item in inventory["nl"].domains if item.host == "tls-fallback.example.com")
+    assert fallback.tls_primary_port == 443
+    assert fallback.tls_fallback_ports == [8443]
+
+
+def test_configuration_examples_use_only_reserved_network_identifiers() -> None:
+    example_dir = ROOT / "examples" / "conf" / "servers"
+    documentation_networks = tuple(
+        ip_network(cidr) for cidr in ("192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24")
+    )
+
+    for path in example_dir.glob("*.json"):
+        document = json.loads(path.read_text(encoding="utf-8"))
+        target = document["connection"]["target"]
+        if target:
+            target_host = target.rsplit("@", 1)[-1].rsplit(":", 1)[0]
+            assert target_host.endswith(".example")
+
+        expected_ip = ip_address(document["dns"]["expected_a_ip"])
+        assert any(expected_ip in network for network in documentation_networks)
+        assert all(domain["host"].endswith(".example.com") for domain in document["domains"])

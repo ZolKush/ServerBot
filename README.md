@@ -130,8 +130,8 @@ python3 -m venv .venv
 .venv/bin/python -m pip install -r app/requirements.txt
 cp app/env.secrets.example app/env.secrets
 mkdir -p data/conf/servers
-cp deploy/conf/bot.json data/conf/bot.json
-cp deploy/conf/servers/*.json data/conf/servers/
+cp examples/conf/bot.json data/conf/bot.json
+cp examples/conf/servers/*.json data/conf/servers/
 ```
 
 В `app/env.secrets` обязательны:
@@ -269,9 +269,9 @@ sudo /opt/maintbot/.venv/bin/python -m pip install -r /opt/maintbot/app/requirem
 sudo install -d -o root -g maintbot -m 0750 \
   /opt/maintbot/data/conf /opt/maintbot/data/conf/servers
 sudo install -o root -g maintbot -m 0640 \
-  /opt/maintbot/deploy/conf/bot.json /opt/maintbot/data/conf/bot.json
+  /opt/maintbot/examples/conf/bot.json /opt/maintbot/data/conf/bot.json
 sudo install -o root -g maintbot -m 0640 \
-  /opt/maintbot/deploy/conf/servers/*.json /opt/maintbot/data/conf/servers/
+  /opt/maintbot/examples/conf/servers/*.json /opt/maintbot/data/conf/servers/
 sudo chown root:maintbot /opt/maintbot/app/env.secrets
 sudo chmod 0640 /opt/maintbot/app/env.secrets
 ```
@@ -412,7 +412,7 @@ GitHub Actions повторяет обязательные проверки на
 .venv/bin/python -m pip_audit -r app/requirements.txt
 ```
 
-`pyproject.toml`, тесты, `app/requirements-dev.txt` и обезличенные примеры `deploy/conf/` должны находиться под
+`pyproject.toml`, тесты, `app/requirements-dev.txt` и обезличенные примеры `examples/conf/` должны находиться под
 контролем Git. `data/`, env-файлы, legacy production inventory, SSH-ключи, IDE/cache/build-артефакты и локальная
 `docs/` исключены через `.gitignore`. `app/.env.example` и `deploy/servers.toml.example` оставлены только для
 двухэтапной миграции старых установок и не являются текущей runtime-конфигурацией.

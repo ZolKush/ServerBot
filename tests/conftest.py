@@ -17,7 +17,7 @@ _TEST_CONFIG_DIR = _TEST_ROOT / "conf"
 _TEST_SERVER_DIR = _TEST_CONFIG_DIR / "servers"
 _TEST_SERVER_DIR.mkdir(parents=True)
 _BOT_CONFIG = json.loads(
-    (Path(__file__).resolve().parents[1] / "deploy" / "conf" / "bot.json").read_text(encoding="utf-8")
+    (Path(__file__).resolve().parents[1] / "examples" / "conf" / "bot.json").read_text(encoding="utf-8")
 )
 _BOT_CONFIG.update(
     {

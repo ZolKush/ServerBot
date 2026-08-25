@@ -226,7 +226,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--env", type=Path, default=Path("app/.env"))
     parser.add_argument("--inventory", type=Path, default=Path("app/servers.toml"))
-    parser.add_argument("--template", type=Path, default=Path("deploy/conf/bot.json"))
+    parser.add_argument("--template", type=Path, default=Path("examples/conf/bot.json"))
     parser.add_argument("--output-dir", type=Path, default=Path("data/conf"))
     args = parser.parse_args()
     try:
