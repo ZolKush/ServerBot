@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "maintbot"
+version = "0.1.0"
+description = "Telegram bot that monitors local and remote servers and manages maintenance, tickets, broadcasts."
+requires-python = ">=3.10"
+dependencies = [
+    "python-telegram-bot[job-queue]==22.8",
+    "python-dotenv==1.2.3",
+    "aiodns==4.0.4",
+    "httpx==0.28.1",
+    "cryptography==50.0.0",
+    "openpyxl==3.1.5",
+    "pydantic==2.13.4",
+    "tzdata==2026.3",
+    "tomli==2.4.1; python_version < '3.11'",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.1.1",
+    "pytest-asyncio==1.4.0",
+    "ruff==0.15.21",
+    "mypy==2.3.0",
+    "bandit==1.9.4",
+    "pip-audit==2.10.1",
+    "vulture==2.16",
+    "types-openpyxl==3.1.5.20260807",
+]
+
+[project.scripts]
+maintbot = "app.launcher:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP", "B", "SIM"]
+# SIM108: принудительные тернарники на длинных выражениях читаются хуже if/else
+ignore = ["SIM108"]
+
+[tool.mypy]
+python_version = "3.10"
+files = ["app"]

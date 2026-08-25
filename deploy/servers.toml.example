@@ -1,0 +1,70 @@
+# LEGACY MIGRATION INPUT ONLY. The runtime scans data/conf/servers/*.json;
+# use examples/conf/servers/*.json as current examples. This TOML file remains
+# available only as input for tools/migrate_config_layout.py when upgrading.
+version = 1
+
+[servers.local]
+label = "Example local server"
+flag = ""
+
+[servers.local.connection]
+transport = "local"
+
+[servers.local.monitoring]
+source = "system"
+
+[servers.local.dns]
+expected_a_ip = "192.0.2.10"
+
+[[servers.local.domains]]
+host = "local-service.example.com"
+checks = ["dns", "tls"]
+tls_primary_port = 443
+tls_fallback_ports = []
+
+[servers.local.docker]
+containers = ["example-app", "example-db"]
+
+[servers.local.fail2ban]
+enabled = true
+log_path = "/var/log/fail2ban.log"
+timezone = "UTC"
+
+
+[servers.remote]
+label = "Example remote server"
+flag = ""
+
+[servers.remote.connection]
+transport = "ssh"
+target = "maintbot@example-host.example:2222"
+
+[servers.remote.monitoring]
+source = "remnawave"
+node_uuid = "00000000-0000-0000-0000-000000000001"
+
+[servers.remote.dns]
+expected_a_ip = "192.0.2.20"
+
+[[servers.remote.domains]]
+host = "remote-service.example.com"
+checks = ["dns", "tls"]
+tls_primary_port = 443
+tls_fallback_ports = []
+
+# Only this endpoint tries 8443, and only after a transport/TLS-handshake
+# failure on 443. An invalid or expired certificate obtained on 443 is never
+# hidden by the fallback.
+[[servers.remote.domains]]
+host = "tls-fallback.example.com"
+checks = ["dns", "tls"]
+tls_primary_port = 443
+tls_fallback_ports = [8443]
+
+[servers.remote.docker]
+containers = ["example-node", "example-proxy"]
+
+[servers.remote.fail2ban]
+enabled = true
+log_path = "/var/log/fail2ban.log"
+timezone = "UTC"

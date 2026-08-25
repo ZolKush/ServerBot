@@ -1,10 +1,26 @@
 from __future__ import annotations
 
-from .config import INSTANCE_LOCK_PATH, logger
-from .single_instance import ALREADY_RUNNING_EXIT_CODE, InstanceAlreadyRunning, SingleInstanceLock
+from .config import (
+    ADMIN_PASSWORD,
+    BOT_TOKEN,
+    DATA_DIR,
+    INSTANCE_LOCK_PATH,
+    LOG_JSON,
+    LOG_LEVEL,
+    OWNER_PASSWORD,
+    REMNAWAVE_METRICS_PASS,
+)
+from .runtime.lock import ALREADY_RUNNING_EXIT_CODE, InstanceAlreadyRunning, SingleInstanceLock
+from .runtime.logging import configure_logging, logger
 
 
 def main() -> None:
+    configure_logging(
+        level=LOG_LEVEL,
+        use_json=LOG_JSON,
+        force=True,
+        secrets=(BOT_TOKEN, ADMIN_PASSWORD, OWNER_PASSWORD, REMNAWAVE_METRICS_PASS),
+    )
     lock = SingleInstanceLock(INSTANCE_LOCK_PATH)
     try:
         lock.acquire()
@@ -12,9 +28,16 @@ def main() -> None:
         logger.warning("MaintBot не запущен: %s", exc)
         raise SystemExit(ALREADY_RUNNING_EXIT_CODE) from exc
     try:
-        # Import handlers/storage only after the process owns the instance lock.
-        # This prevents a duplicate process from even running state migrations.
-        from .main import run_application
+        # Storage recovery is allowed only after the process owns the instance
+        # lock. Imports themselves remain free of filesystem side effects.
+        from .storage import initialize_storage
+
+        initialize_storage(DATA_DIR)
+
+        # Import handlers only after the split layout has been verified.  The
+        # application module does not import this launcher, so ``app.main`` can
+        # safely delegate here without creating an internal import cycle.
+        from .bot.application import run_application
 
         run_application(instance_lock=lock)
     finally:

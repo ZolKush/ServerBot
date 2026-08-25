@@ -1,0 +1,8 @@
+# One exact Docker container name per line. Install this file root-owned and
+# not group/world-writable as /etc/maintbot/docker-containers on every local or
+# SSH-monitored host. Keep only containers that MaintBot is allowed to inspect
+# and read logs from; an empty or missing file disables privileged Docker reads.
+remnawave
+remnawave-db
+remnanode
+remnawave-nginx
