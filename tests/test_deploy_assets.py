@@ -125,9 +125,7 @@ def test_server_inventory_examples_are_valid_and_document_tls_fallback() -> None
 
 def test_configuration_examples_use_only_reserved_network_identifiers() -> None:
     example_dir = ROOT / "examples" / "conf" / "servers"
-    documentation_networks = tuple(
-        ip_network(cidr) for cidr in ("192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24")
-    )
+    documentation_networks = tuple(ip_network(cidr) for cidr in ("192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24"))
 
     assert {path.name for path in example_dir.glob("*.json")} == {
         "local-example.json",
