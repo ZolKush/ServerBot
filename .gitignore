@@ -59,6 +59,7 @@ __pycache__/
 # local-only artifacts (not deployed to server)
 app/__main__.py
 docs/
+AGENTS.md
 
 # Claude Code local settings
 **/settings.local.json
