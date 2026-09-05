@@ -9,8 +9,8 @@ from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from typing import Any, TypeVar
 
-from telegram import Bot
 from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter, TimedOut
+from telegram.ext import ExtBot
 
 from ..config import (
     ADMIN_PASSWORD,
@@ -69,7 +69,7 @@ def known_recipient_ids(users: dict[str, dict[str, Any]]) -> list[int]:
     return sorted(result)
 
 
-async def known_message_anchors(bot: Bot, users: dict[str, dict[str, Any]]) -> dict[int, int]:
+async def known_message_anchors(bot: ExtBot, users: dict[str, dict[str, Any]]) -> dict[int, int]:
     """Collect the newest persisted message ID known for each private chat."""
 
     anchors: dict[int, int] = {}
@@ -313,7 +313,7 @@ def main(argv: list[str] | None = None) -> int:
         cancelled = asyncio.run(cancel_pending_broadcasts())
 
         async def run() -> EmergencyDeleteStats:
-            async with Bot(token=BOT_TOKEN) as bot:
+            async with ExtBot(token=BOT_TOKEN) as bot:
                 anchors = await known_message_anchors(bot, users)
                 return await purge_recent_ranges(
                     bot,
