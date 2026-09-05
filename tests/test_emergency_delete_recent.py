@@ -16,9 +16,16 @@ from app.messaging.outbox import message_payload
 
 
 class _DeletingBot:
-    def __init__(self, *, marker_id: int, rejected_id: int | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        marker_id: int,
+        rejected_id: int | None = None,
+        rejection: str = "message to delete not found",
+    ) -> None:
         self.marker_id = marker_id
         self.rejected_id = rejected_id
+        self.rejection = rejection
         self.deleted: list[list[int]] = []
 
     async def send_message(self, **_kwargs):
@@ -28,7 +35,7 @@ class _DeletingBot:
         message_ids = list(kwargs["message_ids"])
         self.deleted.append(message_ids)
         if self.rejected_id in message_ids:
-            raise BadRequest("message can't be deleted")
+            raise BadRequest(self.rejection)
         return True
 
 
@@ -48,7 +55,7 @@ async def test_purge_chat_uses_marker_as_upper_bound() -> None:
     bot = _DeletingBot(marker_id=105)
     stats = EmergencyDeleteStats()
 
-    await purge_chat(bot, chat_id=42, scan_depth=5, stats=stats)
+    await purge_chat(bot, chat_id=42, scan_depth=5, fallback_upper=100, anchor=None, stats=stats)
 
     assert bot.deleted == [[101, 102, 103, 104, 105]]
     assert stats.chats_marked == 1
@@ -60,7 +67,7 @@ async def test_purge_chat_splits_rejected_batches_and_continues() -> None:
     bot = _DeletingBot(marker_id=5, rejected_id=3)
     stats = EmergencyDeleteStats()
 
-    await purge_chat(bot, chat_id=42, scan_depth=5, stats=stats)
+    await purge_chat(bot, chat_id=42, scan_depth=5, fallback_upper=100, anchor=None, stats=stats)
 
     assert [3] in bot.deleted
     assert stats.ids_accepted == 4
