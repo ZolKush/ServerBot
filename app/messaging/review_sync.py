@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Collection
+from collections.abc import Awaitable, Callable, Collection
+from functools import partial
 from typing import Any
 
 from telegram.constants import ParseMode
@@ -18,7 +19,7 @@ from .review_refs import (
     remove_review_reference,
     review_completion,
 )
-from .telegram_rate import extend_flood_gate, retry_after_seconds, wait_flood_gate
+from .telegram_rate import extend_flood_gate, flood_wait_remaining, retry_after_seconds
 
 
 async def record_review_delivery(
@@ -80,12 +81,16 @@ async def _edit_card(
     *,
     chat_id: int,
     message_id: int,
-    text: str,
-    reply_markup: Any,
+    text: str = "",
+    reply_markup: Any = None,
+    render: Callable[[], tuple[str, Any]] | None = None,
 ) -> str:
     attempts = 3
     for attempt in range(1, attempts + 1):
-        await wait_flood_gate()
+        if flood_wait_remaining():
+            return "retryable"
+        if render is not None:
+            text, reply_markup = render()
         try:
             await bot.edit_message_text(
                 chat_id=chat_id,
@@ -136,12 +141,12 @@ def _retry_delay(error: BaseException, attempt: int) -> float:
     return 0.2 * attempt
 
 
-async def _run_bounded(tasks: list[Awaitable[Any]], *, limit: int = 4) -> None:
+async def _run_bounded(tasks: list[Callable[[], Awaitable[Any]]], *, limit: int = 4) -> None:
     semaphore = asyncio.Semaphore(max(1, limit))
 
-    async def run(task: Awaitable[Any]) -> None:
+    async def run(task: Callable[[], Awaitable[Any]]) -> None:
         async with semaphore:
-            await task
+            await task()
 
     await asyncio.gather(*(run(task) for task in tasks))
 
@@ -158,12 +163,18 @@ async def refresh_access_review_message(
     meta = get_user_meta_copy(target_user_id)
     if not isinstance(meta, dict):
         return "ok"
+
+    def render() -> tuple[str, Any]:
+        current = get_user_meta_copy(target_user_id)
+        if current is None:
+            return "⚠️ Заявка больше не существует.", None
+        return access_request_card(current), access_request_markup(current)
+
     result = await _edit_card(
         bot,
         chat_id=chat_id,
         message_id=message_id,
-        text=access_request_card(meta),
-        reply_markup=access_request_markup(meta),
+        render=render,
     )
     if result == "terminal":
         await remove_review_reference(
@@ -183,7 +194,7 @@ async def sync_access_review_messages(bot: Any, target_user_id: int) -> None:
     refs = meta.get("review_messages")
     if not isinstance(refs, dict):
         return
-    tasks: list[Awaitable[Any]] = []
+    tasks: list[Callable[[], Awaitable[Any]]] = []
     for raw_admin_id, raw_refs in list(refs.items()):
         try:
             admin_id = int(raw_admin_id)
@@ -198,7 +209,7 @@ async def sync_access_review_messages(bot: Any, target_user_id: int) -> None:
                 message_id = int(ref.get("message_id", 0) or 0)
             except (TypeError, ValueError, OverflowError):
                 continue
-            tasks.append(refresh_access_review_message(bot, target_user_id, admin_id, chat_id, message_id))
+            tasks.append(partial(refresh_access_review_message, bot, target_user_id, admin_id, chat_id, message_id))
     await _run_bounded(tasks)
 
 
@@ -214,15 +225,21 @@ async def refresh_service_review_message(
     request = service_requests_snapshot().get(str(request_id))
     if not isinstance(request, dict):
         return "ok"
-    user_meta = get_user_meta_copy(int(request.get("user_id", 0) or 0)) or {}
-    actor_meta = get_user_meta_copy(admin_id) or {}
-    markup = request_markup(request, actor_meta) if is_admin_meta(actor_meta) else None
+
+    def render() -> tuple[str, Any]:
+        current = service_requests_snapshot().get(str(request_id))
+        if current is None:
+            return "⚠️ Заявка больше не существует.", None
+        user_meta = get_user_meta_copy(int(current.get("user_id", 0) or 0)) or {}
+        actor_meta = get_user_meta_copy(admin_id) or {}
+        markup = request_markup(current, actor_meta) if is_admin_meta(actor_meta) else None
+        return request_card(current, user_meta), markup
+
     result = await _edit_card(
         bot,
         chat_id=chat_id,
         message_id=message_id,
-        text=request_card(request, user_meta),
-        reply_markup=markup,
+        render=render,
     )
     if result == "terminal":
         await remove_review_reference(
@@ -247,7 +264,7 @@ async def sync_service_review_messages(
     refs = request.get("review_messages")
     if not isinstance(refs, dict):
         return
-    tasks: list[Awaitable[Any]] = []
+    tasks: list[Callable[[], Awaitable[Any]]] = []
     for raw_admin_id, raw_refs in list(refs.items()):
         try:
             admin_id = int(raw_admin_id)
@@ -264,7 +281,7 @@ async def sync_service_review_messages(
                 continue
             if (chat_id, message_id) in exclude:
                 continue
-            tasks.append(refresh_service_review_message(bot, request_id, admin_id, chat_id, message_id))
+            tasks.append(partial(refresh_service_review_message, bot, request_id, admin_id, chat_id, message_id))
     await _run_bounded(tasks)
 
 

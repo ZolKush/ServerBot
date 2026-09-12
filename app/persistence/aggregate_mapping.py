@@ -230,6 +230,8 @@ def _docker_to_store(raw: dict[str, Any]) -> dict[str, Any]:
             "updated_at": copy.deepcopy(status.get("updated_at")),
             "containers": containers,
         }
+        if "_config_fingerprint" in status:
+            result[str(server_key)]["_config_fingerprint"] = status["_config_fingerprint"]
     return result
 
 
@@ -257,6 +259,8 @@ def _docker_to_aggregate(raw: dict[str, Any]) -> dict[str, Any]:
             "updated_at": copy.deepcopy(status.get("updated_at")),
             "containers": containers,
         }
+        if "_config_fingerprint" in status:
+            result[str(server_key)]["_config_fingerprint"] = status["_config_fingerprint"]
     return normalize_docker_status(result)
 
 

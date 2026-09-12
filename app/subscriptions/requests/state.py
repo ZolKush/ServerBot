@@ -42,7 +42,7 @@ def parse_datetime(value: object) -> datetime | None:
     raw = str(value or "").strip()
     if not raw:
         return None
-    with contextlib.suppress(ValueError):
+    with contextlib.suppress(ValueError, OverflowError):
         parsed = datetime.fromisoformat(raw)
         return parsed.replace(tzinfo=TZ) if parsed.tzinfo is None else parsed.astimezone(TZ)
     for fmt in ("%d.%m.%Y %H:%M", "%d.%m.%Y %H:%M:%S"):

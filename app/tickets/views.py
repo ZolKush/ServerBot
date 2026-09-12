@@ -12,6 +12,7 @@ from ..bot.guards import authorized_ids
 from ..bot.help import render_support_contact
 from ..bot.ui import (
     SEP,
+    clip_html_message,
     clip_text,
     format_dt_human,
     html_escape,
@@ -218,7 +219,7 @@ def _format_ticket_for_admin(
             _format_ticket_history(ticket, public_view=False),
         ],
     )
-    return "\n".join(lines)
+    return clip_html_message("\n".join(lines))
 
 
 def _format_ticket_for_user(
@@ -249,7 +250,7 @@ def _format_ticket_for_user(
             _format_ticket_history(ticket, public_view=True),
         ],
     )
-    return "\n".join(lines) + render_support_contact(product_settings_snapshot())
+    return clip_html_message("\n".join(lines) + render_support_contact(product_settings_snapshot()))
 
 
 def ticket_urgency_kb() -> InlineKeyboardMarkup:

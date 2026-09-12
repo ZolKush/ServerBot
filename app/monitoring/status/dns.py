@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 from datetime import datetime
 
 from ...bot.ui import html_escape, ui_info_text
@@ -10,6 +11,7 @@ from ...config import DNS_RESOLVERS, TZ, ServerTarget
 from ...monitoring.system.dns import (
     dns_supports_custom_resolver,
     resolve_a_record,
+    resolve_aaaa_record,
 )
 from ...storage import get_dns_status_cache
 from .common import safe_nonnegative_int
@@ -39,19 +41,24 @@ async def build_dns_status_payload_live(
             "details": [],
         }
     expected_ip = (server.expected_a_ip or "").strip()
+    expected = ipaddress.ip_address(expected_ip) if expected_ip else None
+    expected_ip = str(expected) if expected else ""
+    resolve = resolve_aaaa_record if expected and expected.version == 6 else resolve_a_record
     custom_resolvers_supported = dns_supports_custom_resolver()
 
     async def resolve_limited(domain: str, resolver: str | None) -> list[str]:
         async with dns_query_semaphore():
-            return await resolve_a_record(domain, resolver=resolver)
+            return await resolve(domain, resolver=resolver)
 
     async def check_domain(domain: str) -> tuple[str, str | None]:
+        incomplete = False
         if custom_resolvers_supported and DNS_RESOLVERS:
             results = await asyncio.gather(
                 *(resolve_limited(domain, resolver) for resolver in DNS_RESOLVERS),
                 return_exceptions=True,
             )
             ip_lists = [result for result in results if isinstance(result, list)]
+            incomplete = len(ip_lists) != len(results) or any(not addresses for addresses in ip_lists)
             merged: list[str] = []
             for addresses in ip_lists:
                 for address in addresses:
@@ -64,7 +71,8 @@ async def build_dns_status_payload_live(
                 merged = []
         if not merged:
             return "unknown", f"• <code>{html_escape(domain)}</code>: ⚠️ нет ответа"
-        if expected_ip and expected_ip not in merged:
+        merged = list(dict.fromkeys(str(ipaddress.ip_address(address)) for address in merged))
+        if expected_ip and any(address != expected_ip for address in merged):
             shown = merged[:10]
             suffix = f", … ещё {len(merged) - len(shown)}" if len(merged) > len(shown) else ""
             return (
@@ -73,6 +81,8 @@ async def build_dns_status_payload_live(
                 f"<code>{html_escape(expected_ip)}</code>, получено "
                 f"<code>{html_escape(', '.join(shown))}</code>{html_escape(suffix)}",
             )
+        if incomplete:
+            return "unknown", f"• <code>{html_escape(domain)}</code>: ⚠️ ответили не все DNS-резолверы"
         return "ok", None
 
     checks = await asyncio.gather(*(check_domain(domain) for domain in domains))

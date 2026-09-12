@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/python3 -I
 """Minimal privileged read-only helper for MaintBot.
 
 Install this file root-owned and non-writable by the service account. The sudoers
@@ -11,7 +11,6 @@ from __future__ import annotations
 import base64
 import os
 import re
-import shutil
 import stat
 import sys
 from pathlib import Path
@@ -48,7 +47,7 @@ def policy_lines(path: Path, *, label: str, required: bool) -> list[str]:
 
     descriptor: int | None = None
     try:
-        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
         descriptor = os.open(path, flags)
         metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode):
@@ -158,13 +157,25 @@ def checked_int(raw: str, minimum: int, maximum: int, label: str) -> int:
     return value
 
 
+def open_log(path: Path):
+    """Open the validated path without following a replacement symlink or FIFO."""
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    descriptor = os.open(path, flags)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            fail("log must be a regular file", 77)
+        handle = os.fdopen(descriptor, "rb")
+        descriptor = -1
+        return handle
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
 def executable(*paths: str) -> str:
     for candidate in paths:
         if Path(candidate).is_file() and os.access(candidate, os.X_OK):
             return candidate
-    found = shutil.which(Path(paths[-1]).name)
-    if found:
-        return found
     fail(f"executable not found: {paths[-1]}", 69)
 
 
@@ -172,7 +183,8 @@ def exec_command(argv: list[str]) -> NoReturn:
     os.environ.clear()
     os.environ.update({"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C", "LC_ALL": "C"})
     os.umask(0o077)
-    os.execv(argv[0], argv)
+    # Every caller supplies an allow-listed absolute executable and validated argv.
+    os.execv(argv[0], argv)  # nosec B606
 
 
 def main(argv: list[str]) -> int:
@@ -200,7 +212,7 @@ def main(argv: list[str]) -> int:
         path = checked_log_path(args[0])
         lines = checked_int(args[1], 1, MAX_TAIL_LINES, "tail lines")
         limit = checked_int(args[2], 1, MAX_READ_BYTES, "tail byte limit") if len(args) == 3 else MAX_READ_BYTES
-        with path.open("rb") as handle:
+        with open_log(path) as handle:
             handle.seek(0, os.SEEK_END)
             size = handle.tell()
             handle.seek(max(0, size - limit), os.SEEK_SET)
@@ -211,15 +223,16 @@ def main(argv: list[str]) -> int:
 
     if action == "file-stat" and len(args) == 1:
         path = checked_log_path(args[0])
-        stat = path.stat()
-        print(f"{stat.st_size}|{int(stat.st_mtime)}|{stat.st_dev}|{stat.st_ino}")
+        with open_log(path) as handle:
+            metadata = os.fstat(handle.fileno())
+        print(f"{metadata.st_size}|{int(metadata.st_mtime)}|{metadata.st_dev}|{metadata.st_ino}")
         return 0
 
     if action == "file-read-meta" and len(args) == 3:
         path = checked_log_path(args[0])
         offset = checked_int(args[1], 0, 2**63 - 1, "offset")
         limit = checked_int(args[2], 1, MAX_READ_BYTES, "read limit")
-        with path.open("rb") as handle:
+        with open_log(path) as handle:
             before = os.fstat(handle.fileno())
             handle.seek(offset)
             data = handle.read(limit)
@@ -234,7 +247,7 @@ def main(argv: list[str]) -> int:
         path = checked_log_path(args[0])
         offset = checked_int(args[1], 0, 2**63 - 1, "offset")
         limit = checked_int(args[2], 1, MAX_READ_BYTES, "read limit")
-        with path.open("rb") as handle:
+        with open_log(path) as handle:
             handle.seek(offset)
             data = handle.read(limit)
         # Text-safe transport lets the unprivileged caller verify that it got

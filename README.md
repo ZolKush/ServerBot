@@ -122,11 +122,14 @@ app/
 
 ## Новая установка
 
-Нужен Python 3.10 или новее. Проект проверяется также на актуальной поддерживаемой версии Python; зависимости
-зафиксированы совместимым набором, а не обновляются автоматически до любого нового major-релиза.
+Для новой установки рекомендуется **Python 3.14.7** (стабильная версия на 10 сентября 2026 года),
+указанный в `.python-version`. Совместимость с Python 3.10 пока сохранена и проверяется в CI;
+поддержка этой ветки самим Python заканчивается в октябре 2026 года. Python 3.15 prerelease не используется.
+Зависимости зафиксированы совместимым набором, а не обновляются автоматически до любого нового major-релиза.
+Сначала установите нужный интерпретатор средствами ОС или с [python.org](https://www.python.org/downloads/).
 
 ```bash
-python3 -m venv .venv
+python3.14 -m venv .venv
 .venv/bin/python -m pip install -r app/requirements.txt
 cp app/env.secrets.example app/env.secrets
 mkdir -p data/conf/servers
@@ -259,7 +262,7 @@ sudo useradd --system --home /nonexistent --shell /usr/sbin/nologin maintbot
 sudo install -d -o root -g root -m 0755 /opt/maintbot
 sudo install -d -o maintbot -g maintbot -m 0700 /opt/maintbot/data
 sudo install -d -o root -g maintbot -m 0750 /etc/maintbot
-sudo python3 -m venv /opt/maintbot/.venv
+sudo python3.14 -m venv /opt/maintbot/.venv
 sudo /opt/maintbot/.venv/bin/python -m pip install -r /opt/maintbot/app/requirements.txt
 ```
 
@@ -300,6 +303,11 @@ fail2ban-логов. Docker `ps`, `inspect` и `logs` доступны толь�
 в группу `docker`: это обошло бы ограничения helper. Такой же helper и policy-файлы нужны на SSH-серверах, где
 используются эти проверки.
 
+Helper запускает системный `/usr/bin/python3` в изолированном режиме `-I`, не использует пользовательские
+`PYTHONPATH`/site-packages и не ищет привилегированные команды в переданном `PATH`. Чтение файлов запрещает
+подмену конечного пути симлинком и открытие FIFO. При обновлении переустановите helper на каждом SSH-хосте;
+обновление одного checkout не меняет установленный `/usr/local/libexec/maintbot-helper`.
+
 ### SSH
 
 Используйте отдельный ключ и заранее проверенный `known_hosts`.
@@ -332,6 +340,13 @@ unit в состояние failed, а не выглядит как успешн�
 `/opt/maintbot/data` (конфигурационный подкаталог остаётся read-only), использует `ProtectSystem=strict`, private
 tmp/devices, `UMask=0077` и лимиты ресурсов. Второй экземпляр завершается с кодом 75 и не запускает Telegram polling.
 
+На SIGTERM/SIGINT прекращается polling; при остановке очереди новые jobs не запускаются, текущим callbacks
+даётся 10 секунд на завершение, затем оставшиеся отменяются с ожиданием `finally` и закрытия подпроцессов.
+После этого PTB сбрасывает persistence и закрывает HTTP-клиенты, включая клиент метрик. Общий резерв systemd —
+90 секунд (`TimeoutStopSec`); он остаётся последней защитой от зависания ОС/диска или обработчика обновлений.
+`INSTANCE_LOCK_PATH` задаётся в `bot.json` (пустое значение означает `DATA_DIR/runtime/instance.lock`),
+а не через `Environment=`. Каталог `/run/maintbot` предоставляется unit для установок, явно использующих его в JSON.
+
 Проверка:
 
 ```bash
@@ -353,6 +368,18 @@ sudo journalctl -u maintbot.service -n 200 --no-pager
 .venv/bin/python -m app.messaging.outbox_redrive \
   --data-dir /opt/maintbot/data --source user --event-id <event-id>
 ```
+
+Redrive берёт тот же `INSTANCE_LOCK_PATH`, что и бот, и возвращает 75 при занятой блокировке. Запускайте команду
+с `--data-dir`, совпадающим с `DATA_DIR` выбранной конфигурации: иначе получаете код 2 до открытия хранилища.
+Для другого экземпляра сначала выберите его `MAINTBOT_CONFIG_DIR`. Запускайте redrive
+от сервисного пользователя с теми же bootstrap-путями, что у unit; если `/run/maintbot` удалён после stop,
+восстановите его как в примере аварийной утилиты ниже. Повторная постановка начинает новое семидневное окно retry,
+но не сбрасывает уже доставленные части события. Ожидание FloodWait не удерживает outbox job надолго:
+работа переносится на следующий запуск; после каждого сетевого ожидания используется актуальное состояние адресата.
+
+Изменённый или удалённый сервер не наследует старые monitoring cache/cursors. Его ожидающее расписание техработ
+отменяется с уведомлением и никогда не превращается в работы на всех серверах. После отмены/активации/истечения
+расписания недоставленные предупреждения «скоро начнутся работы» удаляются той же транзакцией.
 
 Для review-карточек координаты уже отправленного Telegram-сообщения фиксируются до регистрации ссылки. Ошибка
 storage/restart повторяет только регистрацию, не вторую отправку карточки.
@@ -462,19 +489,20 @@ outbox, но штатное открытие хранилища может во�
 
 ## Разработка и проверки
 
-GitHub Actions повторяет обязательные проверки на Python 3.10 и 3.14. Локально используйте SDK проекта:
+GitHub Actions повторяет обязательные проверки на Python 3.10 и 3.14.7. Локально используйте SDK проекта:
 
 ```bash
 .venv/bin/python -m pip install -r app/requirements-dev.txt
-.venv/bin/python -m ruff format --check app tests tools
-.venv/bin/python -m ruff check .
+.venv/bin/python -m ruff format --check app tests tools deploy/maintbot-helper
+.venv/bin/python -m ruff check . deploy/maintbot-helper
 .venv/bin/python -m mypy app
 .venv/bin/python -m pytest -q
-.venv/bin/python -m bandit -r app tools -q
+.venv/bin/python -m bandit -r app tools deploy/maintbot-helper -q
 .venv/bin/python -m vulture app --min-confidence 90 --ignore-names cls
 .venv/bin/python -m compileall -q app tests tools
 .venv/bin/python -m pip check
 .venv/bin/python -m pip_audit -r app/requirements.txt
+.venv/bin/python -m pip_audit -r app/requirements-dev.txt
 ```
 
 `pyproject.toml`, тесты, `app/requirements-dev.txt` и обезличенные примеры `examples/conf/` должны находиться под
@@ -493,6 +521,13 @@ GitHub Actions повторяет обязательные проверки на
 5. выполните требуемую явную миграцию;
 6. запустите `app.config_check`;
 7. только затем запускайте сервис.
+
+При смене Python сохраните прежний venv для отката и создайте новый нужным интерпретатором: `pip install python`
+не обновляет Python. Выберите новый SDK в PyCharm и установите в него `app/requirements-dev.txt` для локальных
+проверок. `.python-version` не переключает уже созданный venv автоматически. Для исправлений аудита сентября 2026
+новая миграция split-layout не нужна; обновите также установленный helper и systemd unit с `daemon-reload`.
+
+Находки, выполненные проверки и границы технического аудита описаны в [TECHNICAL_AUDIT.md](TECHNICAL_AUDIT.md).
 
 Для отката остановите сервис и восстановите одновременно совместимые версии кода, venv и полного каталога данных. Не запускайте старую и новую версии с одним `DATA_DIR`.
 

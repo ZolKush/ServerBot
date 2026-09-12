@@ -101,13 +101,13 @@ def write_bytes_durable(path: Path, payload: bytes, *, exclusive: bool = False) 
     descriptor = os.open(path, flags, 0o600)
     try:
         with os.fdopen(descriptor, "wb") as handle:
+            descriptor = -1  # Ownership transferred; never close a reused fd on failure.
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
-    except BaseException:
-        with contextlib.suppress(OSError):
+    finally:
+        if descriptor >= 0:
             os.close(descriptor)
-        raise
     tighten_file_permissions(path)
     fsync_directory(path.parent)
 

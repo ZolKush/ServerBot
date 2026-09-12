@@ -32,26 +32,33 @@ class SingleInstanceLock:
         fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
         with contextlib.suppress(OSError):
             os.chmod(self.path, 0o600)
-        lock_file = os.fdopen(fd, "r+", encoding="ascii", newline="")
         try:
-            self._lock_file(lock_file)
-        except OSError as exc:
-            owner = ""
-            with contextlib.suppress(OSError):
-                # Byte zero is the Windows lock range; metadata starts at byte one.
-                lock_file.seek(1 if sys.platform == "win32" else 0)
-                owner = lock_file.read(32).strip()
-            lock_file.close()
-            if exc.errno in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
-                raise InstanceAlreadyRunning(self.path, owner) from exc
+            lock_file = os.fdopen(fd, "r+", encoding="ascii", newline="")
+        except BaseException:
+            os.close(fd)
             raise
-
-        lock_file.seek(1 if sys.platform == "win32" else 0)
-        lock_file.truncate()
-        lock_file.write(str(os.getpid()))
-        lock_file.flush()
-        os.fsync(lock_file.fileno())
-        self._file = lock_file
+        try:
+            try:
+                self._lock_file(lock_file)
+            except OSError as exc:
+                owner = ""
+                with contextlib.suppress(OSError, UnicodeError):
+                    # Byte zero is the Windows lock range; PID starts at byte one.
+                    lock_file.seek(1 if sys.platform == "win32" else 0)
+                    value = lock_file.read(32).strip()
+                    owner = value if value.isascii() and value.isdecimal() else ""
+                if exc.errno in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+                    raise InstanceAlreadyRunning(self.path, owner) from exc
+                raise
+            lock_file.seek(1 if sys.platform == "win32" else 0)
+            lock_file.truncate()
+            lock_file.write(str(os.getpid()))
+            lock_file.flush()
+            os.fsync(lock_file.fileno())
+            self._file = lock_file
+        finally:
+            if self._file is None:
+                lock_file.close()
 
     @staticmethod
     def _lock_file(lock_file: IO[str]) -> None:

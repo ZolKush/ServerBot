@@ -109,16 +109,17 @@ def _check_split_storage(data_dir: str) -> list[str]:
         return [f"DATA_DIR: каталог недоступен для чтения и записи: {root}"]
 
     backend = SplitJsonBackend(root)
-    if not backend.exists():
-        return [
-            f"DATA_DIR: split-layout v1 не найден ({root / LAYOUT_FILE}); "
-            "сначала выполните python -m app.persistence.migration"
-        ]
-    pending = backend.has_pending_transactions()
     try:
+        pending = backend.has_pending_transactions()
         if pending:
             backend.verify_recovery()
             snapshot = None
+        elif not backend.exists():
+            return [
+                f"DATA_DIR: split-layout v1 не найден ({root / LAYOUT_FILE}); "
+                "для нового хранилища выполните python -m app.persistence.bootstrap, "
+                "для переноса v4 — python -m app.persistence.migration"
+            ]
         else:
             snapshot = backend.inspect()
     except (PersistenceError, OSError, UnicodeError, ValueError) as exc:

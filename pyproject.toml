@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=84,<85"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -12,9 +12,9 @@ dependencies = [
     "python-dotenv==1.2.3",
     "aiodns==4.0.4",
     "httpx==0.28.1",
-    "cryptography==50.0.0",
+    "cryptography==50.0.1",
     "openpyxl==3.1.5",
-    "pydantic==2.13.4",
+    "pydantic==2.13.5",
     "tzdata==2026.3",
     "tomli==2.4.1; python_version < '3.11'",
 ]
@@ -23,12 +23,12 @@ dependencies = [
 dev = [
     "pytest==9.1.1",
     "pytest-asyncio==1.4.0",
-    "ruff==0.15.21",
-    "mypy==2.3.0",
+    "ruff==0.16.7",
+    "mypy==2.3.1",
     "bandit==1.9.4",
     "pip-audit==2.10.1",
     "vulture==2.16",
-    "types-openpyxl==3.1.5.20260807",
+    "types-openpyxl==3.1.5.20260827",
 ]
 
 [project.scripts]

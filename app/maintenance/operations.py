@@ -10,8 +10,20 @@ from ..config import TZ
 from ..storage import ImportantData, enqueue_important_outbox, update_important_data
 from .models import coerce_scheduled_maintenance
 from .notifications import enqueue_maintenance_notice, make_maintenance_notice_event
+from .policy import scope_is_current
 from .records import scheduled_to_active_record
 from .views import maintenance_end_notice, maintenance_extend_notice, maintenance_scheduled_cancel_notice
+
+
+def _discard_schedule_warnings(cfg: ImportantData, schedule_id: str) -> None:
+    # Only one schedule can exist. Legacy warnings have no identity metadata;
+    # these are also obsolete once the current schedule reaches a terminal state.
+    for event_id, event in list(cfg.outbox.items()):
+        if event.get("kind") != "maintenance_schedule_warning":
+            continue
+        completion = event.get("completion") or {}
+        if not completion.get("schedule_id") or completion["schedule_id"] == schedule_id:
+            cfg.outbox.pop(event_id, None)
 
 
 async def start_maintenance(
@@ -20,6 +32,9 @@ async def start_maintenance(
     expected_schedule_id: str,
     notice_event: dict[str, Any] | None,
 ) -> bool:
+    if not scope_is_current(maintenance):
+        return False
+
     def apply(cfg: ImportantData) -> bool:
         active = cfg.maintenance if isinstance(cfg.maintenance, dict) else {}
         if active.get("active"):
@@ -30,6 +45,7 @@ async def start_maintenance(
         cfg.maintenance = dict(maintenance)
         # An immediate announcement supersedes the schedule atomically.
         cfg.scheduled_maintenance = {}
+        _discard_schedule_warnings(cfg, expected_schedule_id)
         enqueue_maintenance_notice(cfg, notice_event)
         return True
 
@@ -37,6 +53,9 @@ async def start_maintenance(
 
 
 async def schedule_maintenance(scheduled: Mapping[str, Any]) -> bool:
+    if not scope_is_current(scheduled):
+        return False
+
     def apply(cfg: ImportantData) -> bool:
         active = cfg.maintenance if isinstance(cfg.maintenance, dict) else {}
         existing = cfg.scheduled_maintenance if isinstance(cfg.scheduled_maintenance, dict) else {}
@@ -145,6 +164,7 @@ async def cancel_scheduled_maintenance(
             )
             enqueue_maintenance_notice(cfg, event)
             queued_notice = event is not None
+        _discard_schedule_warnings(cfg, schedule_id)
         return previous
 
     previous = await update_important_data(apply)
@@ -173,6 +193,7 @@ async def clear_invalid_schedule(schedule_id: str) -> None:
         current = cfg.scheduled_maintenance if isinstance(cfg.scheduled_maintenance, dict) else {}
         if str(current.get("id") or "") == schedule_id:
             cfg.scheduled_maintenance = {}
+            _discard_schedule_warnings(cfg, schedule_id)
 
     await update_important_data(apply)
 
@@ -186,6 +207,7 @@ async def expire_schedule(
         if str(current.get("id") or "") != str(scheduled.get("id") or ""):
             return False
         cfg.scheduled_maintenance = {}
+        _discard_schedule_warnings(cfg, str(scheduled.get("id") or ""))
         enqueue_maintenance_notice(cfg, notice_event)
         return True
 
@@ -213,6 +235,8 @@ async def mark_schedule_thresholds(
         current.pop("notified_before", None)
         current["updated_at"] = updated_at.isoformat()
         cfg.scheduled_maintenance = current
+        if notice_event is not None:
+            notice_event["completion"] = {"type": "maintenance_schedule_warning", "schedule_id": current["id"]}
         enqueue_maintenance_notice(cfg, notice_event)
         return current
 
@@ -225,6 +249,8 @@ async def activate_scheduled_maintenance(
 ) -> dict[str, Any] | None:
     def apply(cfg: ImportantData) -> dict[str, Any] | None:
         current = dict(cfg.scheduled_maintenance or {})
+        if not scope_is_current(current):
+            return None
         if str(current.get("id") or "") != str(scheduled.get("id") or ""):
             return None
         existing = cfg.maintenance if isinstance(cfg.maintenance, dict) else {}
@@ -232,6 +258,7 @@ async def activate_scheduled_maintenance(
             return None
         cfg.maintenance = dict(scheduled_to_active_record(coerce_scheduled_maintenance(current)))
         cfg.scheduled_maintenance = {}
+        _discard_schedule_warnings(cfg, str(current.get("id") or ""))
         enqueue_maintenance_notice(cfg, notice_event)
         return dict(cfg.maintenance)
 

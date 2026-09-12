@@ -1,3 +1,4 @@
+import hashlib
 import re
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -6,7 +7,7 @@ from telegram.ext import ContextTypes
 
 from ...bot.guards import require_admin
 from ...bot.ui import breadcrumbs, html_escape, ui_error_text, wrap_as_codeblock_html
-from ...config import SERVER_KEY_PATTERN
+from ...config import SERVER_KEY_PATTERN, server_monitoring_fingerprint
 from ...storage import get_docker_status_cache
 from ..remote.docker import remote_docker_inspect_summary, remote_docker_logs_tail
 from ..status.cache import docker_views_from_cache
@@ -35,33 +36,31 @@ def _filtered_containers(server_key: str) -> list[str]:
 
 
 def _container_token(server_key: str, name: str) -> str:
-    """Короткий токен контейнера для callback_data.
-
-    Имя контейнера может быть до 64 символов и пробить лимит Telegram
-    в 64 байта на callback_data, поэтому в кнопки идёт индекс (i0, i1, …)
-    в списке monitor_containers.
-    """
-    containers = _filtered_containers(server_key)
-    try:
-        return f"i{containers.index(name)}"
-    except ValueError:
-        return name
+    """Short identity bound to the container name and its server configuration."""
+    server = get_server_target(server_key)
+    if server is None:
+        return ""
+    identity = f"{server_monitoring_fingerprint(server)}:{name}"
+    return "c" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:12]
 
 
 def _resolve_container_token(server_key: str, token: str) -> str | None:
-    """Принимает индексный токен (i0, i1, …) или легаси-имя из старых клавиатур."""
+    """Reject obsolete positional callbacks instead of selecting another container."""
+    containers = _filtered_containers(server_key)
+    if re.fullmatch(r"c[0-9a-f]{12}", token or ""):
+        matches = [name for name in containers if _container_token(server_key, name) == token]
+        return matches[0] if len(matches) == 1 else None
     if re.fullmatch(r"i\d{1,3}", token or ""):
-        containers = _filtered_containers(server_key)
-        idx = int(token[1:])
-        return containers[idx] if 0 <= idx < len(containers) else None
-    return token or None
+        return None
+    return token if token in containers else None
 
 
 def _docker_list_kb(server_key: str) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     row: list[InlineKeyboardButton] = []
-    for idx, nm in enumerate(_filtered_containers(server_key)):
-        row.append(InlineKeyboardButton(nm[:32], callback_data=f"docker:show:{server_key}:i{idx}"))
+    for nm in _filtered_containers(server_key):
+        token = _container_token(server_key, nm)
+        row.append(InlineKeyboardButton(nm[:32], callback_data=f"docker:show:{server_key}:{token}"))
         if len(row) == 2:
             rows.append(row)
             row = []

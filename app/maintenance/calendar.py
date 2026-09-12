@@ -80,6 +80,8 @@ def calendar_grid(year: int, month: int, today: date, horizon: date) -> list[lis
 
 def schedule_calendar_kb(year: int, month: int, *, today: date, horizon_days: int = 365) -> InlineKeyboardMarkup:
     horizon = today + timedelta(days=horizon_days)
+    if not 1 <= month <= 12 or not (today.year, today.month) <= (year, month) <= (horizon.year, horizon.month):
+        year, month = today.year, today.month
     rows: list[list[InlineKeyboardButton]] = [
         [InlineKeyboardButton(f"{_RU_MONTHS[month]} {year}", callback_data=CAL_NOOP)],
         [InlineKeyboardButton(weekday, callback_data=CAL_NOOP) for weekday in _RU_WEEKDAYS],

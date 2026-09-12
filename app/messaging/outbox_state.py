@@ -16,7 +16,7 @@ def parse_time(value: object) -> datetime:
         if parsed.tzinfo is None:
             return parsed.replace(tzinfo=timezone.utc)
         return parsed.astimezone(timezone.utc)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return datetime.min.replace(tzinfo=timezone.utc)
 
 
@@ -46,6 +46,8 @@ def recipient_mutation(
         if not isinstance(recipients, dict) or not isinstance(recipients.get(str(uid)), dict):
             return event
         state = dict(recipients[str(uid)])
+        if state.get("status") not in ACTIVE_RECIPIENT_STATUSES:
+            return event
         state.update(
             {
                 "status": status,
@@ -73,8 +75,10 @@ def recipient_mutation(
     return apply
 
 
-def should_dead_letter(event: dict[str, Any], *, attempts: int, now: datetime) -> bool:
-    created_at = parse_time(event.get("created_at"))
+def should_dead_letter(
+    event: dict[str, Any], *, attempts: int, now: datetime, state: dict[str, Any] | None = None
+) -> bool:
+    created_at = parse_time((state or {}).get("retry_started_at") or event.get("created_at"))
     age = now - created_at if created_at != datetime.min.replace(tzinfo=timezone.utc) else timedelta.max
     return attempts >= 72 or age >= timedelta(days=7)
 

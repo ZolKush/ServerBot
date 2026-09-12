@@ -18,7 +18,7 @@ from ..storage import get_active_maintenance, get_scheduled_maintenance
 from .calendar import maint_mode_kb, parse_hhmm, schedule_calendar_kb, scope_kb, urgency_kb
 from .notifications import make_maintenance_notice_event
 from .operations import start_maintenance
-from .policy import MAINT_SCOPE_ALL, hhmm_to_minutes, normalize_scope, scope_label
+from .policy import MAINT_SCOPE_ALL, hhmm_to_minutes, normalize_scope, scope_is_current, scope_label
 from .records import build_maintenance_record
 from .state import (
     STATE_MAINT_DURATION,
@@ -126,6 +126,9 @@ async def maint_scope(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     data = maintenance_context(context)
     scope = normalize_scope(match.group(1))
+    if not scope_is_current({"scope": scope}):
+        await query.edit_message_text("Сервер больше не настроен. Выберите область техработ:", reply_markup=scope_kb())
+        return STATE_MAINT_SCOPE
     data["maint_scope"] = scope
     if query.message and query.message.chat:
         data["maint_panel_chat_id"] = query.message.chat.id

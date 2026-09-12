@@ -85,13 +85,17 @@ async def close_metrics_client() -> None:
 async def _do_fetch_and_build_snapshot() -> MetricsSnapshot:
     global _LAST_SUCCESS_AT
     try:
-        text = await _fetch_metrics_text()
+        text = await asyncio.wait_for(_fetch_metrics_text(), timeout=REMNAWAVE_METRICS_TIMEOUT_SEC)
+    except asyncio.TimeoutError:
+        logger.warning("RemnaWave metrics fetch exceeded its total deadline")
+        return MetricsSnapshot(error="metrics request timed out", fetched_at=_LAST_SUCCESS_AT)
     except httpx.HTTPStatusError as exc:
         message = f"HTTP {exc.response.status_code}"
         logger.warning("RemnaWave metrics request failed: %s", message)
         return MetricsSnapshot(error=message, fetched_at=_LAST_SUCCESS_AT)
     except (httpx.HTTPError, OSError) as exc:
-        message = f"{exc.__class__.__name__}: {str(exc).strip() or 'connection error'}"
+        # HTTP errors may embed a URL (including credentials or query tokens).
+        message = f"{exc.__class__.__name__}: connection error"
         logger.warning("RemnaWave metrics fetch failed: %s", message)
         return MetricsSnapshot(error=message, fetched_at=_LAST_SUCCESS_AT)
     except RuntimeError as exc:
@@ -99,15 +103,15 @@ async def _do_fetch_and_build_snapshot() -> MetricsSnapshot:
         logger.warning("RemnaWave metrics response rejected: %s", message)
         return MetricsSnapshot(error=message, fetched_at=_LAST_SUCCESS_AT)
     except Exception as exc:
-        message = f"{exc.__class__.__name__}: {str(exc).strip() or 'unknown error'}"
-        logger.exception("RemnaWave metrics: unexpected error")
+        message = f"{exc.__class__.__name__}: unexpected metrics error"
+        logger.error("RemnaWave metrics: %s", message)
         return MetricsSnapshot(error=message, fetched_at=_LAST_SUCCESS_AT)
 
     try:
         nodes = build_nodes(parse_prometheus_text(text))
     except Exception as exc:
-        message = f"parse error: {exc}"
-        logger.exception("RemnaWave metrics parse failed")
+        message = f"parse error: {exc.__class__.__name__}"
+        logger.error("RemnaWave metrics: %s", message)
         return MetricsSnapshot(error=message, fetched_at=_LAST_SUCCESS_AT)
 
     if REMNAWAVE_HIDDEN_UUIDS:

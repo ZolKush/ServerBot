@@ -28,7 +28,7 @@ class AppSettings(SettingsFields):
         unique = list(dict.fromkeys(value))
         for item in unique:
             if not is_uuid(item):
-                raise ValueError(f"REMNAWAVE_HIDDEN_UUIDS: invalid UUID '{item}'")
+                raise ValueError("REMNAWAVE_HIDDEN_UUIDS: invalid UUID")
         return unique
 
     @field_validator("DNS_RESOLVERS", mode="after")
@@ -39,7 +39,7 @@ class AppSettings(SettingsFields):
             try:
                 resolver = str(ipaddress.ip_address(item))
             except ValueError as exc:
-                raise ValueError(f"DNS_RESOLVERS contains an invalid IP address: {item}") from exc
+                raise ValueError("DNS_RESOLVERS contains an invalid IP address") from exc
             if resolver not in resolvers:
                 resolvers.append(resolver)
         if not resolvers:
@@ -53,7 +53,7 @@ class AppSettings(SettingsFields):
         try:
             ZoneInfo(timezone_name)
         except ZoneInfoNotFoundError as exc:
-            raise ValueError(f"unknown timezone: {timezone_name}") from exc
+            raise ValueError("unknown timezone") from exc
         return timezone_name
 
     @field_validator("LOG_LEVEL", mode="before")
@@ -156,7 +156,13 @@ class AppSettings(SettingsFields):
         normalized = value.strip()
         if not normalized:
             return ""
-        parsed = urlsplit(normalized)
+        if any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in normalized):
+            raise ValueError("REMNAWAVE_METRICS_URL must not contain whitespace or control characters")
+        try:
+            parsed = urlsplit(normalized)
+            _ = parsed.port
+        except ValueError:
+            raise ValueError("REMNAWAVE_METRICS_URL has an invalid host or port") from None
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             raise ValueError("REMNAWAVE_METRICS_URL must be an absolute HTTP(S) URL")
         if parsed.username or parsed.password or parsed.fragment:

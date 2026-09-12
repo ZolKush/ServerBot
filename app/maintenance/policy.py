@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
-from ..bot.ui import html_escape
-from ..config import SERVERS
+from collections.abc import Mapping
+from typing import Any
+
+from ..bot.ui import clip_text, html_escape
+from ..config import SERVERS, server_monitoring_fingerprint
 
 MAINT_SCOPE_ALL = "all"
 MAX_MAINT_HOURS = 72
@@ -31,18 +34,31 @@ def server_items() -> list[tuple[str, str]]:
 
 def normalize_scope(scope: str | None) -> str:
     value = (scope or "").strip().lower()
-    if value == MAINT_SCOPE_ALL:
-        return MAINT_SCOPE_ALL
-    return value if value in SERVERS else MAINT_SCOPE_ALL
+    return value or MAINT_SCOPE_ALL
+
+
+def scope_fingerprint(scope: str) -> str:
+    server = SERVERS.get(normalize_scope(scope))
+    return server_monitoring_fingerprint(server) if server else ""
+
+
+def scope_is_current(record: Mapping[str, Any]) -> bool:
+    scope = normalize_scope(str(record.get("scope") or ""))
+    if scope == MAINT_SCOPE_ALL:
+        return True
+    if scope not in SERVERS:
+        return False
+    fingerprint = record.get("scope_fingerprint")
+    return not fingerprint or fingerprint == scope_fingerprint(scope)
 
 
 def scope_label(scope: str | None) -> str:
     normalized = normalize_scope(scope)
     if normalized == MAINT_SCOPE_ALL:
         labels = [label for _, label in server_items()]
-        return ", ".join(labels) if labels else "Все серверы"
+        return clip_text(", ".join(labels), limit=400) if labels else "Все серверы"
     server = SERVERS.get(normalized)
-    return server.label if server else normalized
+    return server.label if server else f"{normalized} (сервер удалён из конфигурации)"
 
 
 def scope_line(scope: str | None) -> str:

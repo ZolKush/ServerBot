@@ -276,7 +276,12 @@ def _exclusive_write(path: Path, text: str, *, mode: int) -> None:
         with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as stream:
             descriptor = -1
             stream.write(text)
-    except Exception:
+            stream.flush()
+            os.fsync(stream.fileno())
+    except BaseException:
+        if descriptor >= 0:
+            os.close(descriptor)
+            descriptor = -1
         path.unlink(missing_ok=True)
         raise
     finally:
@@ -296,7 +301,7 @@ def migrate_files(
 ) -> None:
     """Create both migrated files exclusively, rolling back partial output."""
 
-    if output_public == output_secrets:
+    if output_public.resolve() == output_secrets.resolve():
         raise MigrationError("public and secret output paths must be different")
     existing = [path for path in (output_public, output_secrets) if path.exists()]
     if existing:
@@ -316,7 +321,7 @@ def migrate_files(
         created.append(output_public)
         _exclusive_write(output_secrets, migrated.secrets_text, mode=0o600)
         created.append(output_secrets)
-    except Exception:
+    except BaseException:
         for path in created:
             path.unlink(missing_ok=True)
         raise

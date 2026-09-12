@@ -10,6 +10,7 @@ from collections.abc import Sequence
 from ..config import SUBPROC_MAX_OUTPUT_BYTES
 
 _READ_CHUNK = 64 * 1024
+_REAP_TIMEOUT = 3.0
 
 
 async def _read_limited(stream: asyncio.StreamReader | None, limit: int) -> tuple[bytes, bool]:
@@ -40,11 +41,11 @@ async def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
             if callable(killpg):
                 killpg(proc.pid, sigkill)
     elif proc.returncode is None:
-        with contextlib.suppress(ProcessLookupError):
+        with contextlib.suppress(ProcessLookupError, PermissionError):
             proc.kill()
     if proc.returncode is None:
         with contextlib.suppress(Exception):
-            await proc.wait()
+            await asyncio.wait_for(proc.wait(), timeout=_REAP_TIMEOUT)
 
 
 def _decode(data: bytes, truncated: bool) -> str:
@@ -129,6 +130,12 @@ async def run_exec(
         with contextlib.suppress(BaseException):
             await completion
         raise
+    finally:
+        # Also runs when cancellation interrupts the timeout's kill/reap phase.
+        if not completion.done():
+            completion.cancel()
+            with contextlib.suppress(BaseException):
+                await completion
 
     return int(proc.returncode or 0), _decode(*out_result), _decode(*err_result)
 

@@ -61,7 +61,13 @@ async def _fetch_der_with_trust(domain: str, port: int) -> tuple[bytes, bool, st
     try:
         certificate = await _open_tls(domain, port, context)
     except ssl.SSLCertVerificationError as exc:
-        return await _fetch_der_certificate(domain, port), False, str(exc.verify_message or exc)
+        try:
+            certificate = await _fetch_der_certificate(domain, port)
+        except (OSError, RuntimeError) as diagnostic_error:
+            # Losing the diagnostic handshake cannot erase a proven trust error
+            # or permit fallback to a different, healthy endpoint.
+            raise exc from diagnostic_error
+        return certificate, False, str(getattr(exc, "verify_message", "") or exc)
     if not certificate:
         raise RuntimeError("server did not return a certificate")
     return certificate, True, None
@@ -109,14 +115,6 @@ def _hostname_matches(certificate: x509.Certificate, domain: str) -> bool:
     return False
 
 
-def _certificate_time(certificate: x509.Certificate, attribute: str) -> datetime:
-    value = getattr(certificate, f"{attribute}_utc", None)
-    if isinstance(value, datetime):
-        return value.astimezone(timezone.utc)
-    legacy = getattr(certificate, attribute)
-    return legacy.replace(tzinfo=timezone.utc) if legacy.tzinfo is None else legacy.astimezone(timezone.utc)
-
-
 async def check_tls_endpoint(domain: str, port: int, server_keys: list[str]) -> dict[str, Any]:
     checked_at = datetime.now(timezone.utc)
     result: dict[str, Any] = {
@@ -138,8 +136,8 @@ async def check_tls_endpoint(domain: str, port: int, server_keys: list[str]) -> 
     try:
         certificate_der, trust_valid, trust_error = await _fetch_der_with_trust(domain, port)
         certificate = x509.load_der_x509_certificate(certificate_der)
-        not_before = _certificate_time(certificate, "not_valid_before")
-        not_after = _certificate_time(certificate, "not_valid_after")
+        not_before = certificate.not_valid_before_utc
+        not_after = certificate.not_valid_after_utc
         remaining = not_after - checked_at
         hostname_valid = _hostname_matches(certificate, domain)
         if remaining <= timedelta(0):
@@ -170,6 +168,10 @@ async def check_tls_endpoint(domain: str, port: int, server_keys: list[str]) -> 
                 "remaining_seconds": int(remaining.total_seconds()),
             }
         )
+    except ssl.SSLCertVerificationError as exc:
+        result["status"] = "invalid"
+        result["failure_kind"] = "certificate"
+        result["error"] = f"{exc.__class__.__name__}: {exc}"[:1000]
     except (TimeoutError, OSError, ssl.SSLError) as exc:
         result["failure_kind"] = "transport"
         result["error"] = f"{exc.__class__.__name__}: {exc}"[:1000]

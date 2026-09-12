@@ -9,12 +9,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from ..storage import initialize_storage, mutate_outbox_event
 from .outbox_state import DEAD_LETTER_STATUS
 
 
 async def redrive_outbox_dead_letters(source: str, event_id: str) -> bool:
     """Make retained dead-letter recipients eligible for an explicit retry."""
+
+    from ..storage import mutate_outbox_event
 
     redriven = False
 
@@ -36,6 +37,7 @@ async def redrive_outbox_dead_letters(source: str, event_id: str) -> bool:
                     "status": ("delivered_pending_registration" if delivery_was_recorded else "pending"),
                     "attempts": 0,
                     "next_attempt_at": now,
+                    "retry_started_at": now,
                     "last_error": "",
                     "dead_lettered_at": "",
                 }
@@ -53,12 +55,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--source", choices=("user", "important"), required=True)
     parser.add_argument("--event-id", required=True)
     args = parser.parse_args(argv)
+    from ..runtime.lock import ALREADY_RUNNING_EXIT_CODE, InstanceAlreadyRunning, SingleInstanceLock
+
     try:
-        initialize_storage(args.data_dir)
-        changed = asyncio.run(redrive_outbox_dead_letters(args.source, args.event_id))
+        from ..config import DATA_DIR, INSTANCE_LOCK_PATH
+        from ..storage import initialize_storage
+
+        if args.data_dir.resolve() != Path(DATA_DIR).resolve():
+            print("--data-dir must match DATA_DIR in the selected MAINTBOT_CONFIG_DIR.", file=sys.stderr)
+            return 2
+        with SingleInstanceLock(INSTANCE_LOCK_PATH):
+            initialize_storage(args.data_dir)
+            changed = asyncio.run(redrive_outbox_dead_letters(args.source, args.event_id))
+    except InstanceAlreadyRunning:
+        print("Stop MaintBot before offline outbox redrive.", file=sys.stderr)
+        return ALREADY_RUNNING_EXIT_CODE
     except Exception as exc:
-        detail = " ".join(str(exc).split()) or exc.__class__.__name__
-        print(f"Outbox redrive failed: {detail}", file=sys.stderr)
+        print(f"Outbox redrive failed: {exc.__class__.__name__}", file=sys.stderr)
         return 1
     if not changed:
         print("No dead-letter recipients found for the selected event.", file=sys.stderr)

@@ -8,6 +8,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 APP_ROOT = PROJECT_ROOT / "app"
 TESTS_ROOT = PROJECT_ROOT / "tests"
+TOOLS_ROOT = PROJECT_ROOT / "tools"
 HARD_MODULE_LIMIT = 400
 
 REMOVED_MODULE_PREFIXES = (
@@ -100,7 +101,7 @@ def _internal_import_cycle() -> list[str]:
 def test_python_modules_stay_readable() -> None:
     violations = {
         path.relative_to(PROJECT_ROOT).as_posix(): len(path.read_text(encoding="utf-8").splitlines())
-        for source_root in (APP_ROOT, TESTS_ROOT)
+        for source_root in (APP_ROOT, TESTS_ROOT, TOOLS_ROOT)
         for path in source_root.rglob("*.py")
         if len(path.read_text(encoding="utf-8").splitlines()) > HARD_MODULE_LIMIT
     }

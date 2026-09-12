@@ -73,7 +73,7 @@ async def complete_review_registration(
             recipient_mutation(uid, status="delivered", attempts=attempts),
         )
 
-    dead_letter = should_dead_letter(event, attempts=attempts, now=datetime.now(timezone.utc))
+    dead_letter = should_dead_letter(event, attempts=attempts, now=datetime.now(timezone.utc), state=state)
     return await mutate_outbox_event(
         source,
         event_id,

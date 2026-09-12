@@ -45,6 +45,7 @@ from ..monitoring.tls.jobs import (
 )
 from ..subscriptions.requests.lifecycle import subscription_lifecycle_job
 from ..tickets.jobs import release_orphaned_tickets
+from .job_queue import ManagedJobQueue
 
 JobCallback = Callable[[Any], Any]
 
@@ -230,3 +231,6 @@ def register_jobs(
     _log_monitoring_configuration()
     _register_daily_jobs(application, bot_mode=bot_mode)
     _register_repeating_jobs(application, message_cleanup_job=message_cleanup_job)
+    if isinstance(application.job_queue, ManagedJobQueue):
+        for job in application.job_queue.jobs():
+            job.callback = application.job_queue.managed(job.callback)

@@ -48,20 +48,28 @@ def has_connection(meta: dict[str, Any] | None) -> bool:
     return bool(get_connection_url(meta).strip())
 
 
-def trial_access_expired(meta: dict[str, Any] | None, *, at: datetime | None = None) -> bool:
-    if not meta or meta.get("role") == "admin" or meta.get("service_tier") != "basic":
-        return False
-    raw_end = str(meta.get("trial_end_at") or "").strip()
-    if not raw_end:
-        return False
+def _connection_datetime(value: object) -> datetime | None:
     try:
-        end = datetime.fromisoformat(raw_end)
-    except ValueError:
+        parsed = datetime.fromisoformat(str(value or ""))
+        return parsed.replace(tzinfo=TZ) if parsed.tzinfo is None else parsed.astimezone(TZ)
+    except (ValueError, OverflowError):
+        return None
+
+
+def trial_access_expired(meta: dict[str, Any] | None, *, at: datetime | None = None) -> bool:
+    if not meta or meta.get("role") == "admin" or meta.get("service_tier") != "basic" or meta.get("is_paid"):
         return False
-    if end.tzinfo is None:
-        end = end.replace(tzinfo=TZ)
-    else:
-        end = end.astimezone(TZ)
+    end = _connection_datetime(meta.get("trial_end_at"))
+    if end is None:
+        return False
+    issued = _connection_datetime(meta.get("trial_issued_at"))
+    paid = _connection_datetime(meta.get("paid_at"))
+    if paid and (issued is None or paid >= issued):
+        # Trial history remains after payment; it must not invalidate a paid link.
+        return False
+    replaced = _connection_datetime(meta.get(CONNECTION_UPDATED_AT_KEY))
+    if issued and replaced and replaced > issued:
+        return False
     return (at or datetime.now(TZ)) >= end
 
 
@@ -204,7 +212,8 @@ def _dashboard_text(meta: dict[str, Any]) -> str:
         f"• Персональная ссылка: <b>{'назначена' if has_connection(meta) else 'не назначена'}</b>",
     ]
     if meta.get("trial_end_at"):
-        trial_state = "завершён" if trial_access_expired(meta) else "активен"
+        trial_end = _connection_datetime(meta.get("trial_end_at"))
+        trial_state = "завершён" if trial_end and datetime.now(TZ) >= trial_end else "активен"
         lines.append(
             f"• Тест: <b>{trial_state}</b> до <code>{html_escape(format_dt_human(meta.get('trial_end_at')))}</code>"
         )

@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from ..config import TZ
 from .models import Maintenance, ScheduledMaintenance
-from .policy import MAINT_SCOPE_ALL, hhmm_to_minutes, initial_notified_thresholds, normalize_scope
+from .policy import MAINT_SCOPE_ALL, hhmm_to_minutes, initial_notified_thresholds, normalize_scope, scope_fingerprint
 
 
 def build_maintenance_record(
@@ -26,6 +26,7 @@ def build_maintenance_record(
         "id": uuid4().hex,
         "active": True,
         "scope": normalize_scope(scope),
+        "scope_fingerprint": scope_fingerprint(scope),
         "urgency": urgency,
         "duration_min": duration_min,
         "started_at": now.isoformat(),
@@ -50,6 +51,7 @@ def build_scheduled_maintenance_record(
     return ScheduledMaintenance(
         id=uuid4().hex,
         scope=normalize_scope(scope),
+        scope_fingerprint=scope_fingerprint(scope),
         urgency="planned",
         duration_min=duration_min,
         scheduled_start=start_at.isoformat(),
@@ -78,6 +80,7 @@ def scheduled_to_active_record(scheduled: ScheduledMaintenance) -> Maintenance:
         id=str(scheduled.get("id") or uuid4().hex),
         active=True,
         scope=normalize_scope(str(scheduled.get("scope") or MAINT_SCOPE_ALL)),
+        scope_fingerprint=str(scheduled.get("scope_fingerprint") or ""),
         urgency="planned",
         duration_min=max(duration_min, 1),
         started_at=start_at.isoformat(),

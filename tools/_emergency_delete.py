@@ -5,10 +5,11 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import asdict, dataclass
-from datetime import timedelta
 from typing import Any, Protocol
 
 from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter
+
+from app.messaging.telegram_rate import retry_after_seconds
 
 
 class DeletingBot(Protocol):
@@ -102,8 +103,7 @@ class RangeDeleter:
             except Forbidden:
                 raise
             except RetryAfter as exc:
-                delay = exc.retry_after
-                seconds = delay.total_seconds() if isinstance(delay, timedelta) else float(delay)
+                seconds = retry_after_seconds(exc, minimum=0.0)
                 self.emit("RETRY", **details, reason="RetryAfter", attempt=attempt)
                 # Wait even on the last attempt: the limit applies to later requests too.
                 await self._wait(max(0.0, seconds) + 1, chat_id)

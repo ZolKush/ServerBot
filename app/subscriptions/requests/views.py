@@ -7,7 +7,7 @@ from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-from ...bot.ui import clip_html, html_escape
+from ...bot.ui import clip_html, clip_html_message, clip_text, html_escape
 from ...storage import get_user_meta_copy
 from ...users.staff import is_owner_meta, staff_internal_identity
 from ..policy import PLAN_MONTHS, PLAN_TOTAL_RUB
@@ -85,7 +85,7 @@ def request_card(request: dict[str, Any], meta: dict[str, Any]) -> str:
         lines.append(f"• Обрабатывает: <code>{html_escape(claimed_identity)}</code>")
     if comment:
         lines.extend(["", "<b>Комментарий пользователя:</b>", clip_html(comment, limit=1400)])
-    return "\n".join(lines)
+    return clip_html_message("\n".join(lines))
 
 
 def request_markup(request: dict[str, Any], actor_meta: dict[str, Any]) -> InlineKeyboardMarkup:
@@ -208,7 +208,7 @@ def render_payment_template(settings: dict[str, Any], *, access_until: object) -
     }
     for placeholder, value in replacements.items():
         rendered = rendered.replace(placeholder, value)
-    return rendered
+    return clip_text(rendered, limit=PAYMENT_MESSAGE_MAX_LENGTH)
 
 
 def payment_profile_ready(settings: dict[str, Any]) -> bool:

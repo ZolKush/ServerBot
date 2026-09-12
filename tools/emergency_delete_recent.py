@@ -55,7 +55,7 @@ def _parser() -> argparse.ArgumentParser:
 class Reporter:
     def __init__(self, stream: TextIO | None, secrets: tuple[str, ...]) -> None:
         self.stream = stream
-        self.secrets = tuple(value for value in secrets if value)
+        self.secrets = tuple(sorted({value for value in secrets if value}, key=len, reverse=True))
 
     def __call__(self, event: str, **fields: Any) -> None:
         record = {"time": datetime.now(timezone.utc).isoformat(), "event": event, **fields}
@@ -71,7 +71,11 @@ class Reporter:
 
 def _private_report(path: Path) -> TextIO:
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    return os.fdopen(fd, "w", encoding="utf-8")
+    try:
+        return os.fdopen(fd, "w", encoding="utf-8")
+    except BaseException:
+        os.close(fd)
+        raise
 
 
 def _run_locked(args: argparse.Namespace, token: str, data_dir: Path | str, emit: Reporter) -> int:

@@ -113,8 +113,9 @@ class StorageFacade:
                 raise
 
     def user_meta(self, user_id: int) -> dict[str, Any] | None:
-        meta = self.authorized_users().get(str(user_id))
-        return meta if isinstance(meta, dict) else None
+        with self._publish_lock:
+            meta = self._user.authorized_users.get(str(user_id))
+            return copy.deepcopy(meta) if isinstance(meta, dict) else None
 
     def authorized_users(self) -> dict[str, dict[str, Any]]:
         with self._publish_lock:
@@ -164,8 +165,9 @@ class StorageFacade:
         return item if item.get("id") else None
 
     def ticket(self, ticket_id: int) -> dict[str, Any] | None:
-        item = self.important_snapshot().tickets.get(str(ticket_id))
-        return copy.deepcopy(item) if isinstance(item, dict) else None
+        with self._publish_lock:
+            item = self._important.tickets.get(str(ticket_id))
+            return copy.deepcopy(item) if isinstance(item, dict) else None
 
     def all_tickets(self) -> dict[str, dict[str, Any]]:
         return {
@@ -197,9 +199,17 @@ class StorageFacade:
         return staff_public_signature(meta)
 
     def cache_item(self, field: str, server_key: str) -> dict[str, Any] | None:
-        value = getattr(self.important_snapshot(), field)
-        item = value.get(str(server_key)) if isinstance(value, dict) else None
-        return copy.deepcopy(item) if isinstance(item, dict) else None
+        with self._publish_lock:
+            value = getattr(self._important, field)
+            item = value.get(str(server_key)) if isinstance(value, dict) else None
+            return copy.deepcopy(item) if isinstance(item, dict) else None
+
+    def outbox_event(self, source: str, event_id: str) -> dict[str, Any] | None:
+        if source not in {"user", "important"}:
+            raise ValueError(f"unknown outbox source: {source}")
+        with self._publish_lock:
+            aggregate = self._user if source == "user" else self._important
+            return copy.deepcopy(aggregate.outbox.get(event_id))
 
     def outbox(self) -> list[tuple[str, dict[str, Any]]]:
         with self._publish_lock:

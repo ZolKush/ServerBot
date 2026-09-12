@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import re
 
 SERVER_KEY_PATTERN = r"[a-z0-9_-]{1,12}"
@@ -15,21 +16,36 @@ def validate_ssh_target(value: str) -> str:
         return ""
     if target.startswith("-") or not _SSH_TARGET_RE.fullmatch(target):
         raise ValueError("SSH target has invalid format")
+    if target.count("@") > 1:
+        raise ValueError("SSH target has invalid username")
+    if "@" in target and not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", target.split("@", 1)[0]):
+        raise ValueError("SSH target has invalid username")
     host_part = target.rsplit("@", 1)[-1]
     port_text = ""
     if host_part.startswith("["):
         closing = host_part.find("]")
         if closing < 0:
             raise ValueError("SSH target has an unclosed IPv6 bracket")
+        try:
+            ipaddress.IPv6Address(host_part[1:closing])
+        except ValueError:
+            raise ValueError("SSH target has invalid IPv6 address") from None
         suffix = host_part[closing + 1 :]
         if suffix:
             if not suffix.startswith(":") or not suffix[1:].isdigit():
                 raise ValueError("SSH target port has invalid format")
             port_text = suffix[1:]
     elif host_part.count(":") == 1:
-        _host, maybe_port = host_part.rsplit(":", 1)
-        if maybe_port.isdigit():
-            port_text = maybe_port
+        host_part, port_text = host_part.rsplit(":", 1)
+        if not port_text.isdigit():
+            raise ValueError("SSH target port has invalid format")
+    elif ":" in host_part:
+        try:
+            ipaddress.IPv6Address(host_part)
+        except ValueError:
+            raise ValueError("SSH target has invalid IPv6 address") from None
+    if ":" not in host_part and not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", host_part):
+        raise ValueError("SSH target has invalid hostname")
     if port_text and not 1 <= int(port_text) <= 65535:
         raise ValueError("SSH target port out of range")
     return target

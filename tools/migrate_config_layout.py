@@ -111,7 +111,7 @@ def _convert_value(key: str, value: str, default: Any) -> Any:
 
 
 def build_bot_document(env: dict[str, str], template: dict[str, Any]) -> dict[str, Any]:
-    if template.get("version") != 1:
+    if type(template.get("version")) is not int or template["version"] != 1:
         raise ConfigMigrationError("bot template must have version=1")
     allowed = set(template) - {"version"}
     secrets = sorted(set(env) & _SECRET_KEYS)
@@ -137,7 +137,12 @@ def load_toml_servers(path: Path) -> list[dict[str, Any]]:
             raw = tomllib.load(stream)
     except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
         raise ConfigMigrationError(f"cannot read server inventory {path}: {exc}") from exc
-    if not isinstance(raw, dict) or set(raw) != {"version", "servers"} or raw.get("version") != 1:
+    if (
+        not isinstance(raw, dict)
+        or set(raw) != {"version", "servers"}
+        or type(raw.get("version")) is not int
+        or raw["version"] != 1
+    ):
         raise ConfigMigrationError("server inventory must contain exactly version=1 and servers")
     raw_servers = raw.get("servers")
     if not isinstance(raw_servers, dict) or not raw_servers:
@@ -151,6 +156,8 @@ def load_toml_servers(path: Path) -> list[dict[str, Any]]:
             raise ConfigMigrationError(f"server inventory contains invalid key: {key}")
         if not isinstance(raw_server, dict):
             raise ConfigMigrationError(f"server inventory entry is not an object: {key}")
+        if {"key", "version"} & raw_server.keys():
+            raise ConfigMigrationError(f"server entry must not override key or version: {key}")
         document = {"version": 1, "key": key, **raw_server}
         document.setdefault("display_order", index * 10)
         connection = document.get("connection")
@@ -163,7 +170,10 @@ def load_toml_servers(path: Path) -> list[dict[str, Any]]:
 
 
 def _encode(document: dict[str, Any]) -> bytes:
-    return (json.dumps(document, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    try:
+        return (json.dumps(document, ensure_ascii=False, indent=2, allow_nan=False) + "\n").encode("utf-8")
+    except (ValueError, TypeError, RecursionError):
+        raise ConfigMigrationError("configuration contains non-JSON values") from None
 
 
 def _write_private(path: Path, payload: bytes) -> None:
@@ -192,16 +202,22 @@ def _sync_directory(path: Path) -> None:
 def write_layout(output_dir: Path, bot: dict[str, Any], servers: list[dict[str, Any]]) -> None:
     if output_dir.exists():
         raise ConfigMigrationError(f"refusing to overwrite existing output: {output_dir}")
+    keys = [document.get("key") for document in servers]
+    if not keys or any(not isinstance(key, str) or not _SERVER_KEY.fullmatch(key) for key in keys):
+        raise ConfigMigrationError("server documents contain invalid keys")
+    if len(set(keys)) != len(keys):
+        raise ConfigMigrationError("server documents contain duplicate keys")
+    encoded_bot, encoded_servers = _encode(bot), [_encode(document) for document in servers]
     output_dir.parent.mkdir(parents=True, exist_ok=True)
     temporary = output_dir.parent / f".{output_dir.name}.{uuid.uuid4().hex}.tmp"
     try:
         temporary.mkdir(mode=0o700)
         server_dir = temporary / "servers"
         server_dir.mkdir(mode=0o700)
-        _write_private(temporary / "bot.json", _encode(bot))
-        for index, document in enumerate(servers, start=1):
+        _write_private(temporary / "bot.json", encoded_bot)
+        for index, (document, payload) in enumerate(zip(servers, encoded_servers, strict=True), start=1):
             filename = f"{index * 10:03d}-{document['key']}.json"
-            _write_private(server_dir / filename, _encode(document))
+            _write_private(server_dir / filename, payload)
         _sync_directory(server_dir)
         _sync_directory(temporary)
         temporary.replace(output_dir)

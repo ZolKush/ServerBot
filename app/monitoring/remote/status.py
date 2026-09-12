@@ -6,7 +6,6 @@ import re
 import shlex
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import timedelta
 
 from ...config import (
     DOCKER_BIN,
@@ -18,6 +17,8 @@ from ...config import (
 )
 from ..docker.models import docker_status_is_running
 from ..system.metrics import _fmt_bytes_binary
+from ..system.metrics import parse_meminfo_text as _parse_meminfo_text
+from ..system.metrics import parse_uptime_text as _parse_uptime_from_proc
 from ..system.ufw import _parse_ufw_rules, _parse_ufw_status
 from .transport import ssh_run_shell
 
@@ -83,40 +84,6 @@ def _split_sections(text: str) -> dict[str, str]:
         if current:
             sections[current].append(line)
     return {key: "\n".join(lines).strip("\n") for key, lines in sections.items()}
-
-
-def _parse_uptime_from_proc(raw: str) -> str:
-    try:
-        seconds = int(float((raw or "").split()[0]))
-    except Exception:
-        return "н/д"
-    uptime = timedelta(seconds=seconds)
-    days = uptime.days
-    hours, remainder = divmod(uptime.seconds, 3600)
-    minutes, _ = divmod(remainder, 60)
-    parts: list[str] = []
-    if days:
-        parts.append(f"{days} д")
-    if hours:
-        parts.append(f"{hours} ч")
-    if minutes or not parts:
-        parts.append(f"{minutes} м")
-    return " ".join(parts)
-
-
-def _parse_meminfo_text(raw: str) -> str:
-    try:
-        values: dict[str, int] = {}
-        for line in (raw or "").splitlines():
-            match = re.match(r"^(\w+):\s+(\d+)\s+kB$", line.strip())
-            if match:
-                values[match.group(1)] = int(match.group(2))
-        total_kib = values.get("MemTotal", 0)
-        available_kib = values.get("MemAvailable", values.get("MemFree", 0))
-        used_kib = max(total_kib - available_kib, 0)
-        return f"{int(round(used_kib / 1024.0))} / {int(round(total_kib / 1024.0))} MiB"
-    except Exception:
-        return "н/д"
 
 
 def _parse_df_bytes_text(raw: str) -> str:

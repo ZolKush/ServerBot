@@ -2,6 +2,7 @@ import re
 
 from ...bot.ui import (
     SEP,
+    clip_html_message,
     extract_percent,
     footer_updated,
     header,
@@ -108,9 +109,9 @@ def _format_metrics_error_message(snapshot: StatusSnapshot) -> str:
 
 def format_status_message(snapshot: StatusSnapshot) -> str:
     if snapshot.source_mode == "mixed" and snapshot.metrics_error:
-        return _format_metrics_error_message(snapshot)
+        return clip_html_message(_format_metrics_error_message(snapshot))
     if snapshot.source_mode == "mixed" and snapshot.node_online is False:
-        return _format_offline_message(snapshot)
+        return clip_html_message(_format_offline_message(snapshot))
 
     status_text = ""
     if snapshot.source_mode == "mixed" and snapshot.node_online is True:
@@ -160,7 +161,7 @@ def format_status_message(snapshot: StatusSnapshot) -> str:
     lines.append("")
     lines.append(footer_updated(snapshot.now_text))
 
-    return "\n".join(lines)
+    return clip_html_message("\n".join(lines))
 
 
 def format_ufw_message(snapshot: StatusSnapshot) -> str:
@@ -181,4 +182,4 @@ def format_ufw_message(snapshot: StatusSnapshot) -> str:
         lines.extend(_fmt_ufw_list(snapshot.ufw_reject))
     else:
         lines.append("• Дополнительные правила UFW недоступны.")
-    return "\n".join(lines)
+    return clip_html_message("\n".join(lines))

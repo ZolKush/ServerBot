@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,13 @@ def _object_without_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
+def _finite_number(value: str) -> float:
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError("non-finite JSON number")
+    return number
+
+
 def load_json_object(path: str | Path, *, field_name: str) -> dict[str, Any]:
     """Read one UTF-8 JSON object while rejecting duplicates and oversized input."""
 
@@ -41,11 +49,18 @@ def load_json_object(path: str | Path, *, field_name: str) -> dict[str, Any]:
         raise JsonConfigError(f"{field_name} is larger than {MAX_CONFIG_BYTES} bytes: {config_path}")
     try:
         text = payload.decode("utf-8")
-        raw = json.loads(text, object_pairs_hook=_object_without_duplicates)
-    except (UnicodeError, json.JSONDecodeError, _DuplicateKey) as exc:
+        raw = json.loads(
+            text,
+            object_pairs_hook=_object_without_duplicates,
+            parse_float=_finite_number,
+            parse_constant=_finite_number,
+        )
+    except (UnicodeError, ValueError, RecursionError) as exc:
         raise JsonConfigError(f"invalid {field_name} {config_path}: {exc}") from None
     if not isinstance(raw, dict):
         raise JsonConfigError(f"{field_name} root must be a JSON object: {config_path}")
+    if "version" in raw and type(raw["version"]) is not int:
+        raise JsonConfigError(f"{field_name} version must be a JSON integer: {config_path}")
     return raw
 
 

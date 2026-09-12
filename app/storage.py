@@ -74,6 +74,7 @@ get_all_tickets_snapshot = _FACADE.all_tickets
 get_user_open_tickets = _FACADE.user_open_tickets
 get_admin_name_by_id = _FACADE.admin_name
 outbox_snapshot = _FACADE.outbox
+get_outbox_event = _FACADE.outbox_event
 mutate_user_meta = _FACADE.mutate_user_meta
 mutate_outbox_event = _FACADE.mutate_outbox
 finalize_outbox_event = _FACADE.finalize_outbox

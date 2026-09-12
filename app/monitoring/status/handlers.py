@@ -12,7 +12,7 @@ from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
 from ...bot.guards import require_admin, require_subscriber
-from ...bot.ui import html_escape, ui_error_text, ui_info_text
+from ...bot.ui import clip_html_message, html_escape, ui_error_text, ui_info_text
 from ...config import SERVERS, logger
 from ...messaging.message_cleanup import record_navigation_result
 from ...storage import set_dns_status_cache
@@ -174,9 +174,9 @@ async def _refresh_status_screen(update: Update, *, server_key: str) -> None:
     if lock.locked():
         await query.answer("Обновление уже выполняется.", show_alert=False)
         return
-    await query.answer("Обновляю метрики и DNS...")
     started = time.monotonic()
     async with lock:
+        await query.answer("Обновляю метрики и DNS...")
         errors: list[str] = []
         refreshes: list[Awaitable[Any]] = [build_dns_status_payload_live(server)]
         use_metrics = server_uses_metrics(server)
@@ -221,7 +221,7 @@ async def _refresh_status_screen(update: Update, *, server_key: str) -> None:
         text, markup = await build_status_message(update, server_key=server.key)
         note = ui_error_text("; ".join(errors)) if errors else ui_info_text("Метрики и DNS обновлены.")
         await query.edit_message_text(
-            text + "\n\n" + note,
+            clip_html_message(text + "\n\n" + note),
             parse_mode=ParseMode.HTML,
             reply_markup=markup,
         )

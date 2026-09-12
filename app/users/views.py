@@ -3,7 +3,7 @@ from typing import Any
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from ..bot.guards import display_name_from_meta, get_user_meta
-from ..bot.ui import clip_html, format_dt_human, html_escape, pager_row
+from ..bot.ui import clip_html, clip_html_message, format_dt_human, html_escape, pager_row
 from ..storage import authorized_users_snapshot, get_user_audit_entries
 from ..subscriptions.connections import CONNECTION_URL_KEY
 from .staff import (
@@ -325,4 +325,4 @@ def format_user_card(meta: dict[str, Any]) -> str:
                 f"{_field(item.get('actor_public') or 'Система', limit=180)} "
                 f"(<code>{_field(item.get('actor_internal'), limit=260)}</code>)"
             )
-    return "\n".join(lines)
+    return clip_html_message("\n".join(lines))

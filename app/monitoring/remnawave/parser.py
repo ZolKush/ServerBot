@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 from typing import TypeAlias
 
@@ -8,7 +9,9 @@ from .models import NodeMetrics
 MetricRecord: TypeAlias = tuple[dict[str, str], float]
 MetricGroups: TypeAlias = dict[str, dict[str, MetricRecord]]
 
-_METRIC_LINE_RE = re.compile(r"^([A-Za-z_:][A-Za-z0-9_:]*)(?:\{([^}]*)\})?\s+([^\s]+)\s*$")
+_METRIC_LINE_RE = re.compile(
+    r'^([A-Za-z_:][A-Za-z0-9_:]*)(?:\{((?:[^{}"\\]|"(?:[^"\\]|\\.)*")*)\})?\s+(\S+)(?:\s+[+-]?\d+)?\s*$'
+)
 _LABEL_RE = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)="((?:[^"\\]|\\.)*)"')
 
 _HOT_METRIC_NAMES = {
@@ -57,7 +60,9 @@ def _parse_value(raw: str) -> float | None:
     if not value:
         return None
     try:
-        return float(value)
+        parsed = float(value)
+        # Non-finite samples are legal Prometheus, but unusable node gauges.
+        return parsed if math.isfinite(parsed) and parsed >= 0 else None
     except ValueError:
         return None
 
@@ -66,6 +71,7 @@ def parse_prometheus_text(text: str) -> MetricGroups:
     """Parse the RemnaWave subset of Prometheus text metrics, grouped by node UUID."""
     grouped: MetricGroups = {}
     for line in (text or "").splitlines():
+        line = line.strip()
         if not line or line.startswith("#"):
             continue
         match = _METRIC_LINE_RE.match(line)
@@ -88,19 +94,22 @@ def build_nodes(grouped: MetricGroups) -> dict[str, NodeMetrics]:
 
     def integer(metric_name: str, uuid: str) -> int | None:
         record = grouped.get(metric_name, {}).get(uuid)
-        return int(record[1]) if record else None
+        if not record or not math.isfinite(record[1]) or not 0 <= record[1] < 2**63:
+            return None
+        return int(record[1]) if float(record[1]).is_integer() else None
 
     def floating(metric_name: str, uuid: str) -> float | None:
         record = grouped.get(metric_name, {}).get(uuid)
-        return float(record[1]) if record else None
+        return float(record[1]) if record and math.isfinite(record[1]) and record[1] >= 0 else None
 
     nodes: dict[str, NodeMetrics] = {}
     for uuid in uuids:
         info = grouped.get("remnawave_node_basic_info", {}).get(uuid)
         labels = info[0] if info else {}
+        status = integer("remnawave_node_status", uuid)
         nodes[uuid] = NodeMetrics(
             uuid=uuid,
-            status=integer("remnawave_node_status", uuid),
+            status=status if status in (0, 1) else None,
             online_users=integer("remnawave_node_online_users", uuid),
             uptime_s=floating("remnawave_node_uptime_seconds", uuid),
             mem_total=integer("remnawave_node_memory_total_bytes", uuid),

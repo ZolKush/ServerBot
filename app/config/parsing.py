@@ -24,7 +24,7 @@ def resolve_bin(*candidates: str) -> str:
 
 def country_flag(value: str) -> str:
     code = (value or "").strip().upper()
-    if len(code) != 2 or not code.isalpha():
+    if len(code) != 2 or not code.isascii() or not code.isalpha():
         return "🖥"
     base = 0x1F1E6
     return "".join(chr(base + ord(char) - ord("A")) for char in code)

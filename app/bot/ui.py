@@ -7,6 +7,7 @@ views may build on these primitives, but the primitives never import features.
 from __future__ import annotations
 
 import html
+import math
 import re
 from datetime import datetime
 from typing import Any
@@ -16,6 +17,8 @@ from telegram.constants import ParseMode
 from telegram.error import BadRequest
 
 from ..config import TZ, logger
+from .text_limits import clip_html_message as clip_html_message
+from .text_limits import clip_plain_text
 
 
 def html_escape(value: str) -> str:
@@ -52,40 +55,16 @@ def breadcrumbs(*parts: str) -> str:
 def clip_text(value: str, limit: int = 3300) -> str:
     if value is None:
         return ""
-    text = str(value)
-    return text if len(text) <= limit else (text[:limit] + "\n…(truncated)…")
+    return clip_plain_text(str(value), limit)
 
 
 def clip_html(value: str, limit: int = 3300) -> str:
     """Escape HTML and then truncate to the Telegram-oriented limit."""
-    escaped = html_escape("" if value is None else str(value))
-    if len(escaped) <= limit:
-        return escaped
-    cut = escaped[:limit]
-    amp = cut.rfind("&")
-    if amp != -1 and ";" not in cut[amp:]:
-        cut = cut[:amp]
-    return cut + "\n…(truncated)…"
+    return clip_html_message(html_escape("" if value is None else str(value)), limit)
 
 
 def wrap_as_codeblock_html(text: str, limit: int = 3300) -> str:
     return f"<pre><code>{clip_html(text, limit)}</code></pre>"
-
-
-def clip_html_message(text: str, limit: int = 4000) -> str:
-    value = str(text or "")
-    if len(value) <= limit:
-        return value
-    suffix = "\n<i>…сообщение сокращено из-за лимита Telegram</i>"
-    kept: list[str] = []
-    length = 0
-    for line in value.splitlines():
-        extra = len(line) + (1 if kept else 0)
-        if length + extra + len(suffix) > limit:
-            break
-        kept.append(line)
-        length += extra
-    return ("\n".join(kept) + suffix) if kept else html_escape(value[: limit - len(suffix)]) + suffix
 
 
 def now_str() -> str:
@@ -98,12 +77,9 @@ def format_dt_human(value: Any, *, empty: str = "-", tz_label: str = "по МС�
         return empty
     try:
         parsed = datetime.fromisoformat(raw)
-    except ValueError:
+        parsed = parsed.replace(tzinfo=TZ) if parsed.tzinfo is None else parsed.astimezone(TZ)
+    except (ValueError, OverflowError):
         return raw
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=TZ)
-    else:
-        parsed = parsed.astimezone(TZ)
     return f"{parsed.strftime('%d.%m.%Y %H:%M')} {tz_label}"
 
 
@@ -117,14 +93,17 @@ async def safe_edit_or_reply(
     """Edit a Telegram message and fall back to a reply without duplicates."""
     if message is None:
         return None
-    text = clip_html_message(text)
+    text = clip_html_message(text) if parse_mode == ParseMode.HTML else clip_text(text, limit=4000)
     try:
         return await message.edit_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
     except BadRequest as error:
         if "message is not modified" in str(error).lower():
             return message
-        logger.warning("edit_text не удался (%s), отправляю новое сообщение", error)
-    except Exception as error:
+        if not any(
+            marker in str(error).lower()
+            for marker in ("message to edit not found", "message can't be edited", "message can’t be edited")
+        ):
+            raise
         logger.warning("edit_text не удался (%s), отправляю новое сообщение", error)
     try:
         return await message.reply_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
@@ -180,7 +159,7 @@ _METRIC_LABEL_WIDTH = 5
 
 
 def metric_line(label: str, percent: float | None, detail: str = "") -> str:
-    if percent is None:
+    if percent is None or not math.isfinite(percent):
         suffix = f": {html_escape(detail)}" if detail else ""
         return f"{html_escape(label)}{suffix}"
     value = int(max(0, min(100, round(float(percent)))))
@@ -208,7 +187,7 @@ def used_total_percent(used: float, total: float) -> int | None:
         total_value = float(total)
     except (TypeError, ValueError):
         return None
-    if total_value <= 0 or used_value < 0:
+    if not math.isfinite(total_value) or not math.isfinite(used_value) or total_value <= 0 or used_value < 0:
         return None
     return int(max(0, min(100, round(used_value / total_value * 100))))
 

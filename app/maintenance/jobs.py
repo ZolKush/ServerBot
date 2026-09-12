@@ -18,7 +18,7 @@ from .operations import (
     mark_schedule_thresholds,
     queue_active_reminder,
 )
-from .policy import MAINT_WARN_THRESHOLDS_MIN, due_thresholds, initial_notified_thresholds
+from .policy import MAINT_WARN_THRESHOLDS_MIN, due_thresholds, initial_notified_thresholds, scope_is_current
 from .views import (
     maintenance_active_reminder_text,
     maintenance_scheduled_soon_notice,
@@ -49,6 +49,25 @@ async def maint_restart_notify(context: ContextTypes.DEFAULT_TYPE) -> None:
 async def maint_schedule_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
     scheduled = get_scheduled_maintenance()
     if not scheduled:
+        return
+
+    if not scope_is_current(scheduled):
+        warned = bool(scheduled.get("announced_thresholds") or scheduled.get("notified_before"))
+        recipients = authorized_ids() if warned else maintenance_manager_ids()
+        event = (
+            make_outbox_event(
+                kind="maintenance_schedule_invalid",
+                recipient_ids=recipients,
+                payload=message_payload(
+                    "⚠️ <b>Запланированные техработы отменены</b>\n"
+                    "Сервер удалён или его конфигурация изменилась. Администратору необходимо создать план заново."
+                ),
+            )
+            if recipients
+            else None
+        )
+        await expire_schedule(scheduled, event)
+        logger.warning("Cancelled maintenance schedule for obsolete server id=%s", scheduled.get("id"))
         return
 
     try:

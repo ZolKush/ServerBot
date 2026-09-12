@@ -11,6 +11,7 @@ from ...config import (
     SSH_KNOWN_HOSTS_FILE,
     SSH_STRICT_HOST_KEY_CHECKING,
 )
+from ...config.validators import validate_ssh_target
 from ...runtime.process import run_exec
 
 _OUT_BEGIN = "__MBOT_OUT_BEGIN_43e1f3c4__"
@@ -34,7 +35,7 @@ def _extract_wrapped_stdout(text: str) -> str:
 
 
 def _split_ssh_target(target: str) -> tuple[str, int | None]:
-    target = (target or "").strip()
+    target = validate_ssh_target(target)
     if not target:
         return target, None
 

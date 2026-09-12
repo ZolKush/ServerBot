@@ -34,6 +34,7 @@ from .conversations import reset_navigation_state
 from .easter_eggs import RANEPA_TEXT, ranepa_easter_egg
 from .errors import blocked_user_guard, fallback_text, on_error, unhandled_callback
 from .flow_routes import PRIVATE_TEXT
+from .job_queue import ManagedJobQueue
 from .jobs import register_jobs
 from .persistence import build_atomic_persistence
 from .routes import register_routes
@@ -83,6 +84,7 @@ def build_application(*, bot_mode: str = BOT_MODE) -> Application:
                 "Could not reconcile monitoring cache with configured servers",
                 extra={"action": "monitoring_cache_reconcile_failed"},
             )
+            raise
         else:
             total_removed = sum(removed.values())
             if total_removed:
@@ -118,6 +120,7 @@ def build_application(*, bot_mode: str = BOT_MODE) -> Application:
     application: Application = (
         ApplicationBuilder()
         .bot(bot)
+        .job_queue(ManagedJobQueue())
         .persistence(build_atomic_persistence(PTB_PERSISTENCE_PATH))
         .post_init(post_init)
         .post_shutdown(_post_shutdown)

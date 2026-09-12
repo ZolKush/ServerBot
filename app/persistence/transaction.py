@@ -14,6 +14,7 @@ from typing import Any
 from .errors import PreparedTransactionError, RecoveryError, SchemaError, StorageConflictError
 from .io import (
     encode_json,
+    fsync_directory,
     read_json,
     replace_durable,
     resolve_inside,
@@ -110,12 +111,16 @@ class TransactionCoordinator:
                 files=tuple(files),
                 created_at=datetime.now(timezone.utc).isoformat(),
             )
-            write_bytes_durable(tx_root / _JOURNAL_FILE, _encode_journal(journal), exclusive=True)
-            prepared = True
             try:
+                write_atomic(tx_root / _JOURNAL_FILE, _encode_journal(journal))
+                prepared = True
                 self._hit("after_prepare")
                 self._install(tx_root, journal)
             except Exception:
+                # Publication may have succeeded before its directory fsync failed.
+                prepared = prepared or (tx_root / _JOURNAL_FILE).is_file()
+                if not prepared:
+                    raise
                 # PREPARED is the durable commit point.  A normal, recoverable
                 # filesystem error after it must not be reported as an aborted
                 # mutation: retry redo once while the state lock is still held.
@@ -156,6 +161,7 @@ class TransactionCoordinator:
             recovered.append(journal.transaction_id)
         with contextlib.suppress(OSError):
             self.transactions_root.rmdir()
+            fsync_directory(self.data_root)
         return recovered
 
     def validate_pending(self) -> list[str]:
@@ -220,6 +226,7 @@ class TransactionCoordinator:
         _remove_transaction_tree(tx_root)
         with contextlib.suppress(OSError):
             self.transactions_root.rmdir()
+            fsync_directory(self.data_root)
 
     def _preflight_install(
         self,
@@ -306,7 +313,7 @@ def _encode_journal(journal: TransactionJournal) -> bytes:
 def _parse_journal(raw: Any) -> TransactionJournal:
     if not isinstance(raw, dict) or set(raw) != _JOURNAL_KEYS:
         raise RecoveryError("transaction journal has an invalid shape")
-    if raw["schema_version"] != TRANSACTION_SCHEMA_VERSION:
+    if type(raw["schema_version"]) is not int or raw["schema_version"] != TRANSACTION_SCHEMA_VERSION:
         raise RecoveryError("transaction journal has an unsupported schema version")
     tx_id = raw["transaction_id"]
     state = raw["state"]
@@ -319,6 +326,8 @@ def _parse_journal(raw: Any) -> TransactionJournal:
         raise RecoveryError("transaction journal has no creation time")
     base_revision = _journal_revision(raw["base_revision"], "base_revision")
     target_revision = _journal_revision(raw["target_revision"], "target_revision")
+    if target_revision != base_revision + 1:
+        raise RecoveryError("transaction must advance the revision by exactly one")
     raw_files = raw["files"]
     if not isinstance(raw_files, list) or not raw_files:
         raise RecoveryError("transaction journal has no files")
@@ -360,6 +369,8 @@ def _journal_revision(value: Any, label: str) -> int:
 def _remove_transaction_tree(path: Path) -> None:
     if path.exists():
         shutil.rmtree(path)
+        # Otherwise an old COMMITTED journal can reappear after a power failure.
+        fsync_directory(path.parent)
 
 
 __all__ = ["TransactionCoordinator", "TransactionJournal"]

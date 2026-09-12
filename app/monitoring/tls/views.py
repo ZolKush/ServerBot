@@ -6,7 +6,7 @@ from datetime import datetime
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-from ...bot.ui import SEP, breadcrumbs, html_escape
+from ...bot.ui import SEP, breadcrumbs, clip_html_message, html_escape
 from ..status.models import TLSCertificateView
 
 MAX_REPORT_CERTIFICATES = 15
@@ -68,7 +68,7 @@ def format_tls_report(server_label: str, items: list[TLSCertificateView]) -> str
     if hidden > 0:
         lines.append(f"<i>… ещё {hidden} сертификатов</i>")
     lines.append("Сетевая проверка выполняется при запуске бота, затем один раз в неделю.")
-    return "\n".join(lines).strip()
+    return clip_html_message("\n".join(lines).strip())
 
 
 __all__ = ["format_tls_report", "tls_report_keyboard"]

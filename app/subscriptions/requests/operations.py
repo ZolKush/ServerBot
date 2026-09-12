@@ -182,7 +182,9 @@ def finalize_trial(
     if previous_url and normalized_url == previous_url:
         raise ValueError("connection_not_fresh")
     issued_at = state.now()
-    trial_end = issued_at + timedelta(hours=duration_hours)
+    trial_end = state.parse_datetime(request.get("target_end_at")) or issued_at + timedelta(hours=duration_hours)
+    if not issued_at < trial_end <= issued_at + timedelta(hours=duration_hours):
+        raise ValueError("invalid_target")
     updated = dict(current)
     updated[CONNECTION_URL_KEY] = normalized_url
     updated["subscription_updated_at"] = issued_at.isoformat()
@@ -263,7 +265,7 @@ def finalize_payment(
         updated["subscription_updated_at"] = state.now_iso()
         updated["subscription_updated_by_id"] = actor.get("user_id")
         updated["subscription_updated_by_name"] = staff_public_signature(actor)
-    if not str(updated.get(CONNECTION_URL_KEY) or "").strip():
+    if not is_valid_connection_url(updated.get(CONNECTION_URL_KEY)):
         raise ValueError("connection_missing")
     timestamp = state.now_iso()
     updated.update(

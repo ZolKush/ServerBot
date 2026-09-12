@@ -74,7 +74,7 @@ async def check_uptime() -> str:
             Path("/proc/uptime").read_text,
             encoding="utf-8",
         )
-        return _format_uptime(int(float(raw.split()[0])))
+        return parse_uptime_text(raw)
     except Exception:
         return_code, stdout, _ = await run_exec(
             ["uptime", "-p"],
@@ -85,23 +85,35 @@ async def check_uptime() -> str:
         return _parse_uptime_p(stdout.strip()) or "н/д"
 
 
+def parse_uptime_text(raw: str) -> str:
+    try:
+        seconds = int(float(raw.split()[0]))
+        return _format_uptime(seconds) if seconds >= 0 else "н/д"
+    except (ValueError, IndexError, OverflowError):
+        return "н/д"
+
+
+def parse_meminfo_text(raw: str) -> str:
+    values: dict[str, int] = {}
+    for line in raw.splitlines():
+        match = re.match(r"^(\w+):\s+(\d{1,20})\s+kB$", line.strip())
+        if match:
+            values[match.group(1)] = int(match.group(2))
+    total_kib = values.get("MemTotal", 0)
+    available_kib = values.get("MemAvailable", values.get("MemFree"))
+    if total_kib <= 0 or available_kib is None or not 0 <= available_kib <= total_kib:
+        return "н/д"
+    used_kib = total_kib - available_kib
+    return f"{round(used_kib / 1024)} / {round(total_kib / 1024)} MiB"
+
+
 async def meminfo() -> str:
     try:
         raw = await asyncio.to_thread(
             Path("/proc/meminfo").read_text,
             encoding="utf-8",
         )
-        values: dict[str, int] = {}
-        for line in raw.splitlines():
-            match = re.match(r"^(\w+):\s+(\d+)\s+kB$", line.strip())
-            if match:
-                values[match.group(1)] = int(match.group(2))
-        total_kib = values.get("MemTotal", 0)
-        available_kib = values.get("MemAvailable", values.get("MemFree", 0))
-        used_kib = max(total_kib - available_kib, 0)
-        used_mib = int(round(used_kib / 1024.0))
-        total_mib = int(round(total_kib / 1024.0))
-        return f"{used_mib} / {total_mib} MiB"
+        return parse_meminfo_text(raw)
     except Exception:
         return_code, stdout, _ = await run_exec(
             ["free", "-m"],
@@ -144,4 +156,4 @@ async def disk_root() -> str:
         return f"{used} / {size} (avail {available}, {df_percentage}) mount {mount}"
 
 
-__all__ = ["check_uptime", "disk_root", "meminfo"]
+__all__ = ["check_uptime", "disk_root", "meminfo", "parse_meminfo_text", "parse_uptime_text"]

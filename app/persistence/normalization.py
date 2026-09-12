@@ -219,6 +219,8 @@ def normalize_outbox(raw: Any) -> dict[str, dict[str, Any]]:
                 "delivered_message_id": optional_int(state.get("delivered_message_id")),
                 "dead_lettered_at": str(state.get("dead_lettered_at") or ""),
             }
+            if state.get("retry_started_at"):
+                clean_recipients[str(uid)]["retry_started_at"] = str(state["retry_started_at"])
         if not clean_recipients:
             continue
         normalized[event_id] = {
@@ -347,8 +349,9 @@ def normalize_docker_status(raw: Any) -> dict[str, dict[str, Any]]:
         result[server_key] = {
             "updated_at": optional_text(raw_item.get("updated_at"), limit=80),
             "containers": containers,
-            "_config_fingerprint": optional_text(raw_item.get("_config_fingerprint"), limit=64),
         }
+        if "_config_fingerprint" in raw_item:
+            result[server_key]["_config_fingerprint"] = optional_text(raw_item["_config_fingerprint"], limit=64)
     return result
 
 

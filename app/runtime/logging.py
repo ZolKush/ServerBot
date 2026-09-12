@@ -11,7 +11,7 @@ _REDACTED = "[REDACTED]"
 
 
 def _secret_values(values: Iterable[str] | None) -> tuple[str, ...]:
-    return tuple(dict.fromkeys(str(value) for value in values or () if value))
+    return tuple(sorted({str(value) for value in values or () if value}, key=len, reverse=True))
 
 
 def _redact(text: str, secrets: tuple[str, ...]) -> str:
@@ -62,7 +62,12 @@ class JsonLogFormatter(logging.Formatter):
         ):
             if hasattr(record, key):
                 payload[key] = getattr(record, key)
-        return json.dumps(payload, ensure_ascii=False)
+        # Redact after serialization to cover every structured field, including
+        # nested values and keys, without breaking JSON escaping.
+        rendered = json.dumps(payload, ensure_ascii=False, default=str)
+        for secret in self._secrets:
+            rendered = rendered.replace(json.dumps(secret, ensure_ascii=False)[1:-1], _REDACTED)
+        return rendered
 
 
 def configure_logging(

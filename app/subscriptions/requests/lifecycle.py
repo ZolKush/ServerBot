@@ -11,6 +11,7 @@ from ...bot.ui import clip_html, html_escape
 from ...messaging.review_sync import sync_service_review_messages
 from ...runtime.logging import logger
 from ...storage import UserData, update_user_data
+from ..connections import trial_access_expired
 from . import state
 from .eligibility import is_paid_subscriber
 from .operations import owner_meta_from_config, queue_message
@@ -260,8 +261,7 @@ def _process_expired_trials(
             or not str(current.get("connection_url") or "").strip()
         ):
             continue
-        trial_end = state.parse_datetime(current.get("trial_end_at"))
-        if trial_end is None or current_time < trial_end:
+        if not trial_access_expired(current, at=current_time):
             continue
         user_id = int(current.get("user_id", key))
         config.authorized_users[key] = UserData._normalize_user(

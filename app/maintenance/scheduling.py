@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from telegram import Update
 from telegram.constants import ParseMode
@@ -72,11 +72,14 @@ async def maint_cal_day(update: Update, context: ContextTypes.DEFAULT_TYPE):
     match = re.fullmatch(r"maint:cal:day:(\d{4})-(\d{2})-(\d{2})", query.data or "")
     if not match:
         return STATE_MAINT_SCHEDULE_DATE
-    chosen = date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
     today = datetime.now(TZ).date()
-    if chosen < today:
+    try:
+        chosen = date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+    except ValueError:
+        chosen = None
+    if chosen is None or not today <= chosen <= today + timedelta(days=365):
         await query.edit_message_text(
-            "Дата уже прошла. Выберите дату техработ:",
+            "Выберите корректную дату техработ в пределах следующего года:",
             reply_markup=schedule_calendar_kb(today.year, today.month, today=today),
         )
         return STATE_MAINT_SCHEDULE_DATE

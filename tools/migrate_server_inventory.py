@@ -57,7 +57,7 @@ def _bool(raw: object, default: bool) -> bool:
         return True
     if value in {"0", "false", "no", "off"}:
         return False
-    raise ValueError(f"invalid boolean value: {raw}")
+    raise ValueError("invalid boolean value")
 
 
 def _key(raw: object, fallback: str) -> str:
@@ -178,6 +178,11 @@ def migrate(env: dict[str, str], *, fallbacks: dict[str, list[int]]) -> list[dic
     enabled = _aligned(env, "REMOTE_SERVER_FAIL2BAN_ENABLED", total)
     timezones = _aligned(env, "REMOTE_SERVER_FAIL2BAN_TIMEZONES", total)
     uuids = _aligned(env, "REMOTE_SERVER_REMNAWAVE_UUIDS", total, keep_empty=True)
+    singular_uuid = env.get("REMOTE_SERVER_REMNAWAVE_UUID", "").strip()
+    if singular_uuid:
+        if total != 1 or (uuids and uuids[0] != singular_uuid):
+            raise ValueError("REMOTE_SERVER_REMNAWAVE_UUID conflicts with the remote server list")
+        uuids = [singular_uuid]
     domain_groups = _groups(env.get("REMOTE_SERVER_DOMAINS"))
     container_groups = _groups(env.get("REMOTE_SERVER_MONITOR_CONTAINERS_BY_SERVER"))
     if container_groups and len(container_groups) != total:

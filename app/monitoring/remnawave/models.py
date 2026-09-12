@@ -24,7 +24,7 @@ class NodeMetrics:
 
     @property
     def mem_used(self) -> int | None:
-        if self.mem_total is None or self.mem_free is None:
+        if self.mem_total is None or self.mem_free is None or not 0 <= self.mem_free <= self.mem_total:
             return None
         return max(self.mem_total - self.mem_free, 0)
 

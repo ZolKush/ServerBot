@@ -61,6 +61,19 @@ async def reconcile_configured_servers(servers: Mapping[str, ServerTarget]) -> d
                 aggregate.tls_certificates.pop(storage_key, None)
                 tls_removed += 1
         removed["tls_certificates"] = tls_removed
+        detached = 0
+        for event in aggregate.outbox.values():
+            completion = event.get("completion") or {}
+            if completion.get("type") != "fail2ban_cursor":
+                continue
+            server_key = str(completion.get("server_key") or "")
+            cursor = completion.get("cursor") or {}
+            if server_key not in fingerprints or cursor.get("_config_fingerprint") != fingerprints[server_key]:
+                # Keep the historical notification, but never restore a cursor
+                # belonging to an obsolete source after its eventual delivery.
+                event["completion"] = {}
+                detached += 1
+        removed["outbox_completions"] = detached
         return removed
 
     return await update_important_data(apply)

@@ -3,18 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
-import re
 from datetime import datetime, timezone
-from io import BytesIO
 from typing import Any
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, LinkPreviewOptions
-from telegram.constants import ParseMode
 from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter, TimedOut
 
 from ..config import logger
-from ..storage import finalize_outbox_event, get_user_meta_copy, mutate_outbox_event, outbox_snapshot
+from ..storage import finalize_outbox_event, get_outbox_event, get_user_meta_copy, mutate_outbox_event, outbox_snapshot
 from .outbox_redrive import redrive_outbox_dead_letters as _redrive_outbox_dead_letters
 from .outbox_state import (
     ACTIVE_RECIPIENT_STATUSES,
@@ -24,131 +19,19 @@ from .outbox_state import (
     recipient_mutation,
     should_dead_letter,
 )
+from .payloads import deliver_payload
+from .payloads import document_text_payload as document_text_payload
+from .payloads import message_payload as message_payload
 from .review_delivery import complete_review_registration
-from .telegram_rate import extend_flood_gate, retry_after_seconds, wait_flood_gate
+from .telegram_rate import extend_flood_gate, flood_wait_remaining, retry_after_seconds
 
 _PROCESS_LOCK = asyncio.Lock()
 MAX_DELIVERIES_PER_RUN = 100
+MAX_RUN_SECONDS = 10.0
 
 
 def _retry_after_seconds(exc: RetryAfter) -> float:
     return retry_after_seconds(exc, minimum=1.0)
-
-
-def _markup_from_descriptor(raw: object) -> InlineKeyboardMarkup | None:
-    if not isinstance(raw, list):
-        return None
-    rows: list[list[InlineKeyboardButton]] = []
-    for raw_row in raw[:20]:
-        if not isinstance(raw_row, list):
-            continue
-        row: list[InlineKeyboardButton] = []
-        for raw_button in raw_row[:8]:
-            if not isinstance(raw_button, dict):
-                continue
-            text = str(raw_button.get("text") or "")[:64]
-            callback_data = str(raw_button.get("callback_data") or "")[:64]
-            url = str(raw_button.get("url") or "")
-            if text and callback_data:
-                row.append(InlineKeyboardButton(text, callback_data=callback_data))
-            elif text and url:
-                row.append(InlineKeyboardButton(text, url=url))
-        if row:
-            rows.append(row)
-    return InlineKeyboardMarkup(rows) if rows else None
-
-
-def message_payload(
-    text: str,
-    *,
-    parse_mode: str | None = ParseMode.HTML,
-    reply_markup: list[list[dict[str, str]]] | None = None,
-    disable_web_page_preview: bool = True,
-) -> dict[str, Any]:
-    value = str(text)
-    if not value or len(value) > 4096:
-        raise ValueError("outbox message text must contain 1..4096 characters")
-    return {
-        "method": "send_message",
-        "text": value,
-        "parse_mode": str(parse_mode) if parse_mode else "",
-        "reply_markup": reply_markup or [],
-        "disable_web_page_preview": bool(disable_web_page_preview),
-    }
-
-
-def document_text_payload(
-    text: str,
-    *,
-    filename: str,
-    caption: str = "",
-    parse_mode: str | None = ParseMode.HTML,
-) -> dict[str, Any]:
-    value = str(text)
-    encoded_size = len(value.encode("utf-8"))
-    if not value or encoded_size > 1_000_000:
-        raise ValueError("outbox text document must contain 1..1000000 UTF-8 bytes")
-    safe_filename = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(filename or "document.txt"))[:100]
-    if not safe_filename:
-        safe_filename = "document.txt"
-    return {
-        "method": "send_document_text",
-        "text": value,
-        "filename": safe_filename,
-        "caption": str(caption)[:1024],
-        "parse_mode": str(parse_mode) if parse_mode else "",
-    }
-
-
-async def _wait_for_flood_gate() -> None:
-    await wait_flood_gate()
-
-
-async def _extend_flood_gate(seconds: float) -> None:
-    await extend_flood_gate(seconds)
-
-
-async def _deliver(bot, uid: int, payload: dict[str, Any]) -> Any:
-    method = str(payload.get("method") or "send_message")
-    markup = _markup_from_descriptor(payload.get("reply_markup"))
-    await _wait_for_flood_gate()
-    if method == "send_message":
-        return await bot.send_message(
-            chat_id=uid,
-            text=str(payload.get("text") or ""),
-            parse_mode=str(payload.get("parse_mode") or "") or None,
-            reply_markup=markup,
-            link_preview_options=LinkPreviewOptions(is_disabled=bool(payload.get("disable_web_page_preview", True))),
-        )
-    if method == "send_photo":
-        return await bot.send_photo(
-            chat_id=uid,
-            photo=str(payload.get("file_id") or ""),
-            caption=str(payload.get("caption") or "")[:1024] or None,
-            parse_mode=str(payload.get("parse_mode") or "") or None,
-            reply_markup=markup,
-        )
-    if method == "send_document":
-        return await bot.send_document(
-            chat_id=uid,
-            document=str(payload.get("file_id") or ""),
-            caption=str(payload.get("caption") or "")[:1024] or None,
-            parse_mode=str(payload.get("parse_mode") or "") or None,
-            reply_markup=markup,
-        )
-    if method == "send_document_text":
-        text = str(payload.get("text") or "")
-        if not text or len(text.encode("utf-8")) > 1_000_000:
-            raise BadRequest("invalid outbox text document")
-        filename = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(payload.get("filename") or "document.txt"))[:100]
-        return await bot.send_document(
-            chat_id=uid,
-            document=InputFile(BytesIO(text.encode("utf-8")), filename=filename or "document.txt"),
-            caption=str(payload.get("caption") or "")[:1024] or None,
-            parse_mode=str(payload.get("parse_mode") or "") or None,
-            reply_markup=markup,
-        )
-    raise BadRequest(f"unsupported outbox method: {method}")
 
 
 async def _finalize_if_done(source: str, event_id: str, event: dict[str, Any] | None) -> bool:
@@ -183,7 +66,7 @@ async def process_outbox(bot) -> int:
         return 0
     processed = 0
     async with _PROCESS_LOCK:
-        now = datetime.now(timezone.utc)
+        deadline = asyncio.get_running_loop().time() + MAX_RUN_SECONDS
         for source, event in outbox_snapshot():
             if processed >= MAX_DELIVERIES_PER_RUN:
                 break
@@ -194,11 +77,21 @@ async def process_outbox(bot) -> int:
                 continue
             if await _finalize_if_done(source, event_id, event):
                 continue
-            for uid_text, raw_state in list(recipients.items()):
+            for uid_text in list(recipients):
+                if flood_wait_remaining() or asyncio.get_running_loop().time() >= deadline:
+                    return processed
                 if processed >= MAX_DELIVERIES_PER_RUN:
                     break
+                # Delivery and disk commits yield; authorization/cancellation may
+                # have changed since the batch snapshot was taken.
+                current = get_outbox_event(source, event_id)
+                if current is None:
+                    break
+                event, payload = current, current["payload"]
+                raw_state = current["recipients"].get(uid_text)
                 if not isinstance(raw_state, dict) or raw_state.get("status") not in ACTIVE_RECIPIENT_STATUSES:
                     continue
+                now = datetime.now(timezone.utc)
                 if parse_time(raw_state.get("next_attempt_at")) > now:
                     continue
                 try:
@@ -242,11 +135,11 @@ async def process_outbox(bot) -> int:
                     processed += 1
                     continue
                 try:
-                    delivered_message = await _deliver(bot, uid, payload)
+                    delivered_message = await deliver_payload(bot, uid, payload)
                 except RetryAfter as exc:
                     delay = _retry_after_seconds(exc) + 0.5
-                    await _extend_flood_gate(delay)
-                    dead_letter = should_dead_letter(event, attempts=attempts, now=now)
+                    await extend_flood_gate(delay)
+                    dead_letter = should_dead_letter(event, attempts=attempts, now=now, state=raw_state)
                     updated_event = await mutate_outbox_event(
                         source,
                         event_id,
@@ -274,7 +167,7 @@ async def process_outbox(bot) -> int:
                         recipient_mutation(uid, status=status, attempts=attempts, error=exc.__class__.__name__),
                     )
                 except (TimedOut, NetworkError, OSError) as exc:
-                    dead_letter = should_dead_letter(event, attempts=attempts, now=now)
+                    dead_letter = should_dead_letter(event, attempts=attempts, now=now, state=raw_state)
                     delay = min(3600.0, 2.0 ** min(attempts, 10))
                     if dead_letter:
                         logger.warning(
@@ -367,7 +260,6 @@ async def redrive_outbox_dead_letters(source: str, event_id: str) -> bool:
 
 
 async def process_outbox_job(context) -> None:
-    with contextlib.suppress(asyncio.CancelledError):
-        count = await process_outbox(context.bot)
-        if count:
-            logger.info("Outbox deliveries processed: %s", count, extra={"action": "outbox"})
+    count = await process_outbox(context.bot)
+    if count:
+        logger.info("Outbox deliveries processed: %s", count, extra={"action": "outbox"})

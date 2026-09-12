@@ -1,4 +1,4 @@
-"""Asynchronous IPv4 DNS resolution for monitoring checks."""
+"""Bounded asynchronous A/AAAA resolution for monitoring checks."""
 
 from __future__ import annotations
 
@@ -25,18 +25,29 @@ def dns_supports_custom_resolver() -> bool:
 
 
 async def resolve_a_record(domain: str, resolver: str | None = None, timeout: float = 2.0) -> list[str]:
+    return await _resolve_record(domain, resolver, timeout, record_type="A", family=socket.AF_INET)
+
+
+async def resolve_aaaa_record(domain: str, resolver: str | None = None, timeout: float = 2.0) -> list[str]:
+    return await _resolve_record(domain, resolver, timeout, record_type="AAAA", family=socket.AF_INET6)
+
+
+async def _resolve_record(
+    domain: str, resolver: str | None, timeout: float, *, record_type: str, family: int
+) -> list[str]:
     normalized_domain = (domain or "").strip()
     if not normalized_domain or not _HOST_RE.fullmatch(normalized_domain):
         return []
+    deadline = asyncio.get_running_loop().time() + max(0.1, timeout)
 
     if aiodns is not None:
         try:
-            if resolver:
-                async with aiodns.DNSResolver(nameservers=[resolver], timeout=timeout) as dns_resolver:
-                    answer = await dns_resolver.query_dns(normalized_domain, "A")
-            else:
-                async with aiodns.DNSResolver(timeout=timeout) as dns_resolver:
-                    answer = await dns_resolver.query_dns(normalized_domain, "A")
+            async with aiodns.DNSResolver(
+                nameservers=[resolver] if resolver else None, timeout=timeout
+            ) as dns_resolver:
+                answer = await asyncio.wait_for(
+                    dns_resolver.query_dns(normalized_domain, record_type), timeout=max(0.1, timeout)
+                )
             addresses = [str(address) for record in answer.answer if (address := getattr(record.data, "addr", None))]
             return list(dict.fromkeys(addresses))
         except Exception as exc:
@@ -55,12 +66,15 @@ async def resolve_a_record(domain: str, resolver: str | None = None, timeout: fl
             )
 
     try:
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            return []
         lookup = asyncio.get_running_loop().getaddrinfo(
             normalized_domain,
             None,
-            family=socket.AF_INET,
+            family=family,
         )
-        infos = await asyncio.wait_for(lookup, timeout=max(0.1, float(timeout)))
+        infos = await asyncio.wait_for(lookup, timeout=remaining)
         found: list[str] = []
         for info in infos:
             address = info[4]
@@ -76,4 +90,4 @@ async def resolve_a_record(domain: str, resolver: str | None = None, timeout: fl
         return []
 
 
-__all__ = ["dns_supports_custom_resolver", "resolve_a_record"]
+__all__ = ["dns_supports_custom_resolver", "resolve_a_record", "resolve_aaaa_record"]
