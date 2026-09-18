@@ -4,21 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import time
-from datetime import datetime
 
 from telegram.ext import ContextTypes
 
-from ...config import BOT_MODE, SERVERS, TZ, ServerTarget, logger
-from ...monitoring.docker.local import docker_containers
-from ...monitoring.remote.docker import remote_docker_containers
+from ...config import BOT_MODE, SERVERS, ServerTarget, logger
 from ...storage import (
     set_daily_node_status_cache,
     set_dns_status_cache,
-    set_docker_status_cache,
 )
-from .cache import docker_failure_rows, invalidate_status_cache
-from .common import exc_brief
+from .cache import invalidate_status_cache
 from .dns import build_dns_status_payload_live
+from .docker import refresh_docker_status
 from .ssh import collect_disk_ufw
 
 DOCKER_STATUS_REFRESH_INTERVAL_SEC = 6 * 60 * 60
@@ -33,60 +29,13 @@ async def docker_status_refresh(
 
     async def refresh(server: ServerTarget) -> None:
         async with semaphore:
-            started = time.monotonic()
             try:
-                containers = (
-                    await remote_docker_containers(
-                        server.ssh_target,
-                        server.monitor_containers,
-                    )
-                    if server.mode == "ssh"
-                    else await docker_containers(server.monitor_containers)
-                )
-            except Exception as exc:
-                logger.exception(
-                    "Docker status refresh failed for server=%s",
-                    server.key,
-                )
-                containers = docker_failure_rows(
-                    server,
-                    f"ошибка: {exc_brief(exc)}",
-                )
-            payload = {
-                "updated_at": datetime.now(TZ).isoformat(),
-                "containers": [
-                    [str(name), bool(is_up), str(status), str(restarts)] for name, is_up, status, restarts in containers
-                ],
-            }
-            try:
-                await set_docker_status_cache(server.key, payload)
+                await refresh_docker_status(server, source="scheduled")
             except Exception:
                 logger.exception(
                     "Docker status cache write failed for server=%s",
                     server.key,
                 )
-                return
-            invalidate_status_cache(server.key)
-            problem_count = sum(
-                1
-                for _, is_up, status, _ in containers
-                if not is_up or "unhealthy" in str(status).lower() or str(status).lower() == "не найден"
-            )
-            logger.info(
-                "Docker status refreshed source=scheduled server=%s containers=%s problems=%s duration_ms=%s",
-                server.key,
-                len(containers),
-                problem_count,
-                round((time.monotonic() - started) * 1000),
-                extra={
-                    "action": "docker_refresh",
-                    "source": "scheduled",
-                    "server_key": server.key,
-                    "total": len(containers),
-                    "problems": problem_count,
-                    "duration_ms": round((time.monotonic() - started) * 1000),
-                },
-            )
 
     await asyncio.gather(*(refresh(server) for server in SERVERS.values()))
 

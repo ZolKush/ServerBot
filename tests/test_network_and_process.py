@@ -16,6 +16,7 @@ from app.monitoring.remote import status as remote_status
 from app.monitoring.status import cache as status_cache
 from app.monitoring.status import collectors as status_collectors
 from app.monitoring.status import dns as status_dns
+from app.monitoring.status import docker as status_docker
 from app.monitoring.status import jobs as status_jobs
 from app.runtime.process import run_exec
 
@@ -256,8 +257,8 @@ async def test_docker_cache_refresh_persists_inventory(monkeypatch) -> None:
         return payload
 
     monkeypatch.setattr(status_jobs, "SERVERS", {"test": server})
-    monkeypatch.setattr(status_jobs, "docker_containers", fake_docker)
-    monkeypatch.setattr(status_jobs, "set_docker_status_cache", fake_save)
+    monkeypatch.setattr(status_docker, "docker_containers", fake_docker)
+    monkeypatch.setattr(status_docker, "set_docker_status_cache", fake_save)
 
     await status_jobs.docker_status_refresh(SimpleNamespace())
 

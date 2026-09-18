@@ -36,6 +36,7 @@ data/
 
 # Python environments, caches, coverage and build output
 .venv/
+.venv-*/
 venv/
 .pytest_cache/
 .mypy_cache/

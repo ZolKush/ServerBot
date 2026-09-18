@@ -22,6 +22,7 @@ from .cache import invalidate_status_cache, tls_views
 from .collectors import build_status_snapshot_and_server
 from .common import first_server_key, get_server_target
 from .dns import build_dns_status_payload_live
+from .docker import refresh_docker_status
 from .keyboards import (
     parse_dns_refresh_callback,
     parse_refresh_callback,
@@ -176,9 +177,9 @@ async def _refresh_status_screen(update: Update, *, server_key: str) -> None:
         return
     started = time.monotonic()
     async with lock:
-        await query.answer("Обновляю метрики и DNS...")
+        await query.answer("Обновляю метрики, DNS и контейнеры...")
         errors: list[str] = []
-        refreshes: list[Awaitable[Any]] = [build_dns_status_payload_live(server)]
+        refreshes: list[Awaitable[Any]] = [build_dns_status_payload_live(server), refresh_docker_status(server)]
         use_metrics = server_uses_metrics(server)
         if use_metrics:
             refreshes.append(get_metrics_snapshot(force_refresh=True))
@@ -211,15 +212,28 @@ async def _refresh_status_screen(update: Update, *, server_key: str) -> None:
                     exc,
                     extra={"action": "status_refresh_dns_cache_failed", "source": "manual", "server_key": server.key},
                 )
+        docker_result = results[1]
+        if isinstance(docker_result, Exception):
+            errors.append(f"Docker: {docker_result.__class__.__name__}")
+            logger.warning(
+                "Manual status refresh Docker failed server=%s error=%s",
+                server.key,
+                docker_result,
+                extra={"action": "status_refresh_docker_failed", "source": "manual", "server_key": server.key},
+            )
         if use_metrics:
-            metrics_result = results[1]
+            metrics_result = results[2]
             if isinstance(metrics_result, Exception):
                 errors.append(f"метрики: {metrics_result.__class__.__name__}")
             elif not metrics_result.ok:
                 errors.append(f"метрики: {html_escape(metrics_result.error or 'ошибка')}")
         invalidate_status_cache(server.key)
         text, markup = await build_status_message(update, server_key=server.key)
-        note = ui_error_text("; ".join(errors)) if errors else ui_info_text("Метрики и DNS обновлены.")
+        note = (
+            ui_error_text("; ".join(errors))
+            if errors
+            else ui_info_text("Метрики, DNS и статусы контейнеров обновлены.")
+        )
         await query.edit_message_text(
             clip_html_message(text + "\n\n" + note),
             parse_mode=ParseMode.HTML,

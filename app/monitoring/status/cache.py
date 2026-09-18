@@ -18,6 +18,7 @@ from .models import DockerContainerView, StatusSnapshot, TLSCertificateView
 
 _STATUS_CACHE: dict[tuple[str, bool], tuple[float, StatusSnapshot]] = {}
 _STATUS_LOCKS: dict[tuple[str, bool], asyncio.Lock] = {}
+_STATUS_GENERATIONS: dict[str, int] = {}
 _SSH_REFRESH_LOCKS: dict[str, asyncio.Lock] = {}
 
 
@@ -111,6 +112,7 @@ def daily_cache_for(
 
 
 def invalidate_status_cache(server_key: str) -> None:
+    _STATUS_GENERATIONS[server_key] = _STATUS_GENERATIONS.get(server_key, 0) + 1
     for key in [key for key in _STATUS_CACHE if key[0] == server_key]:
         _STATUS_CACHE.pop(key, None)
 
@@ -131,8 +133,11 @@ async def cached_snapshot(
         now = time.monotonic()
         if cached and now - cached[0] < STATUS_CACHE_TTL_SEC:
             return cached[1]
+        generation = _STATUS_GENERATIONS.get(server.key, 0)
         snapshot = await loader()
-        _STATUS_CACHE[cache_key] = (time.monotonic(), snapshot)
+        # An invalidation also retires loads started before the refresh.
+        if generation == _STATUS_GENERATIONS.get(server.key, 0):
+            _STATUS_CACHE[cache_key] = (time.monotonic(), snapshot)
         return snapshot
 
 
