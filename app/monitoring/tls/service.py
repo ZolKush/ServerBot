@@ -20,6 +20,7 @@ from .checks import TLS_EXPIRY_WARNING, TLS_PORT
 from .policy import ConfiguredTLSEndpoint, check_tls_with_fallback, configured_tls_endpoints
 
 TLS_CHECK_CONCURRENCY = 6
+_TLS_REFRESH_LOCK = asyncio.Lock()
 
 
 def _approved_admin_ids() -> list[int]:
@@ -134,9 +135,23 @@ def _merge_network_result(raw: dict[str, Any], old: dict[str, Any], *, now: date
     return _evaluate_deadline(item, now=now)
 
 
-async def refresh_tls_certificates(*, source: str = "manual") -> dict[str, dict[str, Any]]:
+async def refresh_tls_certificates(
+    *, source: str = "manual", server_key: str | None = None
+) -> dict[str, dict[str, Any]]:
+    """Check all configured endpoints or those belonging to one server."""
+    # Serialize network collection and publication so a scheduled check cannot
+    # overwrite the result of a newer manual check for a shared endpoint.
+    async with _TLS_REFRESH_LOCK:
+        return await _refresh_tls_certificates(source=source, server_key=server_key)
+
+
+async def _refresh_tls_certificates(*, source: str, server_key: str | None) -> dict[str, dict[str, Any]]:
     started = time.monotonic()
     targets = configured_tls_endpoints()
+    if server_key is not None:
+        targets = [target for target in targets if server_key in target.server_keys]
+        if not targets:
+            return {}
     semaphore = asyncio.Semaphore(TLS_CHECK_CONCURRENCY)
 
     async def check(target: ConfiguredTLSEndpoint) -> tuple[str, dict[str, Any]]:
@@ -184,14 +199,14 @@ async def refresh_tls_certificates(*, source: str = "manual") -> dict[str, dict[
 
     def save(aggregate: ImportantData) -> dict[str, dict[str, Any]]:
         previous = dict(aggregate.tls_certificates or {})
-        updated: dict[str, dict[str, Any]] = {}
+        updated: dict[str, dict[str, Any]] = previous if server_key is not None else {}
         for key, raw_item in fresh.items():
             old_value = previous.get(key)
             old = dict(old_value) if isinstance(old_value, dict) else {}
             item = _merge_network_result(raw_item, old, now=now)
             updated[key] = _apply_notification_state(aggregate, item, old, admin_ids)
         aggregate.tls_certificates = updated
-        return {key: dict(value) for key, value in updated.items()}
+        return {key: dict(updated[key]) for key in fresh}
 
     result = await update_important_data(save)
     counts: dict[str, int] = {}

@@ -284,6 +284,7 @@ def finalize_payment(
     )
     updated = UserData._normalize_user(updated)
     config.authorized_users[str(user_id)] = updated
+    _cancel_pending_expiry_notices(config, user_id)
     finished = dict(request)
     finished.update(
         {
@@ -329,6 +330,21 @@ def finalize_payment(
         details={"request_id": request.get("id"), "target_end_at": target.isoformat()},
     )
     return updated
+
+
+def _cancel_pending_expiry_notices(config: UserData, user_id: int) -> None:
+    """Withdraw obsolete expiry notices in the payment activation transaction."""
+    uid_text = str(user_id)
+    for event_id, event in list(config.outbox.items()):
+        if event.get("kind") != "subscription_expired":
+            continue
+        recipients = event.get("recipients") or {}
+        recipient = recipients.get(uid_text)
+        if not isinstance(recipient, dict) or recipient.get("status") not in {"pending", "dead_letter"}:
+            continue
+        recipients.pop(uid_text)
+        if not recipients:
+            config.outbox.pop(event_id, None)
 
 
 __all__ = [

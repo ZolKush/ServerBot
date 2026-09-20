@@ -67,7 +67,9 @@ def format_tls_report(server_label: str, items: list[TLSCertificateView]) -> str
     hidden = len(items) - MAX_REPORT_CERTIFICATES
     if hidden > 0:
         lines.append(f"<i>… ещё {hidden} сертификатов</i>")
-    lines.append("Сетевая проверка выполняется при запуске бота, затем один раз в неделю.")
+    lines.append(
+        "Сетевая проверка выполняется при запуске бота, раз в неделю и по кнопке «Обновить» на экране статуса."
+    )
     return clip_html_message("\n".join(lines).strip())
 
 

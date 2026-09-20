@@ -17,6 +17,7 @@ from ...config import SERVERS, logger
 from ...messaging.message_cleanup import record_navigation_result
 from ...storage import set_dns_status_cache
 from ..remnawave import get_metrics_snapshot
+from ..tls.service import refresh_tls_certificates
 from ..tls.views import format_tls_report, tls_report_keyboard
 from .cache import invalidate_status_cache, tls_views
 from .collectors import build_status_snapshot_and_server
@@ -177,9 +178,13 @@ async def _refresh_status_screen(update: Update, *, server_key: str) -> None:
         return
     started = time.monotonic()
     async with lock:
-        await query.answer("Обновляю метрики, DNS и контейнеры...")
+        await query.answer("Обновляю метрики, DNS, контейнеры и сертификаты...")
         errors: list[str] = []
-        refreshes: list[Awaitable[Any]] = [build_dns_status_payload_live(server), refresh_docker_status(server)]
+        refreshes: list[Awaitable[Any]] = [
+            build_dns_status_payload_live(server),
+            refresh_docker_status(server),
+            refresh_tls_certificates(source="manual", server_key=server.key),
+        ]
         use_metrics = server_uses_metrics(server)
         if use_metrics:
             refreshes.append(get_metrics_snapshot(force_refresh=True))
@@ -221,8 +226,21 @@ async def _refresh_status_screen(update: Update, *, server_key: str) -> None:
                 docker_result,
                 extra={"action": "status_refresh_docker_failed", "source": "manual", "server_key": server.key},
             )
+        tls_result = results[2]
+        if isinstance(tls_result, Exception):
+            errors.append(f"TLS: {tls_result.__class__.__name__}")
+            logger.warning(
+                "Manual status refresh TLS failed server=%s error=%s",
+                server.key,
+                tls_result,
+                extra={"action": "status_refresh_tls_failed", "source": "manual", "server_key": server.key},
+            )
+        else:
+            tls_errors = sum(item.get("status") == "error" for item in tls_result.values())
+            if tls_errors:
+                errors.append(f"TLS: не удалось проверить сертификатов: {tls_errors}")
         if use_metrics:
-            metrics_result = results[2]
+            metrics_result = results[3]
             if isinstance(metrics_result, Exception):
                 errors.append(f"метрики: {metrics_result.__class__.__name__}")
             elif not metrics_result.ok:
@@ -232,7 +250,7 @@ async def _refresh_status_screen(update: Update, *, server_key: str) -> None:
         note = (
             ui_error_text("; ".join(errors))
             if errors
-            else ui_info_text("Метрики, DNS и статусы контейнеров обновлены.")
+            else ui_info_text("Метрики, DNS, статусы контейнеров и TLS-сертификатов обновлены.")
         )
         await query.edit_message_text(
             clip_html_message(text + "\n\n" + note),
