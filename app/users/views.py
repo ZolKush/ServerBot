@@ -173,6 +173,7 @@ def user_card_kb(uid: int) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = [
         [InlineKeyboardButton("✉️ Написать сообщение", callback_data=f"users:msg:{uid}")],
         [InlineKeyboardButton("🏷 Изменить ник", callback_data=f"users:nick:{uid}")],
+        [InlineKeyboardButton("🔗 Посмотреть ссылку", callback_data=f"users:subview:{uid}")],
         [
             InlineKeyboardButton("💾 Назначить ссылку", callback_data=f"users:subassign:{uid}"),
             InlineKeyboardButton("📤 Отправить ссылку", callback_data=f"users:subsend:{uid}"),

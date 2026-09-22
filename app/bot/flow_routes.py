@@ -35,6 +35,7 @@ from ..subscriptions.requests.input_processing import product_text_input
 from ..subscriptions.requests.input_start import product_input_start_cb
 from ..subscriptions.requests.review_handlers import product_request_action_cb
 from ..subscriptions.requests.state import PRODUCT_CONFIRM, PRODUCT_INPUT
+from ..subscriptions.requests.terms_flow import terms_input_start_cb
 from ..tickets.dashboard_handlers import (
     ticket_archive_cb,
     ticket_archive_page_cb,
@@ -105,7 +106,7 @@ def build_administration_flow() -> NavigableConversationHandler:
             CallbackQueryHandler(
                 administration_input_start_cb,
                 pattern=(
-                    r"^(administration:input:(alias|help|support_email|payment_message|"
+                    r"^(administration:input:(alias|help|support_email|payment_message|standard_price|"
                     r"period_current|period_next)|staff:alias|"
                     r"product:input:setting_(payment|current|next))$"
                 ),
@@ -145,6 +146,7 @@ def build_product_flow() -> NavigableConversationHandler:
     return conversation_handler(
         entry_points=[
             CallbackQueryHandler(trial_request_start_cb, pattern=r"^subscription:trial$"),
+            CallbackQueryHandler(terms_input_start_cb, pattern=r"^product:input:terms:\d+$"),
             CallbackQueryHandler(
                 product_request_action_cb,
                 pattern=r"^product:req:(approve|approve24|custom|reject|requisites|confirm|notfound):\d+$",
@@ -259,7 +261,7 @@ def build_users_flow() -> NavigableConversationHandler:
                 CallbackQueryHandler(
                     users_user_menu,
                     pattern=(
-                        r"^users:(msg:\d+|nick:\d+|cfg:\d+|subassign:\d+|subsend:\d+|"
+                        r"^users:(msg:\d+|nick:\d+|cfg:\d+|subassign:\d+|subsend:\d+|subview:\d+|"
                         r"toggle:\d+|toggleapply:\d+|access:(approve|block):\d+|"
                         r"accessapply:(approve|block):\d+|back)$"
                     ),

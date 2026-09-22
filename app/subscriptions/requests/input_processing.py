@@ -28,6 +28,7 @@ from .admin_input import (
 from .customer import apply_trial_comment
 from .operations import finalize_payment, finalize_trial
 from .review_operations import approve_trial
+from .terms_flow import handle_terms_input
 
 
 async def _sync_request_cards(context: ContextTypes.DEFAULT_TYPE, request_id: int) -> None:
@@ -255,6 +256,8 @@ async def product_text_input(
         return ConversationHandler.END
     if action == "mass_reminder":
         return await handle_mass_reminder_input(update, message, data, text)
+    if action == "request_terms":
+        return await handle_terms_input(update, data, text)
     if action == "mass_date":
         return await handle_mass_date_input(update, message, data, text)
     if action in {"user_end", "manualpay"}:

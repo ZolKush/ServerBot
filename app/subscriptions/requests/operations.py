@@ -26,6 +26,8 @@ from ..policy import (
     DEFAULT_TRIAL_DURATION_HOURS,
     MAX_CUSTOM_TRIAL_DURATION_HOURS,
     MIN_CUSTOM_TRIAL_DURATION_HOURS,
+    PLAN_MONTHS,
+    standard_price,
 )
 from . import state
 
@@ -114,6 +116,8 @@ def create_request(
         "reviewed_at": None,
         "payment_reported_at": timestamp if status == "payment_reported" else None,
     }
+    if kind in {"purchase", "renewal"}:
+        request.update(amount_rub=standard_price(config.product_settings), period_months=PLAN_MONTHS)
     config.service_requests[str(request_id)] = request
     return request
 

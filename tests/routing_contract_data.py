@@ -4,7 +4,7 @@ CONVERSATION_ROUTES = {
     "administration_flow": {
         "states": (81, 82),
         "entry_points": (
-            r"callback:^(administration:input:(alias|help|support_email|payment_message|"
+            r"callback:^(administration:input:(alias|help|support_email|payment_message|standard_price|"
             r"period_current|period_next)|staff:alias|"
             r"product:input:setting_(payment|current|next))$",
         ),
@@ -32,6 +32,7 @@ CONVERSATION_ROUTES = {
         "states": (0, 1),
         "entry_points": (
             r"callback:^subscription:trial$",
+            r"callback:^product:input:terms:\d+$",
             r"callback:^product:req:(approve|approve24|custom|reject|requisites|confirm|notfound):\d+$",
             r"callback:^product:input:(massdate|massremind|user_end:\d+|manualpay:\d+)$",
         ),
@@ -118,7 +119,7 @@ CONVERSATION_ROUTES = {
             2: ("message",),
             3: (r"callback:^users:(allsend|all|back)$",),
             4: (
-                r"callback:^users:(msg:\d+|nick:\d+|cfg:\d+|subassign:\d+|subsend:\d+|"
+                r"callback:^users:(msg:\d+|nick:\d+|cfg:\d+|subassign:\d+|subsend:\d+|subview:\d+|"
                 r"toggle:\d+|toggleapply:\d+|access:(approve|block):\d+|"
                 r"accessapply:(approve|block):\d+|back)$",
                 r"callback:^users:user:\d+$",

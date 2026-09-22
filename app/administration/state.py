@@ -56,7 +56,7 @@ def normalize_input_action(data: str) -> str | None:
     if data in aliases:
         return aliases[data]
     match = re.fullmatch(
-        r"administration:input:(alias|help|support_email|payment_message|"
+        r"administration:input:(alias|help|support_email|payment_message|standard_price|"
         r"period_current|period_next)",
         data,
     )

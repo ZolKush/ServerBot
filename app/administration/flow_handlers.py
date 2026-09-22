@@ -12,6 +12,7 @@ from ..bot.ui import html_escape
 from ..config import TZ
 from ..messaging.message_cleanup import record_navigation_result
 from ..storage import get_user_meta_copy
+from ..subscriptions.policy import MAX_PRICE_RUB, PLAN_MONTHS, parse_price
 from ..subscriptions.requests.views import PAYMENT_MESSAGE_MAX_LENGTH
 from ..users.staff import (
     can_edit_help_meta,
@@ -24,6 +25,7 @@ from .operations import (
     PeriodKind,
     change_payment_message,
     change_staff_alias,
+    change_standard_price,
     change_support_email,
     save_billing_period,
     save_help_text,
@@ -170,6 +172,25 @@ async def administration_text_input(
         await record_navigation_result(update, result)
         return ADMINISTRATION_CONFIRM
 
+    if action == "standard_price":
+        if not is_owner_meta(actor):
+            clear_flow_state(context)
+            await message.reply_text("Доступно только руководителю сервиса.")
+            return ConversationHandler.END
+        amount = parse_price(text)
+        if amount is None:
+            await message.reply_text(f"Укажите целую сумму в рублях от 1 до {MAX_PRICE_RUB}.")
+            return ADMINISTRATION_INPUT
+        set_pending_change(context, {"kind": "standard_price", "value": amount})
+        result = await message.reply_text(
+            f"Стандартная цена: <b>{amount} ₽ / {PLAN_MONTHS} месяца</b>.\n\n"
+            "Она будет применяться к новым заявкам и следующим периодам. Подтвердите изменение.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=confirmation_markup(save_label="✅ Сохранить"),
+        )
+        await record_navigation_result(update, result)
+        return ADMINISTRATION_CONFIRM
+
     if action in {"period_current", "period_next"}:
         if not is_owner_meta(actor):
             clear_flow_state(context)
@@ -234,6 +255,18 @@ async def administration_confirm_cb(
             clear_flow_state(context)
             return ConversationHandler.END
         settings = await change_payment_message(actor=actor, value=value)
+    elif kind == "standard_price":
+        amount = parse_price(pending.get("value"))
+        if not is_owner_meta(actor) or amount is None:
+            await query.edit_message_text("Изменение больше недоступно или сумма некорректна.")
+            clear_flow_state(context)
+            return ConversationHandler.END
+        try:
+            settings = await change_standard_price(actor=actor, value=amount)
+        except ValueError:
+            await query.edit_message_text("Изменение больше недоступно. Начните действие заново.")
+            clear_flow_state(context)
+            return ConversationHandler.END
     elif kind in {"period_current", "period_next"}:
         target = parse_datetime(pending.get("target_end_at"))
         if not is_owner_meta(actor) or target is None or target <= datetime.now(TZ):

@@ -65,6 +65,7 @@ BILLING_FIELDS = frozenset(
         "payment_recipient",
         "payment_phone",
         "payment_message",
+        "standard_price_rub",
         "current_period_end",
         "next_period_end",
         "period_setup_reminder_for",

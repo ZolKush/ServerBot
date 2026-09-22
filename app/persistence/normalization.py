@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 from typing import Any
 
+from ..subscriptions.policy import standard_price
 from ..users.validation import normalize_email
 
 ACCESS_STATES = {"pending", "approved", "blocked", "logged_out", "rejected"}
@@ -56,6 +57,7 @@ def normalize_product_settings(raw: Any = None) -> dict[str, Any]:
         "payment_recipient": optional_text(source.get("payment_recipient"), limit=160),
         "payment_phone": optional_text(source.get("payment_phone"), limit=80),
         "payment_message": optional_text(source.get("payment_message"), limit=3800),
+        "standard_price_rub": standard_price(source),
         "current_period_end": optional_text(source.get("current_period_end"), limit=80),
         "next_period_end": optional_text(source.get("next_period_end"), limit=80),
         "period_setup_reminder_for": optional_text(source.get("period_setup_reminder_for"), limit=80),

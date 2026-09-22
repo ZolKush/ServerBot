@@ -163,10 +163,9 @@ async def users_all_msg_confirm(update: Update, context: ContextTypes.DEFAULT_TY
         await query.edit_message_text(ui_warn_text("нет получателей для рассылки."))
         return ADMIN_PICK
 
+    title = "Массовая рассылка только администраторам" if audience == "admins" else "Массовая рассылка"
     payload = (
-        "📣 <b>Массовая рассылка</b>\n\n"
-        f"Отправитель: <b>{html_escape(staff_title(update))}</b>\n\n"
-        f"{clip_html(text, limit=3000)}"
+        f"📣 <b>{title}</b>\n\nОтправитель: <b>{html_escape(staff_title(update))}</b>\n\n{clip_html(text, limit=3000)}"
     )
     event = make_outbox_event(
         kind="admin_broadcast",
@@ -187,7 +186,10 @@ async def users_all_msg_confirm(update: Update, context: ContextTypes.DEFAULT_TY
     user_data.pop(BROADCAST_TEXT_KEY, None)
     user_data.pop(BROADCAST_AUDIENCE_KEY, None)
     await query.edit_message_text(
-        ui_ok_text(f"Рассылка сохранена в очереди для {len(recipients)} получателей."),
+        ui_ok_text(
+            f"Рассылка сохранена в очереди для {len(recipients)} получателей.\n"
+            f"Получатели: {_audience_label(audience)} (кроме вас)."
+        ),
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Меню", callback_data="menu:home")]]),
     )
     return ADMIN_PICK

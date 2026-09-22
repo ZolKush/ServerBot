@@ -16,7 +16,7 @@ from ...storage import (
     update_user_data,
 )
 from ...users.staff import is_billing_exempt_meta
-from ..policy import PLAN_MONTHS, PLAN_TOTAL_RUB
+from ..policy import PLAN_MONTHS, standard_price
 from . import state
 from .operations import (
     approved_admin_ids,
@@ -91,7 +91,7 @@ async def purchase_show_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     text = (
         "💳 <b>Покупка подписки</b>\n\n"
         f"• Период: <b>{PLAN_MONTHS} месяца</b>\n"
-        f"• Стоимость: <b>{PLAN_TOTAL_RUB} ₽</b>\n"
+        f"• Стоимость: <b>{standard_price(settings)} ₽</b>\n"
         f"• Доступ до: <code>{html_escape(state.datetime_text(target.isoformat()))}</code>\n\n"
         "После создания заявки сотрудник отправит реквизиты."
     )
@@ -152,6 +152,7 @@ async def purchase_create_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
                         "callback_data": f"product:req:reject:{request_id}",
                     },
                 ],
+                [{"text": "✏️ Цена и срок", "callback_data": f"product:input:terms:{request_id}"}],
                 [{"text": "👤 Профиль", "callback_data": f"users:user:{user_id}"}],
             ],
             completion=review_completion(

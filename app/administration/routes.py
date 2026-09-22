@@ -16,7 +16,7 @@ from .settings_handlers import administration_service_settings_cb
 from .state import ADMINISTRATION_CONFIRM, ADMINISTRATION_INPUT
 
 ADMINISTRATION_INPUT_PATTERN = (
-    r"^(administration:input:(alias|help|support_email|payment_message|"
+    r"^(administration:input:(alias|help|support_email|payment_message|standard_price|"
     r"period_current|period_next)|staff:alias|"
     r"product:input:setting_(payment|current|next))$"
 )

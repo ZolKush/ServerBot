@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ...subscriptions.policy import PLAN_TOTAL_RUB, parse_price
 from ..aggregate_fields import (
     ACCESS_FIELDS,
     BILLING_FIELDS,
@@ -53,7 +54,7 @@ IMPORTANT_TOP_LEVEL_KEYS = {
 # These fields were introduced after monolithic schema v4 had already been
 # deployed. Their absence is therefore expected and must not turn a valid v4
 # backup into an unmigratable source.
-OPTIONAL_V4_PRODUCT_SETTINGS = {"payment_message"}
+OPTIONAL_V4_PRODUCT_SETTINGS = {"payment_message", "standard_price_rub"}
 OPTIONAL_V4_USER_DEFAULTS: dict[str, Any] = {
     "review_messages": {},
     "trial_end_at": None,
@@ -178,6 +179,10 @@ def transform_v4(source: V4Source) -> V4Transform:
 
     billing_settings = _select_fields(product_settings, BILLING_FIELDS)
     billing_settings.setdefault("payment_message", None)
+    billing_settings.setdefault("standard_price_rub", PLAN_TOTAL_RUB)
+    price = billing_settings["standard_price_rub"]
+    if type(price) is not int or parse_price(price) is None:
+        raise MigrationError("product_settings.standard_price_rub must be a positive whole-ruble amount")
     stores: dict[str, Any] = {
         "users.profiles": profiles,
         "access.grants": grants,

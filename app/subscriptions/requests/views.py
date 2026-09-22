@@ -8,9 +8,9 @@ from typing import Any
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from ...bot.ui import clip_html, clip_html_message, clip_text, html_escape
-from ...storage import get_user_meta_copy
+from ...storage import get_user_meta_copy, product_settings_snapshot
 from ...users.staff import is_owner_meta, staff_internal_identity
-from ..policy import PLAN_MONTHS, PLAN_TOTAL_RUB
+from ..policy import PLAN_MONTHS, parse_price, standard_price
 from . import state
 
 PAYMENT_MESSAGE_MAX_LENGTH = 3500
@@ -76,6 +76,12 @@ def request_card(request: dict[str, Any], meta: dict[str, Any]) -> str:
         f"• Тест ранее: <b>{'выдавался' if meta.get('trial_issued_at') else 'не выдавался'}</b>",
         f"• Ссылка: <b>{'назначена' if str(meta.get('connection_url') or '').strip() else 'не назначена'}</b>",
     ]
+    if request.get("kind") in {"purchase", "renewal"}:
+        amount = parse_price(request.get("amount_rub")) or standard_price(product_settings_snapshot())
+        months = request.get("period_months") or PLAN_MONTHS
+        lines.extend([f"• Стоимость: <b>{amount} ₽</b>", f"• Срок, мес.: <b>{months}</b>"])
+        if request.get("custom_terms"):
+            lines.append("• Индивидуальные условия только для этой заявки")
     if request.get("target_end_at"):
         lines.append(f"• Доступ до: <code>{html_escape(state.datetime_text(request.get('target_end_at')))}</code>")
     claimed_by = int(request.get("claimed_by_id", 0) or 0)
@@ -117,6 +123,7 @@ def request_markup(request: dict[str, Any], actor_meta: dict[str, Any]) -> Inlin
                 ]
             )
     elif kind == "purchase" and status == "pending":
+        rows.append([InlineKeyboardButton("✏️ Цена и срок", callback_data=f"product:input:terms:{request_id}")])
         rows.append(
             [
                 InlineKeyboardButton(
@@ -182,7 +189,7 @@ def _legacy_payment_template(settings: dict[str, Any]) -> str:
         return ""
     return (
         "💳 Оплата подписки\n\n"
-        "• Период: {months} месяца\n"
+        "• Срок, мес.: {months}\n"
         "• Стоимость: {amount} ₽\n"
         "• Доступ до: {access_until}\n\n"
         f"• Банк: {bank}\n"
@@ -197,17 +204,33 @@ def payment_template_from_settings(settings: dict[str, Any]) -> str:
     return configured[:PAYMENT_MESSAGE_MAX_LENGTH] if configured else _legacy_payment_template(settings)
 
 
-def render_payment_template(settings: dict[str, Any], *, access_until: object) -> str:
+def render_payment_template(
+    settings: dict[str, Any],
+    *,
+    access_until: object,
+    amount_rub: int | None = None,
+    period_months: int = PLAN_MONTHS,
+    custom_terms: bool = False,
+) -> str:
     """Render a plain-text payment template with a deliberately small placeholder set."""
 
     rendered = payment_template_from_settings(settings)
+    needs_summary = custom_terms or any(placeholder not in rendered for placeholder in PAYMENT_MESSAGE_PLACEHOLDERS)
     replacements = {
-        "{amount}": str(PLAN_TOTAL_RUB),
-        "{months}": str(PLAN_MONTHS),
+        "{amount}": str(amount_rub if amount_rub is not None else standard_price(settings)),
+        "{months}": str(period_months),
         "{access_until}": state.datetime_text(access_until),
     }
     for placeholder, value in replacements.items():
         rendered = rendered.replace(placeholder, value)
+    if needs_summary:
+        title = "Индивидуальные условия этой оплаты" if custom_terms else "Условия этой оплаты"
+        rendered = (
+            f"{title}:\n"
+            f"• Стоимость: {replacements['{amount}']} ₽\n"
+            f"• Срок, мес.: {period_months}\n"
+            f"• Доступ до: {replacements['{access_until}']}\n\n" + rendered
+        )
     return clip_text(rendered, limit=PAYMENT_MESSAGE_MAX_LENGTH)
 
 
@@ -216,7 +239,13 @@ def payment_profile_ready(settings: dict[str, Any]) -> bool:
 
 
 def payment_message(settings: dict[str, Any], request: dict[str, Any]) -> str:
-    return render_payment_template(settings, access_until=request.get("target_end_at"))
+    return render_payment_template(
+        settings,
+        access_until=request.get("target_end_at"),
+        amount_rub=parse_price(request.get("amount_rub")),
+        period_months=int(request.get("period_months") or PLAN_MONTHS),
+        custom_terms=bool(request.get("custom_terms")),
+    )
 
 
 def payment_markup(request_id: int) -> list[list[dict[str, str]]]:

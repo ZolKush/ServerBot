@@ -22,6 +22,7 @@ from . import state
 from .eligibility import is_paid_subscriber
 from .operations import create_request, finalize_payment
 from .reminders import queue_manual_reminders
+from .terms_flow import confirm_terms
 
 
 def _back_to_user_markup(user_id: int) -> InlineKeyboardMarkup:
@@ -53,6 +54,9 @@ async def product_confirm_cb(
         return ConversationHandler.END
     kind = str(pending.get("kind") or "")
     target = state.parse_datetime(pending.get("target_end_at"))
+
+    if kind == "request_terms":
+        return await confirm_terms(update, context, actor, pending)
 
     if kind == "user_end":
         if not is_lead_or_owner_meta(actor) or target is None:

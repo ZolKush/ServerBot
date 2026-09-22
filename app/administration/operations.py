@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Any, Literal
 
 from ..storage import UserData, append_audit_entry, update_user_data
+from ..subscriptions.policy import parse_price, standard_price
 from ..users.staff import (
     STAFF_DISPLAY_TITLE,
     STAFF_TITLE_LABELS,
@@ -94,6 +95,33 @@ async def change_payment_message(
             action="payment_message_changed",
             actor_meta=actor,
             details={"old_length": len(old), "new_length": len(value)},
+        )
+        return dict(data.product_settings)
+
+    return await update_user_data(_change)
+
+
+async def change_standard_price(*, actor: dict[str, Any], value: int) -> dict[str, Any]:
+    amount = parse_price(value)
+    if amount is None:
+        raise ValueError("invalid_price")
+
+    def _change(data: UserData) -> dict[str, Any]:
+        current_actor = data.authorized_users.get(str(actor.get("user_id")))
+        if (
+            not isinstance(current_actor, dict)
+            or not is_owner_meta(current_actor)
+            or current_actor.get("access_state") != "approved"
+            or not current_actor.get("enabled", True)
+        ):
+            raise ValueError("owner_required")
+        old = standard_price(data.product_settings)
+        data.product_settings["standard_price_rub"] = amount
+        append_audit_entry(
+            data,
+            action="standard_price_changed",
+            actor_meta=current_actor,
+            details={"old": old, "new": amount},
         )
         return dict(data.product_settings)
 
@@ -192,6 +220,7 @@ __all__ = [
     "change_staff_alias",
     "change_staff_display_mode",
     "change_staff_title",
+    "change_standard_price",
     "change_support_email",
     "save_billing_period",
     "save_help_text",

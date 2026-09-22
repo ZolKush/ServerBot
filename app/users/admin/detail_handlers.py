@@ -9,7 +9,9 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes, ConversationHandler
 
-from ...bot.guards import get_user_meta, require_admin
+from ...bot.guards import get_user_id, get_user_meta, require_admin
+from ...bot.ui import ui_info_text
+from ...subscriptions.connections import has_connection, send_connection_payload, trial_access_expired
 from ..states import (
     ADMIN_PICK,
     ADMIN_USER_CFG_TEXT,
@@ -26,7 +28,7 @@ from .navigation import (
 )
 
 USER_ACTION_RE = re.compile(
-    r"^users:(?P<action>toggle|toggleapply|msg|nick|subassign|subsend):"
+    r"^users:(?P<action>toggle|toggleapply|msg|nick|subassign|subsend|subview):"
     r"(?P<uid>\d+)$"
 )
 USER_ACCESS_ACTION_RE = re.compile(
@@ -98,6 +100,44 @@ async def action_subscription(
     return ADMIN_USER_CFG_TEXT
 
 
+async def action_subscription_view(
+    update: Update,
+    query: Any,
+    context: ContextTypes.DEFAULT_TYPE,
+    user_id: int,
+) -> int:
+    admin_id = get_user_id(update)
+    if admin_id is None:
+        return ConversationHandler.END
+    meta = await resolve_user_or_redirect(query, context, user_id)
+    if meta is None:
+        return ADMIN_PICK
+    conversation_data(context)["selected_uid"] = user_id
+    if trial_access_expired(meta):
+        text = "Срок тестовой ссылки пользователя завершён."
+    elif not has_connection(meta):
+        text = "Персональная ссылка подключения ещё не назначена."
+    else:
+        await send_connection_payload(
+            context,
+            chat_id=admin_id,
+            meta=meta,
+            title=f"🔗 <b>Ссылка подключения пользователя</b>\n\n• ID: <code>{user_id}</code>",
+            filename_prefix=f"connection_{user_id}",
+        )
+        text = "Ссылка пользователя показана отдельным сообщением ниже."
+    await query.edit_message_text(
+        ui_info_text(text),
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("⬅️ К пользователю", callback_data=f"users:user:{user_id}")],
+                [InlineKeyboardButton("🏠 Меню", callback_data="menu:home")],
+            ]
+        ),
+    )
+    return ADMIN_USER_MENU
+
+
 @require_admin
 async def users_user_menu(
     update: Update,
@@ -148,6 +188,8 @@ async def users_user_menu(
             return await action_subscription(query, context, user_id, "assign")
         if action == "subsend":
             return await action_subscription(query, context, user_id, "send")
+        if action == "subview":
+            return await action_subscription_view(update, query, context, user_id)
 
         meta = await resolve_user_or_redirect(query, context, user_id)
         if meta is None:

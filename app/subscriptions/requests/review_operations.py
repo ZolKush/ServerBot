@@ -12,6 +12,8 @@ from ..policy import (
     DEFAULT_TRIAL_DURATION_HOURS,
     MAX_CUSTOM_TRIAL_DURATION_HOURS,
     MIN_CUSTOM_TRIAL_DURATION_HOURS,
+    PLAN_MONTHS,
+    standard_price,
 )
 from . import state
 from .operations import (
@@ -112,10 +114,14 @@ def send_requisites(
         return "tier_changed", request
     target = state.parse_datetime(request.get("target_end_at"))
     if target is None or target <= state.now():
+        if request.get("custom_terms"):
+            return "invalid_target", request
         target = payment_target(config.product_settings)
     if target is None or target <= state.now() or not payment_profile_ready(config.product_settings):
         return "not_configured", request
     updated = dict(request)
+    updated.setdefault("amount_rub", standard_price(config.product_settings))
+    updated.setdefault("period_months", PLAN_MONTHS)
     updated.update(
         {
             "status": "requisites_sent",

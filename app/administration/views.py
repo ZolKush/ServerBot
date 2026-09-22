@@ -5,7 +5,7 @@ from typing import Any
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from ..bot.ui import html_escape
-from ..subscriptions.policy import PLAN_MONTHS, PLAN_TOTAL_RUB
+from ..subscriptions.policy import MAX_PRICE_RUB, PLAN_MONTHS, standard_price
 from ..subscriptions.requests.views import payment_template_from_settings
 from ..users.staff import (
     STAFF_DISPLAY_TITLE_ALIAS,
@@ -26,7 +26,13 @@ INPUT_PROMPTS = {
         "Введите полный текст сообщения с реквизитами длиной до 3500 символов. "
         "Разрешён обычный текст и переносы строк. Доступные подстановки:\n"
         "<code>{amount}</code> — сумма, <code>{months}</code> — число месяцев, "
-        "<code>{access_until}</code> — дата окончания доступа."
+        "<code>{access_until}</code> — дата окончания доступа.\n\n"
+        "Используйте подстановки для цены и срока, чтобы сообщение учитывало условия каждой заявки."
+    ),
+    "standard_price": (
+        f"Введите стандартную стоимость подписки за {PLAN_MONTHS} месяца в рублях "
+        f"целым числом от 1 до {MAX_PRICE_RUB}.\n"
+        "Она будет применяться к новым заявкам и следующим периодам."
     ),
     "period_current": "Введите окончание текущего периода в формате <code>ДД.ММ.ГГГГ ЧЧ:ММ</code>:",
     "period_next": "Введите окончание следующего периода в формате <code>ДД.ММ.ГГГГ ЧЧ:ММ</code>:",
@@ -84,7 +90,7 @@ def service_settings_text(settings: dict[str, Any], actor: dict[str, Any]) -> st
                 "",
                 "<b>Контакты и оплата</b>",
                 f"• Почта администрации: <code>{html_escape(str(settings.get('support_email') or '-'))}</code>",
-                f"• Тариф: <b>{PLAN_TOTAL_RUB} ₽ / {PLAN_MONTHS} месяца</b>",
+                f"• Стандартный тариф: <b>{standard_price(settings)} ₽ / {PLAN_MONTHS} месяца</b>",
                 "",
                 "<b>Сообщение с реквизитами</b>",
                 html_escape(preview or "Не настроено"),
@@ -117,6 +123,12 @@ def service_settings_markup(actor: dict[str, Any]) -> InlineKeyboardMarkup:
                     InlineKeyboardButton(
                         "💳 Изменить сообщение оплаты",
                         callback_data="administration:input:payment_message",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "💰 Изменить стандартную цену",
+                        callback_data="administration:input:standard_price",
                     )
                 ],
                 [
