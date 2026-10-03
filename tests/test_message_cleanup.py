@@ -43,31 +43,16 @@ async def test_cleanup_deletes_messages_older_than_day_but_keeps_latest() -> Non
     await _record(tracker, 42, 1, now - timedelta(hours=30))
     await _record(tracker, 42, 2, now - timedelta(hours=25))
     await _record(tracker, 42, 3, now - timedelta(hours=25))
-    await _record(tracker, 43, 10, now - timedelta(days=10))
+    await _record(tracker, 43, 10, now - timedelta(hours=50))
+    await _record(tracker, 43, 11, now - timedelta(hours=49))
     bot = SimpleNamespace(delete_messages=AsyncMock(return_value=True))
 
     stats = await tracker.cleanup(bot, now=now)
 
     bot.delete_messages.assert_awaited_once_with(chat_id=42, message_ids=[1, 2])
     assert stats.deleted == 2
-    assert stats.expired == 1
-    assert await tracker.snapshot() == {42: [3]}
-
-
-@pytest.mark.asyncio
-async def test_cleanup_drops_undeletable_registry_entries_after_telegram_limit() -> None:
-    now = datetime(2026, 7, 15, 12, 0, tzinfo=timezone.utc)
-    tracker = MessageTracker(enabled=True, retention=timedelta(hours=24))
-    tracker.bind({})
-    await _record(tracker, 42, 1, now - timedelta(hours=50))
-    await _record(tracker, 42, 2, now - timedelta(hours=49))
-    bot = SimpleNamespace(delete_messages=AsyncMock(return_value=True))
-
-    stats = await tracker.cleanup(bot, now=now)
-
-    bot.delete_messages.assert_not_awaited()
     assert stats.expired == 2
-    assert await tracker.snapshot() == {}
+    assert await tracker.snapshot() == {42: [3]}
 
 
 @pytest.mark.asyncio
@@ -125,27 +110,6 @@ async def test_tracking_bot_only_records_explicit_navigation_messages() -> None:
     assert await tracker.snapshot() == {42: [77]}
     await tracker.forget_messages(42, [77])
     assert await tracker.snapshot() == {}
-
-
-@pytest.mark.asyncio
-async def test_navigation_edit_result_uses_callback_message_coordinates() -> None:
-    now = datetime(2026, 7, 15, 12, 0, tzinfo=timezone.utc)
-    tracker = MessageTracker(enabled=True, retention=timedelta(hours=24))
-    tracker.bind({})
-    bot = SimpleNamespace(message_tracker=tracker)
-    callback_message = SimpleNamespace(
-        message_id=78,
-        date=now,
-        chat=SimpleNamespace(id=42, type=ChatType.PRIVATE),
-    )
-    update = SimpleNamespace(
-        callback_query=SimpleNamespace(message=callback_message),
-        get_bot=lambda: bot,
-    )
-
-    await record_navigation_result(update, True)
-
-    assert await tracker.snapshot() == {42: [78]}
 
 
 @pytest.mark.asyncio

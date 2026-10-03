@@ -98,13 +98,6 @@ async def test_price_change_rechecks_owner_role_inside_transaction(isolated_stor
     assert standard_price(storage.product_settings_snapshot()) == PLAN_TOTAL_RUB
 
 
-def test_legacy_migration_accepts_settings_without_standard_price(tmp_path: Path) -> None:
-    root = tmp_path / "legacy"
-    write_v4_source(root)
-    transformed = transform_v4(load_v4_source(root))
-    assert transformed.stores["subscriptions.billing_settings"]["standard_price_rub"] == PLAN_TOTAL_RUB
-
-
 @pytest.mark.parametrize("value", [True, 0, "450", 450.5, MAX_PRICE_RUB + 1])
 def test_legacy_migration_rejects_noncanonical_price(tmp_path: Path, value: object) -> None:
     root = tmp_path / "legacy"

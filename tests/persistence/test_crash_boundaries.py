@@ -4,7 +4,7 @@ import pytest
 
 from app.config.checks import _check_split_storage
 from app.persistence import SplitJsonBackend, io, transaction
-from app.persistence.layout import TRANSACTIONS_DIR
+from app.persistence.layout import STORE_SPECS, TRANSACTIONS_DIR
 
 
 class SimulatedCrash(BaseException):
@@ -61,4 +61,7 @@ def test_preflight_allows_recoverable_bootstrap_without_manifest(tmp_path: Path)
 
     assert _check_split_storage(str(tmp_path)) == []
     assert not (tmp_path / "storage_layout.json").exists()  # Preflight is read-only.
-    assert SplitJsonBackend(tmp_path).snapshot().revision == 1
+    recovered = SplitJsonBackend(tmp_path).snapshot()
+    assert recovered.revision == 1
+    assert set(recovered.stores) == set(STORE_SPECS)
+    assert not (tmp_path / TRANSACTIONS_DIR).exists()

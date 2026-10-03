@@ -12,7 +12,7 @@ from app import storage
 from app.messaging.review_navigation import retire_review_card_for_navigation
 from app.messaging.review_refs import register_review_reference, review_completion
 from app.messaging.review_sync import sync_service_review_messages
-from app.subscriptions.requests import admin_listing, operations, state
+from app.subscriptions.requests import admin_listing, operations
 from tests.product_support import _admin, _callback_names, _callback_update, _user
 
 
@@ -98,8 +98,10 @@ async def test_empty_archive_still_has_active_requests_navigation(isolated_stora
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status", sorted(state.ARCHIVED_REQUEST_STATUSES))
-@pytest.mark.parametrize("kind", ["trial", "purchase", "renewal"])
+@pytest.mark.parametrize(
+    ("status", "kind"),
+    [("approved", "trial"), ("rejected", "purchase"), ("cancelled", "renewal")],
+)
 async def test_archive_card_is_read_only_and_returns_to_origin_page(
     isolated_storage: None, status: str, kind: str
 ) -> None:

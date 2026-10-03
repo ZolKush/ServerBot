@@ -10,6 +10,7 @@ from app.persistence import MigrationError, SchemaError, SplitJsonBackend, Stora
 from app.persistence.layout import PTB_TARGET_FILE, STORE_SPECS
 from app.persistence.migration import load_v4_source, migrate_v4_to_split, transform_v4
 from app.persistence.migration.backup import BACKUP_MANIFEST_FILE
+from app.subscriptions.policy import PLAN_TOTAL_RUB
 
 from .fixtures import clone_payload, write_v4_source
 
@@ -18,8 +19,13 @@ def test_v4_transform_splits_every_domain_without_references(tmp_path: Path) -> 
     root = tmp_path / "data"
     user, important = write_v4_source(root)
 
-    transformed = transform_v4(load_v4_source(root))
+    source = load_v4_source(root)
+    original_user = clone_payload(source.user_data)
+    original_important = clone_payload(source.important_data)
+    transformed = transform_v4(source)
 
+    assert source.user_data == original_user
+    assert source.important_data == original_important
     assert set(transformed.stores) == set(STORE_SPECS)
     profile = transformed.stores["users.profiles"]["42"]
     grant = transformed.stores["access.grants"]["42"]
@@ -33,6 +39,7 @@ def test_v4_transform_splits_every_domain_without_references(tmp_path: Path) -> 
     assert "service_tier" not in profile
     assert "username" not in account
     assert transformed.stores["subscriptions.billing_settings"]["payment_message"] is None
+    assert transformed.stores["subscriptions.billing_settings"]["standard_price_rub"] == PLAN_TOTAL_RUB
 
     tickets = transformed.stores["support.tickets"]
     messages = transformed.stores["support.ticket_messages"]
@@ -107,20 +114,11 @@ def test_one_shot_migration_backs_up_and_publishes_verified_layout(tmp_path: Pat
         for spec in STORE_SPECS.values()
         for path in [(root / spec.relative_path)]
     )
-
-
-def test_successful_migration_is_idempotent(tmp_path: Path) -> None:
-    root = tmp_path / "data"
-    write_v4_source(root)
-    first = migrate_v4_to_split(root, backup_root=tmp_path / "backups")
-    revision = SplitJsonBackend(root).snapshot().revision
-
-    second = migrate_v4_to_split(root, backup_root=tmp_path / "backups")
-
+    second = migrate_v4_to_split(root, backup_root=backup_root)
     assert second.already_migrated is True
-    assert second.source_fingerprint == first.source_fingerprint
-    assert second.backup_path == first.backup_path
-    assert SplitJsonBackend(root).snapshot().revision == revision
+    assert second.source_fingerprint == report.source_fingerprint
+    assert second.backup_path == report.backup_path
+    assert SplitJsonBackend(root).snapshot().revision == snapshot.revision
 
 
 def test_migration_recovers_crash_and_becomes_idempotent(tmp_path: Path) -> None:
@@ -310,19 +308,6 @@ def test_partial_split_target_is_a_hard_conflict(tmp_path: Path) -> None:
 
     with pytest.raises(StorageConflictError, match="targets already exist"):
         migrate_v4_to_split(root, dry_run=True)
-
-
-def test_transform_does_not_mutate_source_objects(tmp_path: Path) -> None:
-    root = tmp_path / "data"
-    user, important = write_v4_source(root)
-    original_user = clone_payload(user)
-    original_important = clone_payload(important)
-    source = load_v4_source(root)
-
-    transform_v4(source)
-
-    assert source.user_data == original_user
-    assert source.important_data == original_important
 
 
 def _tree_hashes(root: Path) -> dict[str, str]:

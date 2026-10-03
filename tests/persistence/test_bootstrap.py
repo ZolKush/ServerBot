@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -19,7 +20,13 @@ def test_empty_layout_bootstrap_is_explicit_and_idempotent(tmp_path: Path) -> No
     assert first.revision == second.revision == snapshot.revision == 1
     assert first.store_count == second.store_count == len(STORE_SPECS)
     assert (root / "telegram").is_dir()
+    assert set(snapshot.stores) == set(STORE_SPECS)
+    assert all(store.revision == 1 for store in snapshot.stores.values())
     assert all(snapshot.data(name) == spec.default_data() for name, spec in STORE_SPECS.items())
+    manifest = json.loads((root / "storage_layout.json").read_text(encoding="utf-8"))
+    assert manifest["layout"] == "split-json"
+    assert manifest["revision"] == 1
+    assert set(manifest["stores"]) == set(STORE_SPECS)
 
 
 @pytest.mark.parametrize("source_name", ["user_data.json", "important_data.json"])

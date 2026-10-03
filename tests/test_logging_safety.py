@@ -11,7 +11,7 @@ def _record_with_secret(secret: str) -> logging.LogRecord:
     try:
         raise RuntimeError(f"failed with {secret}")
     except RuntimeError:
-        return logging.LogRecord(
+        record = logging.LogRecord(
             name="maint-bot",
             level=logging.ERROR,
             pathname=__file__,
@@ -20,23 +20,27 @@ def _record_with_secret(secret: str) -> logging.LogRecord:
             args=(secret,),
             exc_info=sys.exc_info(),
         )
+        record.source = {"nested": [secret], secret: "value"}
+        return record
 
 
 def test_plain_logging_redacts_secrets_from_message_and_exception() -> None:
     secret = "123456:SECRET_RUNTIME_TOKEN"
-    rendered = SecretRedactingFormatter("%(message)s %(exc_text)s", secrets=[secret]).format(
+    rendered = SecretRedactingFormatter("%(message)s %(exc_text)s", secrets=["123456", secret]).format(
         _record_with_secret(secret)
     )
 
     assert secret not in rendered
+    assert "SECRET_RUNTIME_TOKEN" not in rendered
     assert rendered.count("[REDACTED]") >= 2
 
 
 def test_json_logging_redacts_secrets_from_message_and_exception() -> None:
-    secret = "very-sensitive-password"
+    secret = 'long-"password\\value'
     payload = json.loads(JsonLogFormatter(secrets=[secret]).format(_record_with_secret(secret)))
 
     assert secret not in payload["msg"]
     assert secret not in payload["exc"]
     assert "[REDACTED]" in payload["msg"]
     assert "[REDACTED]" in payload["exc"]
+    assert payload["source"] == {"nested": ["[REDACTED]"], "[REDACTED]": "value"}

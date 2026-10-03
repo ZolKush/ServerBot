@@ -16,54 +16,11 @@ from app.subscriptions.requests import payment_reports as product_payment_report
 from app.subscriptions.requests import review_handlers as product_review
 from app.subscriptions.requests import review_operations as product_review_operations
 from app.subscriptions.requests import state as product_state
-from app.users.staff import STAFF_TITLE_SUPPORT
 from tests.product_support import _admin, _callback_update, _user
 
 
-def test_trial_is_one_time_keeps_basic_tier_and_sends_connection(monkeypatch: pytest.MonkeyPatch) -> None:
-    now = datetime(2026, 7, 15, 12, 0, tzinfo=TZ)
-    monkeypatch.setattr(product_state, "now", lambda: now)
-    cfg = storage.UserData(
-        authorized_users={"1": _admin(1), "42": _user(42)},
-    )
-    outcome, request_id = product_customer.apply_trial_comment(
-        cfg,
-        user_id=42,
-        comment="Хочу проверить подключение",
-    )
-    request = cfg.service_requests[str(request_id)]
-
-    updated = product_operations.finalize_trial(
-        cfg,
-        request,
-        cfg.authorized_users["1"],
-        "https://connect.test/trial",
-    )
-
-    assert outcome == "created"
-    assert updated["service_tier"] == "basic"
-    assert updated["trial_issued_at"] == now.isoformat()
-    assert updated["trial_end_at"] == (now + timedelta(hours=24)).isoformat()
-    assert updated["trial_duration_hours"] == 24
-    assert updated["connection_url"] == "https://connect.test/trial"
-    assert cfg.service_requests[str(request_id)]["status"] == "approved"
-    assert {event["kind"] for event in cfg.outbox.values()} == {
-        "trial_request",
-        "trial_approved",
-        "trial_connection",
-    }
-    assert (
-        product_customer.apply_trial_comment(
-            cfg,
-            user_id=42,
-            comment="Ещё раз",
-        )[0]
-        == "issued"
-    )
-
-
 @pytest.mark.asyncio
-async def test_trial_callback_flow_claims_link_and_completes_request(
+async def test_trial_callback_flow_preserves_claimed_deadline_and_prevents_reissue(
     isolated_storage: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -72,13 +29,14 @@ async def test_trial_callback_flow_claims_link_and_completes_request(
 
     def _seed(cfg: storage.UserData) -> int:
         cfg.authorized_users = {"1": _admin(1), "42": _user(42)}
-        request = product_operations.create_request(
+        outcome, request_id = product_customer.apply_trial_comment(
             cfg,
-            kind="trial",
             user_id=42,
             comment="Проверка подключения",
         )
-        return int(request["id"])
+        assert outcome == "created"
+        assert request_id is not None
+        return request_id
 
     request_id = await storage.update_user_data(_seed)
     update, context = _callback_update(1, f"product:req:approve:{request_id}")
@@ -90,6 +48,8 @@ async def test_trial_callback_flow_claims_link_and_completes_request(
     assert claimed["status"] == "awaiting_link"
     assert claimed["claimed_by_id"] == 1
 
+    issued_at = now + timedelta(minutes=5)
+    monkeypatch.setattr(product_state, "now", lambda: issued_at)
     update.callback_query = None
     update.effective_message.text = "https://connect.test/trial-callback"
     finished_state = await product_input.product_text_input(update, context)
@@ -98,42 +58,22 @@ async def test_trial_callback_flow_claims_link_and_completes_request(
     current = storage.get_user_meta_copy(42)
     assert current is not None
     assert current["service_tier"] == "basic"
-    assert current["trial_issued_at"] == now.isoformat()
+    assert current["trial_issued_at"] == issued_at.isoformat()
     assert current["trial_end_at"] == (now + timedelta(hours=24)).isoformat()
     assert current["trial_duration_hours"] == 24
     assert current["connection_url"] == "https://connect.test/trial-callback"
     assert storage.service_requests_snapshot()[str(request_id)]["status"] == "approved"
     assert {event["kind"] for _, event in storage.outbox_snapshot()} == {
+        "trial_request",
         "trial_approved",
         "trial_connection",
     }
-
-
-def test_payment_activation_promotes_user_and_delivers_new_connection(monkeypatch: pytest.MonkeyPatch) -> None:
-    now = datetime(2026, 7, 15, 12, 0, tzinfo=TZ)
-    monkeypatch.setattr(product_state, "now", lambda: now)
-    cfg = storage.UserData(authorized_users={"1": _admin(1, admin_level="owner"), "42": _user(42)})
-    request = product_operations.create_request(
-        cfg,
-        kind="purchase",
-        user_id=42,
-        status="payment_reported",
-        target_end_at=(now + timedelta(days=90)).isoformat(),
+    assert (
+        await storage.update_user_data(
+            lambda cfg: product_customer.apply_trial_comment(cfg, user_id=42, comment="Ещё раз")[0]
+        )
+        == "issued"
     )
-
-    updated = product_operations.finalize_payment(
-        cfg,
-        request,
-        cfg.authorized_users["1"],
-        connection_url="https://connect.test/paid",
-    )
-
-    assert updated["service_tier"] == "subscriber"
-    assert updated["is_paid"] is True
-    assert updated["connection_url"] == "https://connect.test/paid"
-    assert updated["subscription_end_at"] == (now + timedelta(days=90)).isoformat()
-    assert cfg.service_requests[str(request["id"])]["status"] == "approved"
-    assert {event["kind"] for event in cfg.outbox.values()} == {"payment_approved", "payment_connection"}
 
 
 @pytest.mark.asyncio
@@ -204,6 +144,7 @@ async def test_purchase_callbacks_send_requisites_and_require_owner_confirmation
     assert current is not None
     assert current["service_tier"] == "subscriber"
     assert current["is_paid"] is True
+    assert current["connection_url"] == "https://connect.test/paid-callback"
     assert current["subscription_end_at"] == (now + timedelta(days=90)).isoformat()
     assert storage.service_requests_snapshot()[str(request_id)]["status"] == "approved"
     assert {event["kind"] for _, event in storage.outbox_snapshot()} == {
@@ -212,27 +153,6 @@ async def test_purchase_callbacks_send_requisites_and_require_owner_confirmation
         "payment_approved",
         "payment_connection",
     }
-
-
-def test_regular_admin_cannot_finalize_payment(monkeypatch: pytest.MonkeyPatch) -> None:
-    now = datetime(2026, 7, 15, 12, 0, tzinfo=TZ)
-    monkeypatch.setattr(product_state, "now", lambda: now)
-    cfg = storage.UserData(authorized_users={"1": _admin(1), "42": _user(42)})
-    request = product_operations.create_request(
-        cfg,
-        kind="purchase",
-        user_id=42,
-        status="payment_reported",
-        target_end_at=(now + timedelta(days=90)).isoformat(),
-    )
-
-    with pytest.raises(ValueError, match="owner_required"):
-        product_operations.finalize_payment(
-            cfg,
-            request,
-            cfg.authorized_users["1"],
-            connection_url="https://connect.test/paid",
-        )
 
 
 def test_support_can_use_standard_trial_but_only_owner_can_change_duration(
@@ -317,6 +237,8 @@ def test_payment_decision_operations_enforce_owner_server_side(monkeypatch: pyte
         target_end_at=(now + timedelta(days=90)).isoformat(),
     )
 
+    with pytest.raises(ValueError, match="owner_required"):
+        product_operations.finalize_payment(cfg, request, support, connection_url="https://connect.test/paid")
     assert (
         product_review_operations.confirm_payment(
             cfg,
@@ -334,6 +256,8 @@ def test_payment_decision_operations_enforce_owner_server_side(monkeypatch: pyte
         == "owner_only"
     )
     assert cfg.service_requests[str(request["id"])]["status"] == "payment_reported"
+    assert cfg.authorized_users["42"]["service_tier"] == "basic"
+    assert not cfg.outbox
 
 
 def test_support_can_reject_pending_trial_or_purchase() -> None:
@@ -360,41 +284,3 @@ def test_support_can_reject_pending_trial_or_purchase() -> None:
         )
         == "rejected"
     )
-
-
-def test_owner_can_confirm_payment_for_regular_staff_without_changing_staff_role(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    now = datetime(2026, 7, 15, 12, 0, tzinfo=TZ)
-    monkeypatch.setattr(product_state, "now", lambda: now)
-    cfg = storage.UserData(
-        authorized_users={
-            "1": _admin(1, admin_level="owner"),
-            "2": _admin(
-                2,
-                service_tier="basic",
-                is_paid=False,
-                connection_url="https://connect.test/staff",
-            ),
-        }
-    )
-    request = product_operations.create_request(
-        cfg,
-        kind="purchase",
-        user_id=2,
-        status="payment_reported",
-        target_end_at=(now + timedelta(days=90)).isoformat(),
-    )
-
-    updated = product_operations.finalize_payment(
-        cfg,
-        request,
-        cfg.authorized_users["1"],
-    )
-
-    assert updated["role"] == "admin"
-    assert updated["admin_level"] == "admin"
-    assert updated["staff_title"] == STAFF_TITLE_SUPPORT
-    assert updated["service_tier"] == "subscriber"
-    assert updated["is_paid"] is True
-    assert updated["subscription_end_at"] == (now + timedelta(days=90)).isoformat()

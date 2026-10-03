@@ -1,11 +1,8 @@
 import errno
-import json
-import logging
 
 import pytest
 
 from app.runtime import lock as instance_lock
-from app.runtime.logging import JsonLogFormatter, SecretRedactingFormatter
 
 
 def test_failed_pid_write_closes_the_locked_file(tmp_path, monkeypatch):
@@ -42,18 +39,3 @@ def test_corrupt_pid_metadata_does_not_hide_contention(tmp_path, monkeypatch):
     monkeypatch.setattr(instance_lock.SingleInstanceLock, "_lock_file", staticmethod(held))
     with pytest.raises(instance_lock.InstanceAlreadyRunning):
         instance_lock.SingleInstanceLock(path).acquire()
-
-
-def test_json_extra_fields_are_redacted_recursively():
-    secret = 'long-"password\\value'
-    record = logging.LogRecord("maint-bot", logging.INFO, __file__, 1, "ok", (), None)
-    record.source = {"nested": [secret], secret: "value"}
-    rendered = JsonLogFormatter(secrets=[secret]).format(record)
-    payload = json.loads(rendered)
-    assert payload["source"] == {"nested": ["[REDACTED]"], "[REDACTED]": "value"}
-
-
-def test_overlapping_secrets_are_redacted_longest_first():
-    record = logging.LogRecord("maint-bot", logging.INFO, __file__, 1, "password-with-suffix", (), None)
-    formatter = SecretRedactingFormatter("%(message)s", secrets=["password", "password-with-suffix"])
-    assert formatter.format(record) == "[REDACTED]"

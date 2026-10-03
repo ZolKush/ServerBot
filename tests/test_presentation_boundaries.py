@@ -1,4 +1,3 @@
-from datetime import datetime
 from html.parser import HTMLParser
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -7,8 +6,6 @@ import pytest
 from telegram.error import NetworkError
 
 from app.bot import ui
-from app.config import TZ
-from app.subscriptions.requests.views import render_payment_template
 
 
 class BalancedHTML(HTMLParser):
@@ -48,10 +45,3 @@ async def test_uncertain_edit_failure_does_not_send_a_duplicate_reply():
     with pytest.raises(NetworkError):
         await ui.safe_edit_or_reply(message, "notice")
     message.reply_text.assert_not_awaited()
-
-
-def test_payment_template_expansion_remains_within_delivery_limit():
-    text = render_payment_template(
-        {"payment_message": "{access_until}" * 250}, access_until=datetime(2026, 12, 1, tzinfo=TZ)
-    )
-    assert len(text) <= 3500

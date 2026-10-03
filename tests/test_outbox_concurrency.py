@@ -47,7 +47,7 @@ async def test_flood_wait_defers_the_job_without_sleeping(isolated_storage):
 
     async def send_message(**kwargs):
         sent.append(kwargs["chat_id"])
-        raise RetryAfter(3600)
+        raise RetryAfter(timedelta(hours=1))
 
     bot = SimpleNamespace(send_message=send_message)
     assert await asyncio.wait_for(outbox.process_outbox(bot), timeout=2) == 1
@@ -56,6 +56,7 @@ async def test_flood_wait_defers_the_job_without_sleeping(isolated_storage):
     states = storage.outbox_snapshot()[0][1]["recipients"]
     assert states["42"]["next_attempt_at"]
     assert states["43"]["attempts"] == 0
+    assert 3500 < telegram_rate.flood_wait_remaining() <= 3600.5
 
 
 @pytest.mark.asyncio

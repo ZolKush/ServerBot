@@ -157,6 +157,7 @@ async def test_trial_link_is_removed_at_deadline_and_notification_is_sent_once(
                 trial_issued_at=(now - timedelta(hours=24)).isoformat(),
                 trial_end_at=(now - timedelta(seconds=1)).isoformat(),
                 trial_duration_hours=24,
+                paid_at=(now - timedelta(days=30)).isoformat(),
             )
         }
 
@@ -269,10 +270,6 @@ def test_connection_payload_uses_link_terminology_and_url_button() -> None:
 )
 def test_invalid_connection_urls_are_rejected(value: str) -> None:
     assert not is_valid_connection_url(value)
-
-
-def test_valid_connection_url_is_accepted() -> None:
-    assert is_valid_connection_url("https://connect.test/path?token=abc")
 
 
 def test_admin_user_card_stays_within_telegram_limit_for_malformed_data() -> None:

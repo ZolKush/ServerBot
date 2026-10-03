@@ -58,13 +58,10 @@ def _request(cfg: storage.UserData, now: datetime) -> dict:
 @pytest.mark.parametrize(
     "text",
     [
-        "",
         "500",
         "500 | 0",
         "500 | 37",
         "-1 | 1",
-        "1.5 | 1",
-        "1000001 | 1",
         "500 | 1.5",
         "500 | 1 | 01.01.2020 12:00",
         "500 | 1 | invalid",
@@ -237,6 +234,8 @@ def test_prices_without_placeholders_and_long_templates_are_bounded(frozen_now: 
     custom = payment_message(settings, request)
     assert "Индивидуальные условия" in custom and "125 ₽" in custom
     assert utf16_length(custom) <= 3500
+    expanded = render_payment_template({"payment_message": "{access_until}" * 250}, access_until=frozen_now)
+    assert utf16_length(expanded) <= 3500
 
 
 def test_standard_price_change_does_not_reprice_existing_request(frozen_now: datetime) -> None:

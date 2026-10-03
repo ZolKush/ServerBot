@@ -22,21 +22,6 @@ class SimulatedCrash(BaseException):
     pass
 
 
-def test_bootstrap_creates_valid_complete_layout(tmp_path: Path) -> None:
-    backend = SplitJsonBackend(tmp_path / "data")
-
-    snapshot = backend.bootstrap()
-
-    assert snapshot.revision == 1
-    assert set(snapshot.stores) == set(STORE_SPECS)
-    assert all(store.revision == 1 for store in snapshot.stores.values())
-    assert backend.snapshot() == snapshot
-    manifest = json.loads((backend.layout_path).read_text(encoding="utf-8"))
-    assert manifest["layout"] == "split-json"
-    assert manifest["revision"] == 1
-    assert set(manifest["stores"]) == set(STORE_SPECS)
-
-
 def test_unit_of_work_commits_multiple_stores_once(tmp_path: Path) -> None:
     backend = SplitJsonBackend(tmp_path / "data")
     backend.bootstrap()
@@ -118,23 +103,6 @@ def test_stale_unit_of_work_is_rejected(tmp_path: Path) -> None:
     finally:
         first.__exit__(None, None, None)
         second.__exit__(None, None, None)
-
-
-def test_recovery_finishes_bootstrap_after_process_crash(tmp_path: Path) -> None:
-    root = tmp_path / "data"
-
-    def crash(name: str) -> None:
-        if name == "after_install:users/profiles.json":
-            raise SimulatedCrash
-
-    with pytest.raises(SimulatedCrash):
-        SplitJsonBackend(root, failpoint=crash).bootstrap()
-
-    assert not (root / "storage_layout.json").exists()
-    recovered = SplitJsonBackend(root).snapshot()
-    assert recovered.revision == 1
-    assert set(recovered.stores) == set(STORE_SPECS)
-    assert not (root / TRANSACTIONS_DIR).exists()
 
 
 def test_recovery_finishes_multi_store_commit_after_crash(tmp_path: Path) -> None:

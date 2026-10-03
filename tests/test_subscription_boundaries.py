@@ -33,28 +33,6 @@ async def test_paid_link_survives_expiry_after_a_previous_trial(isolated_storage
     assert all(event["kind"] != "trial_expired" for _, event in storage.outbox_snapshot())
 
 
-def test_trial_issued_after_an_old_payment_still_expires():
-    now = datetime.now(TZ)
-    meta = _user(
-        42,
-        connection_url="https://connect.test/trial",
-        paid_at=(now - timedelta(days=30)).isoformat(),
-        trial_issued_at=(now - timedelta(days=2)).isoformat(),
-        trial_end_at=(now - timedelta(days=1)).isoformat(),
-    )
-    assert trial_access_expired(meta, at=now)
-
-
-def test_trial_finalization_preserves_deadline_shown_to_the_operator(monkeypatch):
-    now = datetime(2026, 9, 7, 12, tzinfo=TZ)
-    monkeypatch.setattr(state, "now", lambda: now)
-    cfg = storage.UserData(authorized_users={"1": _admin(1), "42": _user(42)})
-    target = now + timedelta(hours=23, minutes=55)
-    request = operations.create_request(cfg, kind="trial", user_id=42, target_end_at=target.isoformat())
-    result = operations.finalize_trial(cfg, request, cfg.authorized_users["1"], "https://connect.test/trial")
-    assert result["trial_end_at"] == target.isoformat()
-
-
 def test_payment_rejects_invalid_stored_link_before_mutation(monkeypatch):
     now = datetime.now(TZ)
     monkeypatch.setattr(state, "now", lambda: now)

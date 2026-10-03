@@ -75,68 +75,6 @@ def test_configured_tls_endpoints_are_normalized_and_deduplicated(monkeypatch: p
 
 
 @pytest.mark.asyncio
-async def test_tls_fallback_is_used_only_after_transport_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[int] = []
-
-    async def _check(domain: str, port: int, servers: list[str]) -> dict:
-        calls.append(port)
-        if port == 443:
-            return {
-                "domain": domain,
-                "port": port,
-                "servers": servers,
-                "status": "error",
-                "failure_kind": "transport",
-                "error": "SSLError: TLSV1_UNRECOGNIZED_NAME",
-            }
-        return {
-            "domain": domain,
-            "port": port,
-            "servers": servers,
-            "status": "ok",
-            "failure_kind": "",
-            "error": None,
-        }
-
-    monkeypatch.setattr(tls_policy, "check_tls_endpoint", _check)
-    target = tls_certificates.ConfiguredTLSEndpoint("example.com", 443, (8443,), ("nl",))
-
-    result = await tls_certificates.check_tls_with_fallback(target)
-
-    assert calls == [443, 8443]
-    assert result["primary_port"] == 443
-    assert result["effective_port"] == 8443
-    assert result["used_fallback"] is True
-    assert len(result["attempt_errors"]) == 1
-
-
-@pytest.mark.asyncio
-async def test_tls_fallback_never_masks_invalid_certificate(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[int] = []
-
-    async def _check(domain: str, port: int, servers: list[str]) -> dict:
-        calls.append(port)
-        return {
-            "domain": domain,
-            "port": port,
-            "servers": servers,
-            "status": "invalid",
-            "failure_kind": "",
-            "error": "certificate hostname mismatch",
-        }
-
-    monkeypatch.setattr(tls_policy, "check_tls_endpoint", _check)
-    target = tls_certificates.ConfiguredTLSEndpoint("example.com", 443, (8443,), ("nl",))
-
-    result = await tls_certificates.check_tls_with_fallback(target)
-
-    assert calls == [443]
-    assert result["status"] == "invalid"
-    assert result["effective_port"] == 443
-    assert result["used_fallback"] is False
-
-
-@pytest.mark.asyncio
 async def test_tls_endpoint_distinguishes_expiring_and_not_yet_valid(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -362,8 +300,10 @@ async def test_tls_logs_only_final_endpoint_problem_after_fallbacks(
     target = tls_certificates.ConfiguredTLSEndpoint("zeronet.example.com", 443, (8443,), ("nl",))
     monkeypatch.setattr(tls_certificates, "configured_tls_endpoints", lambda: [target])
     fallback_fails = False
+    calls: list[int] = []
 
     async def _check(domain: str, port: int, servers: list[str]) -> dict:
+        calls.append(port)
         if port == 443 or fallback_fails:
             return {
                 "domain": domain,
@@ -385,8 +325,14 @@ async def test_tls_logs_only_final_endpoint_problem_after_fallbacks(
     monkeypatch.setattr(tls_policy, "check_tls_endpoint", _check)
     caplog.set_level(logging.INFO, logger="maint-bot")
 
-    await tls_certificates.refresh_tls_certificates(source="test")
+    result = await tls_certificates.refresh_tls_certificates(source="test")
 
+    assert calls == [443, 8443]
+    selected = result["zeronet.example.com:443"]
+    assert selected["primary_port"] == 443
+    assert selected["effective_port"] == 8443
+    assert selected["used_fallback"] is True
+    assert len(selected["attempt_errors"]) == 1
     assert any("TLS fallback succeeded" in record.message for record in caplog.records)
     assert not any("TLS endpoint problem" in record.message for record in caplog.records)
 

@@ -65,7 +65,7 @@ def test_recipients_include_disabled_deduplicate_and_handle_null_id():
 @pytest.mark.asyncio
 async def test_explicit_shared_range_reaches_sparse_broadcast_ids_without_markers():
     bot = FakeBot(messages=[(10, 8301), (20, 8310), (10, 8601), (30, 8302)])
-    runner, _, _ = engine(bot)
+    runner, events, _ = engine(bot)
     results = await runner.run([20, 10, 20], 8300, 8600)
     assert bot.deleted == {(10, 8301), (20, 8310)}
     assert bot.messages == {(10, 8601), (30, 8302)}
@@ -73,15 +73,6 @@ async def test_explicit_shared_range_reaches_sparse_broadcast_ids_without_marker
     assert all(1 <= len(ids) <= 100 and min(ids) >= 8300 and max(ids) <= 8600 for _, ids in bot.calls)
     assert [result.accepted_ids for result in results] == [301, 301]
     assert all(result.complete for result in results)
-
-
-@pytest.mark.asyncio
-async def test_missing_ids_are_not_reported_as_confirmed_deletions():
-    bot = FakeBot()
-    runner, events, _ = engine(bot)
-    (result,) = await runner.run([10], 1, 2)
-    assert result.accepted_ids == 2
-    assert bot.deleted == set()
     assert all(event != "DELETED" for event, _ in events)
 
 

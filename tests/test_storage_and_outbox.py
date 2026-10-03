@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import timedelta
 from types import SimpleNamespace
 
 import pytest
-from telegram.error import Forbidden, NetworkError, RetryAfter
+from telegram.error import Forbidden, NetworkError
 
 from app import storage
 from app.messaging import outbox
@@ -253,11 +252,6 @@ def test_blocking_suppresses_only_target_recipient_and_preserves_final_event() -
     assert set(cfg.outbox) == {"shared", "final"}
     assert set(cfg.outbox["shared"]["recipients"]) == {"43"}
     assert cfg.outbox["final"]["allow_blocked_delivery"] is True
-
-
-def test_retry_after_timedelta_is_supported() -> None:
-    exc = RetryAfter(timedelta(seconds=2))
-    assert outbox._retry_after_seconds(exc) == 2.0
 
 
 @pytest.mark.asyncio

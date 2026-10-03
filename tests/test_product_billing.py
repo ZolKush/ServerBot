@@ -15,7 +15,7 @@ from app.subscriptions.requests import operations as product_operations
 from app.subscriptions.requests import reminders as product_reminders
 from app.subscriptions.requests import state as product_state
 from app.subscriptions.requests import views as product_views
-from app.users.staff import STAFF_TITLE_LEAD
+from app.users.staff import STAFF_TITLE_LEAD, STAFF_TITLE_SUPPORT
 from tests.product_support import _admin, _callback_names, _callback_update, _user
 
 
@@ -52,7 +52,11 @@ async def test_manual_payment_conversation_accepts_regular_staff_account(
     staff = storage.get_user_meta_copy(2)
     assert staff is not None
     assert staff["role"] == "admin"
+    assert staff["admin_level"] == "admin"
+    assert staff["staff_title"] == STAFF_TITLE_SUPPORT
+    assert staff["service_tier"] == "subscriber"
     assert staff["is_paid"] is True
+    assert staff["connection_url"] == "https://connect.test/staff"
     assert staff["subscription_end_at"] == datetime(2026, 10, 20, 18, 0, tzinfo=TZ).isoformat()
 
 

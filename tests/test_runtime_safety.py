@@ -1,4 +1,3 @@
-from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -6,8 +5,6 @@ from pydantic import ValidationError
 
 from app.config.schema import AppSettings
 from app.config.secrets import load_required_secrets
-from app.main import build_app
-from app.messaging.message_cleanup import TrackingExtBot
 from app.monitoring.remote.transport import _split_ssh_target
 from app.monitoring.system.ufw import _parse_ufw_status
 from app.runtime.lock import InstanceAlreadyRunning, SingleInstanceLock
@@ -210,33 +207,3 @@ def test_single_instance_lock_is_first_process_wins(tmp_path: Path) -> None:
 
     second.acquire()
     second.release()
-
-
-def test_application_builds_with_required_background_jobs() -> None:
-    application = build_app()
-
-    assert application.job_queue is not None
-    assert isinstance(application.bot, TrackingExtBot)
-    assert application.post_init is not None
-    assert -2 not in application.handlers
-    assert {-100, -1}.issubset(application.handlers)
-    job_names = {job.name for job in application.job_queue.jobs()}
-    assert {
-        "fail2ban_digest",
-        "dns_daily_refresh",
-        "dns_refresh_startup",
-        "maint_active_reminder",
-        "maint_schedule_tick",
-        "auth_prune",
-        "outbox_delivery",
-        "ticket_orphan_release",
-        "subscription_lifecycle",
-        "docker_status_refresh",
-        "tls_certificate_check_startup",
-        "tls_certificate_check",
-        "tls_deadline_evaluation",
-        "message_cleanup",
-    }.issubset(job_names)
-    docker_job = next(job for job in application.job_queue.jobs() if job.name == "docker_status_refresh")
-    assert docker_job.job.trigger.interval == timedelta(hours=6)
-    assert AppSettings.model_fields["MAINT_RESTART_REMINDER_INTERVAL_SEC"].default == 30 * 60

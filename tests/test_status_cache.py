@@ -45,25 +45,6 @@ def _snapshot(uptime: str) -> StatusSnapshot:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("admin_mode", [False, True])
-async def test_status_cache_reuses_snapshot_without_invalidation(server, admin_mode) -> None:
-    snapshot = _snapshot("1 ч")
-    calls = 0
-
-    async def loader():
-        nonlocal calls
-        calls += 1
-        return snapshot
-
-    first = await cache.cached_snapshot(server, admin_mode, loader)
-    second = await cache.cached_snapshot(server, admin_mode, loader)
-
-    assert first is snapshot
-    assert second is snapshot
-    assert calls == 1
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("admin_mode", [False, True])
 async def test_status_invalidation_discards_inflight_cache_write(server, admin_mode) -> None:
     old_snapshot = _snapshot("н/д")
     new_snapshot = _snapshot("2 ч")

@@ -12,6 +12,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from telegram.ext import CallbackQueryHandler, CommandHandler, ConversationHandler, MessageHandler, TypeHandler
 
 import app.main as main_module
+from app.messaging.message_cleanup import TrackingExtBot
 from tests.routing_contract_data import CONVERSATION_ROUTES
 
 DEFAULT_ROUTES = (
@@ -159,6 +160,8 @@ def _cron_fields(trigger: CronTrigger) -> dict[str, str]:
 def test_default_handler_groups_and_route_order_are_stable() -> None:
     application = main_module.build_app()
 
+    assert isinstance(application.bot, TrackingExtBot)
+    assert application.post_init is not None
     assert tuple(sorted(application.handlers)) == (-100, -1, 0)
     assert all(len(application.handlers[group]) == 1 for group in (-100, -1))
     assert all(isinstance(application.handlers[group][0], TypeHandler) for group in (-100, -1))

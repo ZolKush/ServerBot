@@ -120,6 +120,8 @@ async def test_failed_diagnostic_handshake_cannot_hide_a_bad_primary_certificate
     assert result["status"] == "invalid"
     assert result["failure_kind"] == "certificate"
     assert set(ports) == {443}
+    assert result["effective_port"] == 443
+    assert result["used_fallback"] is False
 
 
 @pytest.mark.parametrize("raw", ["1e200 0", "-1 0", "nan 0"])
