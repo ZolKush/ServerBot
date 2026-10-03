@@ -8,7 +8,7 @@ from typing import Any
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes, ConversationHandler
 
-from ..bot.guards import get_user_id, require_admin
+from ..bot.guards import get_user_id, is_admin, require_admin, require_auth
 from ..bot.ui import (
     SEP,
     clip_text,
@@ -21,9 +21,10 @@ from ..bot.ui import (
 )
 from ..messaging.message_cleanup import record_navigation_result
 from ..storage import get_all_tickets_snapshot, get_ticket_copy
+from .notifications import queue_ticket_attachments
 from .operations import _safe_int
 from .routes import ACTIVE_PAGE_SIZE, ARCHIVE_PAGE_SIZE
-from .views import _format_ticket_for_admin, _ticket_admin_kb
+from .views import _format_ticket_for_admin, _format_ticket_for_user, _ticket_admin_kb, _ticket_user_kb
 from .workflow import _clear_ticket_ctx
 
 
@@ -118,13 +119,13 @@ async def ticket_list_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     return await _show_ticket_dashboard(update, context, page=page)
 
 
-@require_admin
+@require_auth
 async def ticket_open_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     if not query:
         return ConversationHandler.END
-    admin_id = get_user_id(update)
-    if admin_id is None:
+    viewer_id = get_user_id(update)
+    if viewer_id is None:
         await query.answer()
         return ConversationHandler.END
 
@@ -138,17 +139,21 @@ async def ticket_open_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return ConversationHandler.END
 
     ticket = get_ticket_copy(ticket_id)
-    if not ticket:
+    staff_view = is_admin(update)
+    if not ticket or (not staff_view and _safe_int(ticket.get("user_id")) != viewer_id):
         await query.answer("Тикет не найден.", show_alert=True)
         return ConversationHandler.END
 
     await query.answer()
     _clear_ticket_ctx(context)
-    await safe_edit_or_reply(
+    result = await safe_edit_or_reply(
         update.effective_message,
-        _format_ticket_for_admin(ticket, admin_id),
-        reply_markup=_ticket_admin_kb(ticket, admin_id),
+        _format_ticket_for_admin(ticket, viewer_id) if staff_view else _format_ticket_for_user(ticket),
+        reply_markup=_ticket_admin_kb(ticket, viewer_id) if staff_view else _ticket_user_kb(ticket, viewer_id),
     )
+    await record_navigation_result(update, result)
+    if result is not None:
+        await queue_ticket_attachments(ticket_id, viewer_id)
     return ConversationHandler.END
 
 

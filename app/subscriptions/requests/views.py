@@ -94,7 +94,9 @@ def request_card(request: dict[str, Any], meta: dict[str, Any]) -> str:
     return clip_html_message("\n".join(lines))
 
 
-def request_markup(request: dict[str, Any], actor_meta: dict[str, Any]) -> InlineKeyboardMarkup:
+def request_markup(
+    request: dict[str, Any], actor_meta: dict[str, Any], *, archive_page: int = 0
+) -> InlineKeyboardMarkup:
     request_id = int(request.get("id", 0) or 0)
     user_id = int(request.get("user_id", 0) or 0)
     kind = str(request.get("kind") or "")
@@ -163,7 +165,15 @@ def request_markup(request: dict[str, Any], actor_meta: dict[str, Any]) -> Inlin
             ]
         )
     rows.append([InlineKeyboardButton("👤 Открыть профиль", callback_data=f"users:user:{user_id}")])
-    rows.append([InlineKeyboardButton("⬅️ К заявкам", callback_data="product:requests")])
+    archived = status in state.ARCHIVED_REQUEST_STATUSES
+    rows.append(
+        [
+            InlineKeyboardButton(
+                "⬅️ К архиву заявок" if archived else "⬅️ К заявкам",
+                callback_data=f"product:requests:archive:{archive_page}" if archived else "product:requests",
+            )
+        ]
+    )
     rows.append([InlineKeyboardButton("🏠 Меню", callback_data="menu:home")])
     return InlineKeyboardMarkup(rows)
 

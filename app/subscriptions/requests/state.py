@@ -23,6 +23,7 @@ ACTIVE_REQUEST_STATUSES = {
     "requisites_sent",
     "payment_reported",
 }
+ARCHIVED_REQUEST_STATUSES = {"approved", "rejected", "cancelled"}
 
 CTX_ACTION = "product_input_action"
 CTX_REQUEST_ID = "product_request_id"
@@ -83,6 +84,7 @@ def clear_request_context(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 __all__ = [
     "ACTIVE_REQUEST_STATUSES",
+    "ARCHIVED_REQUEST_STATUSES",
     "CTX_ACTION",
     "CTX_PENDING",
     "CTX_REQUEST_ID",

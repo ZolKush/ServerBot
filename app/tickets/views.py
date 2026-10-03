@@ -115,6 +115,8 @@ def _ticket_user_kb(ticket: dict[str, Any], uid: int) -> InlineKeyboardMarkup:
                 ),
             ],
         )
+    if ticket_id and any(item.get("attachment") for item in _ticket_messages(ticket)):
+        rows.append([InlineKeyboardButton("📎 Показать вложения", callback_data=f"ticket:open:{ticket_id}")])
     rows.append([InlineKeyboardButton("🏠 Меню", callback_data="menu:home")])
     return InlineKeyboardMarkup(rows)
 
@@ -144,6 +146,8 @@ def _ticket_admin_kb(ticket: dict[str, Any], admin_uid: int) -> InlineKeyboardMa
             rows.append(
                 [InlineKeyboardButton("✅ Закрыть тикет", callback_data=f"ticket:close:{ticket_id}")],
             )
+    if ticket_id and any(item.get("attachment") for item in _ticket_messages(ticket)):
+        rows.append([InlineKeyboardButton("📎 Показать вложения", callback_data=f"ticket:open:{ticket_id}")])
     rows.append([InlineKeyboardButton("📋 К панели", callback_data="ticket:list")])
     rows.append([InlineKeyboardButton("🏠 Меню", callback_data="menu:home")])
     return InlineKeyboardMarkup(rows)

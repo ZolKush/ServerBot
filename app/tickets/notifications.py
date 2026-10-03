@@ -6,9 +6,19 @@ from typing import Any
 
 from telegram import InlineKeyboardMarkup
 
+from ..bot.text_limits import clip_plain_text
+from ..bot.ui import format_dt_human
 from ..messaging.outbox import message_payload
-from ..storage import ImportantData, enqueue_important_outbox, make_outbox_event
+from ..storage import (
+    ImportantData,
+    enqueue_important_outbox,
+    get_user_meta_copy,
+    make_outbox_event,
+    update_important_data,
+)
+from ..users.staff import is_admin_meta
 from .history import _last_attachment, _ticket_messages
+from .operations import _safe_int
 from .views import (
     _format_ticket_for_admin,
     _format_ticket_for_user,
@@ -61,6 +71,7 @@ def _queue_ticket_attachment(
     uid: int,
     attachment: dict[str, Any] | None,
     kind: str,
+    caption: str = "",
 ) -> None:
     if not isinstance(attachment, dict):
         return
@@ -68,14 +79,49 @@ def _queue_ticket_attachment(
     file_id = str(attachment.get("file_id") or "")
     if attachment_type not in {"photo", "document"} or not file_id:
         return
+    payload = {"method": f"send_{attachment_type}", "file_id": file_id}
+    if caption:
+        payload["caption"] = clip_plain_text(caption, 1024)
     enqueue_important_outbox(
         config,
         make_outbox_event(
             kind=kind,
             recipient_ids=[uid],
-            payload={"method": f"send_{attachment_type}", "file_id": file_id},
+            payload=payload,
         ),
     )
+
+
+async def queue_ticket_attachments(ticket_id: int, viewer_id: int) -> None:
+    """Replay retained attachments to an authorized viewer through bounded delivery."""
+
+    def enqueue(config: ImportantData) -> None:
+        ticket = config.tickets.get(str(ticket_id))
+        meta = get_user_meta_copy(viewer_id)
+        if (
+            not isinstance(ticket, dict)
+            or not meta
+            or meta.get("access_state") != "approved"
+            or not meta.get("enabled", True)
+        ):
+            return
+        if not is_admin_meta(meta) and _safe_int(ticket.get("user_id")) != viewer_id:
+            return
+        for item in _ticket_messages(ticket):
+            attachment = item.get("attachment")
+            if not isinstance(attachment, dict):
+                continue
+            sender = "Администратор" if item.get("sender_role") == "admin" else "Пользователь"
+            caption = f"🎫 Тикет #{ticket_id} · {sender}\n{format_dt_human(item.get('ts'))}\n\n{item.get('text') or ''}"
+            _queue_ticket_attachment(
+                config,
+                uid=viewer_id,
+                attachment=dict(attachment),
+                kind="ticket_view_attachment",
+                caption=caption,
+            )
+
+    await update_important_data(enqueue)
 
 
 def _queue_admin_full_notifications(
@@ -138,4 +184,4 @@ def _queue_user_notification(
         )
 
 
-__all__ = ["MAX_TRANSFER_ATTACHMENTS"]
+__all__ = ["MAX_TRANSFER_ATTACHMENTS", "queue_ticket_attachments"]

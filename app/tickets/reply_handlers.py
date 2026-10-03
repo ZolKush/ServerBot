@@ -80,7 +80,8 @@ async def ticket_admin_reply_start(
     data["ticket_reply_ticket_id"] = ticket_id
     data["ticket_reply_role"] = "admin"
     await query.edit_message_text(
-        f"🎫 <b>Тикет #{ticket_id} — ответ</b>\n{SEP}\nВведите ответ пользователю:",
+        f"🎫 <b>Тикет #{ticket_id} — ответ</b>\n{SEP}\nВведите ответ пользователю "
+        "или отправьте скриншот как фотографию с подписью или без неё. Можно также приложить файл:",
         parse_mode=ParseMode.HTML,
         reply_markup=ticket_input_kb(),
     )
@@ -124,7 +125,8 @@ async def ticket_user_reply_start(
     data["ticket_reply_ticket_id"] = ticket_id
     data["ticket_reply_role"] = "user"
     await query.edit_message_text(
-        f"🎫 <b>Мой тикет #{ticket_id} — ответ</b>\n{SEP}\nВведите ответ администратору:",
+        f"🎫 <b>Мой тикет #{ticket_id} — ответ</b>\n{SEP}\nВведите ответ администратору "
+        "или отправьте скриншот как фотографию с подписью или без неё. Можно также приложить файл:",
         parse_mode=ParseMode.HTML,
         reply_markup=ticket_input_kb(),
     )

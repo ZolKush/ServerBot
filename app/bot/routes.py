@@ -129,8 +129,12 @@ def _register_product_routes(
     application.add_handler(CallbackQueryHandler(payment_reported_cb, pattern=r"^subscription:paid:\d+$"))
     application.add_handler(CallbackQueryHandler(renewal_reported_cb, pattern=r"^subscription:renew$"))
     application.add_handler(CallbackQueryHandler(connection_show_cb, pattern=r"^subscription:connection$"))
-    application.add_handler(CallbackQueryHandler(product_requests_cb, pattern=r"^product:requests$"))
-    application.add_handler(CallbackQueryHandler(product_request_view_cb, pattern=r"^product:req:view:\d+$"))
+    application.add_handler(
+        CallbackQueryHandler(product_requests_cb, pattern=r"^product:requests(?::(active|archive):\d+)?$")
+    )
+    application.add_handler(
+        CallbackQueryHandler(product_request_view_cb, pattern=r"^product:req:view:\d+(?::archive:\d+)?$")
+    )
     application.add_handler(CallbackQueryHandler(product_manage_user_cb, pattern=r"^product:manage:\d+$"))
     application.add_handler(
         CallbackQueryHandler(product_tier_cb, pattern=r"^product:tier:\d+:(basic|unlimited_trial)$")

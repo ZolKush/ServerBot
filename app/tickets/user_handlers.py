@@ -17,7 +17,7 @@ from ..config import TZ, logger
 from ..messaging.message_cleanup import record_navigation_result
 from ..storage import ImportantData, get_user_open_tickets, product_settings_snapshot
 from .dashboard_handlers import _show_ticket_dashboard
-from .notifications import _queue_admin_full_notifications, _queue_user_notification
+from .notifications import _queue_admin_full_notifications, _queue_user_notification, queue_ticket_attachments
 from .operations import TicketFlowError, create_ticket
 from .routes import (
     MAX_TICKET_SUBJECT_LEN,
@@ -78,6 +78,7 @@ async def ticket_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         else:
             return ConversationHandler.END
         await record_navigation_result(update, result)
+        await queue_ticket_attachments(int(ticket["id"]), uid)
         return ConversationHandler.END
 
     _clear_ticket_ctx(context)
@@ -147,7 +148,8 @@ async def ticket_urgency(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return ConversationHandler.END
     ticket_context_data(context)["ticket_urgency"] = query.data.split(":")[1]
     await query.edit_message_text(
-        "<b>Тикет > Описание</b>\n\nОпишите проблему (лучше одним сообщением). Для отмены: /cancel",
+        "<b>Тикет > Описание</b>\n\nОпишите проблему или отправьте скриншот как фотографию "
+        "с подписью или без неё. Можно также приложить файл. Для отмены: /cancel",
         parse_mode=ParseMode.HTML,
         reply_markup=ticket_input_kb(),
     )
@@ -216,7 +218,7 @@ async def ticket_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if query.data == "ticket:edit_text":
         data["ticket_edit_field"] = "text"
         await query.edit_message_text(
-            "<b>Тикет > Описание</b>\n\nВведите новое описание:",
+            "<b>Тикет > Описание</b>\n\nВведите новое описание или отправьте фотографию/файл с подписью или без неё:",
             parse_mode=ParseMode.HTML,
             reply_markup=ticket_input_kb(),
         )
