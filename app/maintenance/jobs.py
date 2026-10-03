@@ -27,8 +27,20 @@ from .views import (
 
 
 async def maint_restart_notify(context: ContextTypes.DEFAULT_TYPE) -> None:
+    del context
     maintenance = get_active_maintenance()
     if not maintenance or not str(maintenance.get("id", "") or ""):
+        return
+    expected_end = str(maintenance.get("expected_end") or "")
+    try:
+        deadline = datetime.fromisoformat(expected_end)
+    except ValueError:
+        logger.warning("Active maintenance has invalid expected end id=%s", maintenance.get("id"))
+        return
+    if deadline.tzinfo is None:
+        deadline = deadline.replace(tzinfo=TZ)
+    checked_at = datetime.now(TZ)
+    if checked_at <= deadline or maintenance.get("overdue_reminded_for") == expected_end:
         return
     admin_ids = maintenance_manager_ids()
     if not admin_ids:
@@ -43,7 +55,7 @@ async def maint_restart_notify(context: ContextTypes.DEFAULT_TYPE) -> None:
             reply_markup=[[{"text": "🏠 Меню", "callback_data": "menu:home"}]],
         ),
     )
-    await queue_active_reminder(maintenance_id, reminder_kind, event)
+    await queue_active_reminder(maintenance_id, expected_end, checked_at, reminder_kind, event)
 
 
 async def maint_schedule_tick(context: ContextTypes.DEFAULT_TYPE) -> None:

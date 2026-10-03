@@ -26,6 +26,15 @@ def _discard_schedule_warnings(cfg: ImportantData, schedule_id: str) -> None:
             cfg.outbox.pop(event_id, None)
 
 
+def _discard_active_reminders(cfg: ImportantData, maintenance_id: str) -> None:
+    reminder_kind = f"maintenance_admin_reminder_{maintenance_id}"
+    cfg.outbox = {
+        event_id: pending
+        for event_id, pending in cfg.outbox.items()
+        if not (isinstance(pending, dict) and pending.get("kind") == reminder_kind)
+    }
+
+
 async def start_maintenance(
     maintenance: Mapping[str, Any],
     *,
@@ -91,6 +100,7 @@ async def extend_maintenance(
         updated["expected_end"] = (now + timedelta(minutes=duration_min)).isoformat()
         updated["updated_at"] = now.isoformat()
         cfg.maintenance = updated
+        _discard_active_reminders(cfg, str(maintenance_id))
         event, users_count, admins_count = make_maintenance_notice_event(
             author_id=author_id,
             text=maintenance_extend_notice(updated, hours, minutes, author),
@@ -124,12 +134,7 @@ async def end_maintenance(
             kind="maintenance_ended",
         )
         cfg.maintenance = {}
-        reminder_kind = f"maintenance_admin_reminder_{maintenance_id}"
-        cfg.outbox = {
-            event_id: pending
-            for event_id, pending in cfg.outbox.items()
-            if not (isinstance(pending, dict) and pending.get("kind") == reminder_kind)
-        }
+        _discard_active_reminders(cfg, maintenance_id)
         enqueue_maintenance_notice(cfg, event)
         return previous
 
@@ -173,6 +178,8 @@ async def cancel_scheduled_maintenance(
 
 async def queue_active_reminder(
     maintenance_id: str,
+    expected_end: str,
+    checked_at: datetime,
     reminder_kind: str,
     event: dict[str, Any],
 ) -> bool:
@@ -180,8 +187,17 @@ async def queue_active_reminder(
         current = cfg.maintenance if isinstance(cfg.maintenance, dict) else {}
         if not current.get("active") or str(current.get("id") or "") != maintenance_id:
             return False
-        if any(isinstance(pending, dict) and pending.get("kind") == reminder_kind for pending in cfg.outbox.values()):
+        if str(current.get("expected_end") or "") != expected_end:
             return False
+        try:
+            deadline = datetime.fromisoformat(expected_end)
+        except ValueError:
+            return False
+        if deadline.tzinfo is None:
+            deadline = deadline.replace(tzinfo=TZ)
+        if checked_at <= deadline or current.get("overdue_reminded_for") == expected_end:
+            return False
+        cfg.maintenance = {**current, "overdue_reminded_for": expected_end}
         enqueue_important_outbox(cfg, event)
         return True
 

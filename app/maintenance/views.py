@@ -181,7 +181,7 @@ def maintenance_end_notice(
 
 
 def maintenance_active_reminder_text(maintenance: dict[str, Any]) -> str:
-    return "🔔 <b>Напоминание об активных техработах</b>\n\n" + maintenance_panel_text(maintenance)
+    return "⚠️ <b>Техработы превысили заявленный срок простоя</b>\n\n" + maintenance_panel_text(maintenance)
 
 
 def maintenance_scheduled_soon_notice(scheduled: dict[str, Any], remaining_min: int) -> str:

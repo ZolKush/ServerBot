@@ -17,6 +17,7 @@ class Maintenance(TypedDict, total=False):
     duration_min: int
     started_at: str
     expected_end: str
+    overdue_reminded_for: str
     author_id: int | None
     author_name: str
     author_signature_version: int

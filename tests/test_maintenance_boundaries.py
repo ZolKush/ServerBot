@@ -1,12 +1,16 @@
 from datetime import datetime, timedelta
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from app import storage
 from app.config import TZ
 from app.maintenance import calendar, jobs, operations, policy, records
-from app.messaging.outbox import message_payload
+from app.messaging.outbox import message_payload, process_outbox
+from app.persistence.backend import SplitJsonBackend
+from app.users.staff import STAFF_TITLE_MAINTAINER
+from tests.product_support import _admin, _user
 
 
 def test_unknown_maintenance_scope_never_expands_to_all_servers():
@@ -60,3 +64,113 @@ def test_calendar_safely_bounds_untrusted_navigation(year, month):
     today = datetime(2026, 9, 10).date()
     keyboard = calendar.schedule_calendar_kb(year, month, today=today)
     assert keyboard.inline_keyboard[0][0].text == "Сентябрь 2026"
+
+
+async def _seed_active_maintenance(*, deadline: datetime) -> dict:
+    await storage.update_user_data(
+        lambda cfg: cfg.authorized_users.update({"1": _admin(1, staff_title=STAFF_TITLE_MAINTAINER), "42": _user(42)})
+    )
+    record = records.build_maintenance_record("all", "planned", 0, 30, 1, "Engineer")
+    record["expected_end"] = deadline.isoformat()
+    await storage.set_maintenance_record(record)
+    return record
+
+
+def _reminder_events(maintenance_id: str) -> list[dict]:
+    kind = f"maintenance_admin_reminder_{maintenance_id}"
+    return [event for _, event in storage.outbox_snapshot() if event["kind"] == kind]
+
+
+@pytest.mark.asyncio
+async def test_active_reminder_is_sent_once_only_after_declared_deadline(isolated_storage):
+    deadline = datetime.now(TZ) + timedelta(hours=1)
+    record = await _seed_active_maintenance(deadline=deadline)
+    maintenance_id = record["id"]
+    kind = f"maintenance_admin_reminder_{maintenance_id}"
+    await jobs.maint_restart_notify(MagicMock())
+    exact_deadline_event = storage.make_outbox_event(kind=kind, recipient_ids=[1], payload=message_payload("Overdue"))
+    assert not await operations.queue_active_reminder(
+        maintenance_id, deadline.isoformat(), deadline, kind, exact_deadline_event
+    )
+    assert not _reminder_events(maintenance_id)
+
+    overdue_end = (datetime.now(TZ) - timedelta(minutes=1)).isoformat()
+    await storage.set_maintenance_record({**record, "expected_end": overdue_end})
+    await jobs.maint_restart_notify(MagicMock())
+    await jobs.maint_restart_notify(MagicMock())
+
+    reminders = _reminder_events(maintenance_id)
+    assert len(reminders) == 1
+    assert set(reminders[0]["recipients"]) == {"1"}
+    assert "превысили заявленный срок" in reminders[0]["payload"]["text"]
+    stored = SplitJsonBackend(storage.storage_data_dir()).inspect().data("maintenance.state")
+    assert stored["active"]["overdue_reminded_for"] == overdue_end
+
+    bot = SimpleNamespace(send_message=AsyncMock(return_value=None))
+    assert await process_outbox(bot) == 1
+    assert not _reminder_events(maintenance_id)
+    storage.initialize_storage(storage.storage_data_dir())
+    await jobs.maint_restart_notify(MagicMock())
+    assert not _reminder_events(maintenance_id)
+
+
+@pytest.mark.asyncio
+async def test_extending_maintenance_retires_old_reminder_and_arms_new_deadline(isolated_storage):
+    record = await _seed_active_maintenance(deadline=datetime.now(TZ) - timedelta(minutes=1))
+    maintenance_id = record["id"]
+    old_end = record["expected_end"]
+    await jobs.maint_restart_notify(MagicMock())
+    assert len(_reminder_events(maintenance_id)) == 1
+
+    extended, _, _ = await operations.extend_maintenance(
+        maintenance_id,
+        duration_min=15,
+        hours=0,
+        minutes=15,
+        author="Engineer",
+        author_id=1,
+    )
+    assert not _reminder_events(maintenance_id)
+    assert extended["overdue_reminded_for"] == old_end
+    kind = f"maintenance_admin_reminder_{maintenance_id}"
+    stale_event = storage.make_outbox_event(kind=kind, recipient_ids=[1], payload=message_payload("Stale"))
+    assert not await operations.queue_active_reminder(maintenance_id, old_end, datetime.now(TZ), kind, stale_event)
+
+    new_end = datetime.fromisoformat(extended["expected_end"])
+    new_event = storage.make_outbox_event(
+        kind=kind, recipient_ids=[1], payload=message_payload("New deadline exceeded")
+    )
+    assert await operations.queue_active_reminder(
+        maintenance_id, extended["expected_end"], new_end + timedelta(seconds=1), kind, new_event
+    )
+    assert not await operations.queue_active_reminder(
+        maintenance_id, extended["expected_end"], new_end + timedelta(seconds=2), kind, new_event
+    )
+    assert len(_reminder_events(maintenance_id)) == 1
+    assert storage.get_active_maintenance()["overdue_reminded_for"] == extended["expected_end"]
+
+
+@pytest.mark.asyncio
+async def test_ending_maintenance_cancels_pending_overdue_notice(isolated_storage):
+    record = await _seed_active_maintenance(deadline=datetime.now(TZ) - timedelta(minutes=1))
+    maintenance_id = record["id"]
+    await jobs.maint_restart_notify(MagicMock())
+    assert len(_reminder_events(maintenance_id)) == 1
+
+    await operations.end_maintenance(maintenance_id, author="Engineer", author_id=1, ended_at=datetime.now(TZ))
+    await jobs.maint_restart_notify(MagicMock())
+
+    assert storage.get_active_maintenance() is None
+    assert not _reminder_events(maintenance_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("expected_end", [None, "invalid"])
+async def test_active_reminder_requires_a_valid_declared_deadline(isolated_storage, expected_end):
+    record = await _seed_active_maintenance(deadline=datetime.now(TZ) - timedelta(minutes=1))
+    record["expected_end"] = expected_end
+    await storage.set_maintenance_record(record)
+
+    await jobs.maint_restart_notify(MagicMock())
+
+    assert not _reminder_events(record["id"])
