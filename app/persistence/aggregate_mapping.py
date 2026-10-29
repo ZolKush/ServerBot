@@ -1,4 +1,4 @@
-"""Loss-detecting mapping between application aggregates and split repositories."""
+"""Loss-detecting mapping between application aggregates and logical repositories."""
 
 from __future__ import annotations
 

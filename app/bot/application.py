@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from pathlib import Path
 
 from telegram import Update
 from telegram.ext import (
@@ -16,10 +17,10 @@ from telegram.ext import (
 from ..config import (
     BOT_MODE,
     BOT_TOKEN,
+    DATA_DIR,
     INSTANCE_LOCK_PATH,
     NAVIGATION_CLEANUP_ENABLED,
     NAVIGATION_RETENTION_HOURS,
-    PTB_PERSISTENCE_PATH,
     SERVER_KEY_PATTERN,
     SERVERS,
     logger,
@@ -28,6 +29,7 @@ from ..messaging.message_cleanup import MessageCleanupStats, MessageTracker, Tra
 from ..messaging.review_navigation import retire_review_card_for_navigation
 from ..monitoring.remnawave.client import close_metrics_client
 from ..monitoring.status.reconciliation import reconcile_configured_servers
+from ..persistence.sqlite_schema import DATABASE_FILENAME
 from ..runtime.lock import ALREADY_RUNNING_EXIT_CODE, InstanceAlreadyRunning, SingleInstanceLock
 from ..subscriptions.requests.flow_cleanup import abandon_product_flow
 from .conversations import reset_navigation_state
@@ -36,7 +38,7 @@ from .errors import blocked_user_guard, fallback_text, on_error, unhandled_callb
 from .flow_routes import PRIVATE_TEXT
 from .job_queue import ManagedJobQueue
 from .jobs import register_jobs
-from .persistence import build_atomic_persistence
+from .persistence_sqlite import build_sqlite_persistence
 from .routes import register_routes
 
 
@@ -121,7 +123,7 @@ def build_application(*, bot_mode: str = BOT_MODE) -> Application:
         ApplicationBuilder()
         .bot(bot)
         .job_queue(ManagedJobQueue())
-        .persistence(build_atomic_persistence(PTB_PERSISTENCE_PATH))
+        .persistence(build_sqlite_persistence(Path(DATA_DIR) / DATABASE_FILENAME))
         .post_init(post_init)
         .post_shutdown(_post_shutdown)
         .build()

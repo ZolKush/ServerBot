@@ -27,6 +27,8 @@ from .source_policy import node_metrics_problem, server_uses_metrics
 
 
 async def collect_disk_ufw_uncached(server: ServerTarget, *, admin_mode: bool) -> dict[str, object]:
+    if server.mode == "panel":
+        return {"ok": False, "error": "Disk/UFW недоступны в режиме панели"}
     if server.mode == "ssh":
         try:
             result = await remote_status_bundle(

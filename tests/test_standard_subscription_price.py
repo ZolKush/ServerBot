@@ -8,10 +8,10 @@ from telegram.ext import ConversationHandler
 
 from app import storage
 from app.administration import flow_handlers, operations, state, views
-from app.persistence import SplitJsonBackend
 from app.persistence.errors import MigrationError
 from app.persistence.migration import load_v4_source, transform_v4
 from app.persistence.normalization import normalize_product_settings
+from app.persistence.sqlite_backend import SQLiteBackend
 from app.subscriptions.policy import MAX_PRICE_RUB, PLAN_TOTAL_RUB, parse_price, standard_price
 from tests.persistence.fixtures import write_v4_source
 from tests.product_support import _admin, _callback_names, _callback_update
@@ -55,7 +55,7 @@ async def test_owner_confirms_price_and_persists_billing_audit(isolated_storage:
     assert storage.product_settings_snapshot()["standard_price_rub"] == 450
     assert storage.audit_log_snapshot()[-1]["action"] == "standard_price_changed"
     assert storage.audit_log_snapshot()[-1]["details"] == {"old": PLAN_TOTAL_RUB, "new": 450}
-    persisted = SplitJsonBackend(storage.storage_data_dir()).snapshot()
+    persisted = SQLiteBackend(storage.storage_data_dir()).snapshot()
     assert persisted.data("subscriptions.billing_settings")["standard_price_rub"] == 450
     assert "standard_price_rub" not in persisted.data("subscriptions.accounts").get("1", {})
 

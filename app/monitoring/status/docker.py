@@ -18,6 +18,8 @@ _REFRESH_LOCKS: dict[str, asyncio.Lock] = {}
 
 async def refresh_docker_status(server: ServerTarget, *, source: str = "manual") -> None:
     """Persist a fresh inventory, including failures, before releasing the lock."""
+    if server.mode == "panel":
+        return
     async with _REFRESH_LOCKS.setdefault(server.key, asyncio.Lock()):
         started = time.monotonic()
         try:

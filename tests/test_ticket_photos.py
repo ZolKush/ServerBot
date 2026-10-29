@@ -12,7 +12,7 @@ from telegram.ext import ConversationHandler
 from app import storage
 from app.bot.flow_routes import build_ticket_flow
 from app.messaging.outbox import process_outbox
-from app.persistence.backend import SplitJsonBackend
+from app.persistence.sqlite_backend import SQLiteBackend
 from app.tickets import reply_handlers, user_handlers
 from app.tickets.operations import _build_ticket_record
 from app.tickets.routes import TICKET_ADMIN_REPLY_TEXT, TICKET_CONFIRM, TICKET_TEXT, TICKET_USER_REPLY_TEXT
@@ -98,7 +98,7 @@ async def test_ticket_creation_saves_and_delivers_photo(
     update, _ = _callback_update(42, "ticket:send")
     assert await user_handlers.ticket_confirm(update, context) == ConversationHandler.END
 
-    persisted = SplitJsonBackend(storage.storage_data_dir()).inspect()
+    persisted = SQLiteBackend(storage.storage_data_dir()).inspect()
     messages = persisted.data("support.ticket_messages")["1"]
     assert len(messages) == 1
     assert messages[0]["attachment"] == _PHOTO
@@ -142,7 +142,7 @@ async def test_ticket_replies_save_and_deliver_photos_from_both_sides(
     state = await handler(_photo_update(sender_id, caption=caption), context)
 
     assert state == ConversationHandler.END
-    persisted = SplitJsonBackend(storage.storage_data_dir()).inspect()
+    persisted = SQLiteBackend(storage.storage_data_dir()).inspect()
     messages = persisted.data("support.ticket_messages")["1"]
     assert len(messages) == 2
     assert messages[-1]["attachment"] == _PHOTO

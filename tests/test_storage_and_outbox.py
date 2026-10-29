@@ -9,9 +9,9 @@ from telegram.error import Forbidden, NetworkError
 from app import storage
 from app.messaging import outbox
 from app.messaging.review_sync import review_completion, sync_access_review_messages
-from app.persistence.backend import SplitJsonBackend
 from app.persistence.errors import SchemaError
 from app.persistence.normalization import normalize_outbox
+from app.persistence.sqlite_backend import SQLiteBackend
 
 
 @pytest.mark.asyncio
@@ -56,7 +56,7 @@ async def test_user_update_is_persisted_in_separate_domain_stores(isolated_stora
     )
     await storage.update_user_data(lambda cfg: cfg.authorized_users.update({"42": user}))
 
-    snapshot = SplitJsonBackend(storage.storage_data_dir()).inspect()
+    snapshot = SQLiteBackend(storage.storage_data_dir()).inspect()
 
     assert snapshot.data("users.profiles")["42"]["nickname"] == "Tester"
     assert snapshot.data("access.grants")["42"]["access_state"] == "approved"
@@ -99,7 +99,7 @@ async def test_concurrent_user_updates_are_not_lost(isolated_storage: None) -> N
     await asyncio.gather(*(storage.update_user_data(increment) for _ in range(25)))
 
     assert storage.get_user_meta_copy(42)["nickname"] == "25"
-    on_disk = SplitJsonBackend(storage.storage_data_dir()).inspect()
+    on_disk = SQLiteBackend(storage.storage_data_dir()).inspect()
     assert on_disk.data("users.profiles")["42"]["nickname"] == "25"
 
 

@@ -76,110 +76,138 @@ Telegram-бот для управления серверным сервисом:
 MaintBot учитывает оплаты и сроки, но не проверяет банковские переводы автоматически и не создаёт доступ в RemnaWave.
 Создание, продление и отключение доступа во внешней панели выполняются отдельно.
 
-## Установка
+## Установка в Docker
 
-Бот рассчитан на Linux и запуск через systemd. Версия Python для проекта указана в [.python-version](.python-version);
-зависимости — в [app/requirements.txt](app/requirements.txt). Отдельная база данных не нужна: данные хранятся локально в JSON.
-Подключение к Telegram работает через long polling, поэтому входящий порт или webhook не требуются.
+Бот и встроенная база SQLite работают в одном контейнере. Пользователи, подписки, заявки, тикеты,
+очередь уведомлений, кэши и состояния диалогов сохраняются в `data/maintbot.sqlite3` на хосте.
+Файлы `conf/bot.json` и `conf/servers/*.json` остаются настройками оператора; секреты хранятся отдельно.
+Telegram использует long polling: входящие порты и webhook не нужны.
 
-Ниже используется каталог `/opt/maintbot`. Разместите в нём проект и выполните:
+Нужны Linux с Docker Engine и Docker Compose v2. Образ использует версию Python из [.python-version](.python-version)
+и зависимости из [app/requirements.txt](app/requirements.txt). Контейнер запускается от UID/GID `10001`,
+без привилегий, Docker socket и SSH-ключей. Файлы БД находятся на локальной файловой системе с корректной
+блокировкой и синхронизацией; сетевые диски NFS/SMB требуют отдельной проверки.
+
+### Подготовка новой установки
+
+В каталоге проекта выполните:
 
 ```bash
-cd /opt/maintbot
-python3.14 -m venv .venv
-.venv/bin/python -m pip install -r app/requirements.txt
-
+sudo install -d -m 0700 -o 10001 -g 10001 data
+sudo install -d -m 0750 -o "$(id -u)" -g 10001 conf conf/servers
+cp examples/conf/docker-bot.json conf/bot.json
+cp examples/conf/docker-server.json conf/servers/panel.json
 cp app/env.secrets.example app/env.secrets
-chmod 600 app/env.secrets
-mkdir -p data/conf/servers
-cp examples/conf/bot.json data/conf/bot.json
-cp examples/conf/servers/local-example.json data/conf/servers/local.json
+sudo chgrp -R 10001 conf app/env.secrets
+chmod 0750 conf conf/servers
+chmod 0640 conf/bot.json conf/servers/panel.json app/env.secrets
 ```
-
-### Токен и пароли
 
 Заполните `app/env.secrets` по [примеру](app/env.secrets.example):
 
 | Переменная | Назначение |
 | --- | --- |
-| `BOT_TOKEN` | Токен Telegram-бота, полученный у BotFather |
+| `BOT_TOKEN` | Токен Telegram-бота от BotFather |
 | `ADMIN_PASSWORD` | Пароль входа для администраторов |
 | `OWNER_PASSWORD` | Отдельный пароль назначения руководителя |
-| `REMNAWAVE_METRICS_USER`, `REMNAWAVE_METRICS_PASS` | Логин и пароль метрик, если endpoint использует HTTP Basic Auth |
+| `REMNAWAVE_METRICS_USER`, `REMNAWAVE_METRICS_PASS` | HTTP Basic Auth для метрик панели, если требуется |
 
-Административные пароли должны отличаться и содержать не менее 16 символов. Обычным пользователям они не нужны.
-Если метрики не требуют авторизации, оставьте обе переменные RemnaWave пустыми.
+Административные пароли должны отличаться и содержать не менее 16 символов. Если метрики работают
+без авторизации, оставьте обе переменные RemnaWave пустыми. Секреты и рабочие конфиги не входят в образ.
 
-### Настройки бота
+В `conf/bot.json` задайте часовой пояс и настоящий `REMNAWAVE_METRICS_URL` панели.
+В `conf/servers/panel.json` замените `monitoring.node_uuid` на UUID нужного узла, укажите название сервера.
+Для нескольких узлов создайте отдельные JSON-файлы с уникальными `key` и UUID. Порядок задаёт `display_order`.
+При необходимости настройте внешние DNS- и TLS-проверки в `domains` по
+[примеру сервера](examples/conf/servers/remote-example.json).
 
-Основной конфиг — `data/conf/bot.json`. В нём задаются часовой пояс, пути, расписания уведомлений и параметры мониторинга.
-За основу берите [готовый пример](examples/conf/bot.json): конфиг проверяется целиком, включая обязательные поля.
+Docker-пример использует `connection.transport: "panel"` и `monitoring.source: "remnawave"`.
+В этом режиме бот получает ресурсы и доступность узлов с панели; DNS и TLS проверяет по сети.
+Disk/UFW, локальные метрики хоста, Docker и fail2ban недоступны. SSH fallback не запускается,
+а старые значения этих проверок не отображаются. Список контейнеров должен быть пустым,
+`fail2ban.enabled` — `false`. Эти параметры проверяются при загрузке конфигурации.
 
-Для первого запуска обратите внимание на:
+Пути внутри контейнера фиксированы примером развёртывания:
 
-| Настройка | Что указать |
+| Путь | Назначение |
 | --- | --- |
-| `TZ` | Часовой пояс для дат подписок, уведомлений и техработ |
-| `DATA_DIR` | Каталог данных; в примере `/opt/maintbot/data` |
-| `PTB_PERSISTENCE_PATH` | Файл состояния диалогов; в примере `/opt/maintbot/data/telegram/persistence.pickle` |
-| `INSTANCE_LOCK_PATH` | Для ручного запуска задайте `""`: блокировка будет храниться внутри `DATA_DIR/runtime` |
+| `/var/lib/maintbot` | Постоянный каталог БД и runtime lock; `DATA_DIR` |
+| `/etc/maintbot/conf` | Настройки, подключённые только для чтения |
+| `/run/secrets/maintbot.env` | Секреты, подключённые только для чтения |
 
-Если проект размещён в другом каталоге, измените пути соответственно.
-Для нестандартного расположения конфигов используются `MAINTBOT_CONFIG_DIR` и `SECRETS_ENV_PATH`.
+`PTB_PERSISTENCE_PATH` оставьте пустым: рабочие состояния Telegram теперь находятся в той же SQLite БД.
+`INSTANCE_LOCK_PATH` также оставьте пустым: блокировка создаётся внутри `DATA_DIR/runtime`.
 
-### Подключение серверов
-
-Каждый файл в `data/conf/servers/` описывает один сервер. В скопированном примере замените адреса, домены и имена
-контейнеров на свои; ненужные проверки уберите. Порядок серверов в меню задаётся полем `display_order`.
-Изменения конфигурации серверов применяются после перезапуска бота.
-
-- [Локальный сервер](examples/conf/servers/local-example.json) — проверки на хосте, где запущен бот.
-- [Удалённый сервер](examples/conf/servers/remote-example.json) — подключение по SSH и пример источника метрик RemnaWave.
-
-Для SSH укажите `connection.target`, настройте ключ в `SSH_IDENTITY_FILE` и файл доверенных хостов
-в `SSH_KNOWN_HOSTS_FILE`. Для метрик RemnaWave задайте `REMNAWAVE_METRICS_URL` в конфиге бота,
-а в конфиге сервера — `monitoring.source: "remnawave"` и UUID соответствующего узла.
-
-Проверки UFW, Docker и fail2ban используют [maintbot-helper](deploy/maintbot-helper).
-Он устанавливается на проверяемом хосте в `/usr/local/libexec/maintbot-helper` вместе с
-[правилом sudo](deploy/maintbot-sudoers). Разрешённые контейнеры и пути к логам задаются в
-`/etc/maintbot/docker-containers` и `/etc/maintbot/fail2ban-paths` по
-[примеру контейнеров](deploy/docker-containers.example) и [примеру логов](deploy/fail2ban-paths.example).
-Helper и эти файлы должны принадлежать root. Бот получает доступ к ограниченному набору операций чтения через helper;
-членство в группе Docker для этого не требуется.
-
-### Первый запуск
-
-После заполнения конфигов создайте хранилище новой установки и запустите бот:
+### Запуск и обновление
 
 ```bash
-.venv/bin/python -m app.persistence.bootstrap --data-dir /opt/maintbot/data
-.venv/bin/python -m app.config_check
-.venv/bin/python -m app.launcher
+docker compose build
+docker compose up -d
+docker compose logs -f --tail=100 maintbot
 ```
 
-Откройте личный чат с ботом, отправьте `/start`, затем `/owner <OWNER_PASSWORD>`.
-В настройках сервиса задайте реквизиты, цену, даты периодов, контактную почту и текст помощи для пользователей.
+При первом запуске контейнер создаёт пустую БД, выполняет проверку конфигурации и запускает бот.
+При следующих запусках использует существующую БД. Если найдены старые JSON-данные или pickle без БД,
+запуск останавливается с предложением выполнить явный перенос.
 
-### Постоянный запуск
+Откройте чат с ботом, отправьте `/start`, затем `/owner <OWNER_PASSWORD>`.
+В настройках сервиса задайте реквизиты, цену, даты периодов, контактную почту и текст помощи.
 
-В репозитории есть [готовый systemd unit](deploy/maintbot.service) для каталога `/opt/maintbot`
-и пользователя `maintbot`. Создайте этого системного пользователя, предоставьте ему чтение кода и секретов,
-а также запись в `data/`. Код, конфигурацию и helper оставьте под управлением root.
-Если выбрали другие пути или имя пользователя, поправьте unit.
+Для проверки и перезапуска после изменения конфигурации:
 
 ```bash
-sudo cp deploy/maintbot.service /etc/systemd/system/maintbot.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now maintbot.service
+docker compose run --rm maintbot python -m app.config_check
+docker compose restart maintbot
 ```
 
-Для просмотра состояния и журнала:
+Для обновления кода снова выполните `docker compose build` и `docker compose up -d`.
+`docker compose stop` даёт боту 90 секунд на штатное завершение и сохранение состояния.
+Сервис должен работать в одном экземпляре; не запускайте одновременно systemd и контейнер с одним токеном.
+
+Каталоги хоста можно изменить переменными Compose `MAINTBOT_DATA_DIR`, `MAINTBOT_CONFIG_HOST_DIR`
+и `MAINTBOT_SECRETS_FILE`. Внутренние пути сохраняются. Локальный путь данных должен существовать
+и быть доступен UID/GID `10001` для записи; конфиги и секреты — для чтения.
+
+### Перенос существующих данных
+
+Сначала остановите прежний бот и контейнер. Сохраните отдельную резервную копию каталога данных.
+Поместите старое хранилище в подключаемый каталог `data`, скопируйте операторские настройки из `data/conf`
+в отдельный `conf` и замените пути в `conf/bot.json` значениями Docker-примера.
+Для серверов включите транспорт `panel`, отключите fail2ban и очистите `docker.containers`.
+Сохраните прежние `key` и UUID узлов. Обновление транспорта намеренно меняет идентичность мониторинга:
+старые кэши и задания, привязанные к прежней конфигурации сервера, не должны переноситься на новую.
 
 ```bash
-systemctl status maintbot.service
-journalctl -u maintbot.service -f
+sudo chown -R 10001:10001 data
+docker compose build
+docker compose run --rm maintbot python -m app.persistence.migrate_sqlite --data-dir /var/lib/maintbot --dry-run
+docker compose run --rm maintbot python -m app.persistence.migrate_sqlite --data-dir /var/lib/maintbot
+docker compose up -d
 ```
+
+Команда переноса проверяет исходное хранилище, сохраняет резервную копию и публикует БД только после
+успешного переноса. Исходные JSON-файлы сохраняются для отката; дальнейшие изменения записываются в SQLite.
+Стандартный старый файл `telegram/persistence.pickle` обнаруживается автоматически; для другого пути
+передайте `--ptb-pickle /var/lib/maintbot/путь-к-файлу`. Импортируйте только свой доверенный pickle-файл.
+При нестандартном пути блокировки прежнего процесса используйте `--instance-lock` и убедитесь,
+что старый процесс остановлен. После запуска новой версии возврат к старым JSON без обратного переноса
+теряет последующие изменения.
+
+### Резервное копирование и восстановление
+
+Остановите контейнер и копируйте весь каталог `data`, включая SQLite `-journal`, если он присутствует,
+а также отдельно конфиги и секреты. Нельзя копировать только основной файл БД во время работы бота.
+Для восстановления остановите сервис, восстановите согласованную копию каталога и права UID/GID `10001`,
+затем выполните `docker compose up -d`. Данные сохраняются при пересоздании контейнера.
+
+### Запуск без Docker
+
+Прямой Linux/systemd-запуск остаётся доступен через [unit](deploy/maintbot.service) и `python -m app.launcher`.
+Он также использует SQLite. [Обычный конфиг](examples/conf/bot.json) и примеры
+[локального](examples/conf/servers/local-example.json) и [SSH-сервера](examples/conf/servers/remote-example.json)
+сохраняют проверки хоста. Для SSH нужны доверенные хосты и ключ; для локальных UFW/Docker/fail2ban —
+ограниченный [maintbot-helper](deploy/maintbot-helper) с root-политикой и [sudoers](deploy/maintbot-sudoers).
+Добавлять контейнеру привилегии или монтировать Docker socket для режима панели не требуется.
 
 ## Команды в Telegram
 

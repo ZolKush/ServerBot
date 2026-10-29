@@ -33,6 +33,8 @@ def docker_failure_rows(
 
 
 def docker_views_from_cache(server: ServerTarget) -> list[DockerContainerView]:
+    if server.mode == "panel":
+        return []
     payload = get_docker_status_cache(server.key)
     raw_containers = payload.get("containers") if isinstance(payload, dict) else None
     if not isinstance(raw_containers, list):
@@ -89,6 +91,8 @@ def tls_views(server_key: str, *, admin_mode: bool) -> list[TLSCertificateView]:
 def daily_cache_for(
     server: ServerTarget,
 ) -> tuple[str, str, str, list[str], list[str], list[str], str, str]:
+    if server.mode == "panel":
+        return "н/д", "н/д", "", [], [], [], "", ""
     raw = get_daily_node_status_cache(server.key) or {}
     disk = str(raw.get("disk_raw") or "").strip() or "н/д"
     ufw_state = str(raw.get("ufw_state") or "").strip() or "н/д"

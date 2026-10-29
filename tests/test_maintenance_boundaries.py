@@ -8,7 +8,7 @@ from app import storage
 from app.config import TZ
 from app.maintenance import calendar, jobs, operations, policy, records
 from app.messaging.outbox import message_payload, process_outbox
-from app.persistence.backend import SplitJsonBackend
+from app.persistence.sqlite_backend import SQLiteBackend
 from app.users.staff import STAFF_TITLE_MAINTAINER
 from tests.product_support import _admin, _user
 
@@ -103,7 +103,7 @@ async def test_active_reminder_is_sent_once_only_after_declared_deadline(isolate
     assert len(reminders) == 1
     assert set(reminders[0]["recipients"]) == {"1"}
     assert "превысили заявленный срок" in reminders[0]["payload"]["text"]
-    stored = SplitJsonBackend(storage.storage_data_dir()).inspect().data("maintenance.state")
+    stored = SQLiteBackend(storage.storage_data_dir()).inspect().data("maintenance.state")
     assert stored["active"]["overdue_reminded_for"] == overdue_end
 
     bot = SimpleNamespace(send_message=AsyncMock(return_value=None))

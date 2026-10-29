@@ -157,7 +157,7 @@ def _mixed_unavailable_snapshot(
         metrics_error=metrics_error,
         disk_updated_at_text=disk_updated,
         ufw_updated_at_text=ufw_updated,
-        show_containers_block=True,
+        show_containers_block=server.mode != "panel",
     )
 
 
@@ -225,7 +225,7 @@ async def build_status_snapshot_mixed(
         last_seen_text="",
         disk_updated_at_text=disk_updated,
         ufw_updated_at_text=ufw_updated,
-        show_containers_block=True,
+        show_containers_block=server.mode != "panel",
     )
 
 

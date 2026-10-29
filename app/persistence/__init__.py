@@ -1,7 +1,7 @@
-"""Split JSON persistence boundary.
+"""SQLite persistence boundary and explicit legacy JSON compatibility tools.
 
 Importing this package never opens or mutates application data. Runtime code
-must construct :class:`SplitJsonBackend` after acquiring the process lock.
+must construct :class:`SQLiteBackend` after acquiring the process lock.
 """
 
 from .backend import SplitJsonBackend
@@ -16,6 +16,7 @@ from .errors import (
 )
 from .interfaces import UnitOfWork
 from .snapshots import BackendSnapshot, StoreSnapshot
+from .sqlite_backend import SQLiteBackend
 from .unit_of_work import JsonUnitOfWork
 
 __all__ = [
@@ -28,6 +29,7 @@ __all__ = [
     "RecoveryError",
     "SchemaError",
     "SplitJsonBackend",
+    "SQLiteBackend",
     "StorageConflictError",
     "StoreSnapshot",
     "UnitOfWork",

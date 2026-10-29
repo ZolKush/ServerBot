@@ -13,6 +13,7 @@ from app.config.servers import ServerTarget
 from app.config_check import _check_json_object, validate_configuration
 from app.persistence.backend import SplitJsonBackend
 from app.persistence.layout import default_store_data
+from app.persistence.sqlite_backend import SQLiteBackend
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -62,11 +63,12 @@ def test_config_check_requires_readable_server_directory(tmp_path: Path, monkeyp
     assert any("SERVER_CONFIG_DIR: каталог не найден" in error for error in errors)
 
 
-def test_config_check_requires_migrated_split_layout(tmp_path: Path) -> None:
+def test_config_check_requires_sqlite_without_creating_it(tmp_path: Path) -> None:
     errors = _check_split_storage(str(tmp_path))
 
-    assert any("split-layout v1 не найден" in error for error in errors)
-    assert any("app.persistence.migration" in error for error in errors)
+    assert any("SQLite не найдена" in error for error in errors)
+    assert any("app.persistence.migrate_sqlite" in error for error in errors)
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_config_check_rejects_multiple_owners_across_split_access_store(tmp_path: Path) -> None:
@@ -75,14 +77,14 @@ def test_config_check_rejects_multiple_owners_across_split_access_store(tmp_path
         "1": {"role": "admin", "admin_level": "owner"},
         "2": {"role": "admin", "admin_level": "owner"},
     }
-    SplitJsonBackend(tmp_path).bootstrap(stores=stores)
+    SQLiteBackend(tmp_path).bootstrap(stores=stores)
 
     errors = _check_split_storage(str(tmp_path))
 
     assert any("несколько руководителей" in error for error in errors)
 
 
-def test_config_check_allows_a_verified_pending_redo_for_launcher_recovery(tmp_path: Path) -> None:
+def test_config_check_refuses_legacy_pending_redo_without_changing_it(tmp_path: Path) -> None:
     root = tmp_path / "data"
     SplitJsonBackend(root).bootstrap()
 
@@ -96,7 +98,7 @@ def test_config_check_allows_a_verified_pending_redo_for_launcher_recovery(tmp_p
         with pytest.raises(SimulatedCrash):
             uow.commit()
 
-    assert _check_split_storage(str(root)) == []
+    assert any("migrate_sqlite" in error for error in _check_split_storage(str(root)))
     assert SplitJsonBackend(root).has_pending_transactions() is True
 
 

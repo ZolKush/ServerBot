@@ -25,7 +25,7 @@ class _StrictModel(BaseModel):
 
 
 class ConnectionInventory(_StrictModel):
-    transport: Literal["local", "ssh"]
+    transport: Literal["local", "ssh", "panel"]
     target: str = ""
 
     @model_validator(mode="after")
@@ -33,8 +33,8 @@ class ConnectionInventory(_StrictModel):
         self.target = validate_ssh_target(self.target)
         if self.transport == "ssh" and not self.target:
             raise ValueError("connection.target is required when transport='ssh'")
-        if self.transport == "local" and self.target:
-            raise ValueError("connection.target must be empty when transport='local'")
+        if self.transport != "ssh" and self.target:
+            raise ValueError("connection.target must be empty for local/panel transport")
         return self
 
 
@@ -203,6 +203,11 @@ class ServerInventory(_StrictModel):
 
     @model_validator(mode="after")
     def _validate_domains(self) -> ServerInventory:
+        if self.connection.transport == "panel":
+            if self.monitoring.source != "remnawave":
+                raise ValueError("panel transport requires monitoring.source='remnawave'")
+            if self.docker.containers or self.fail2ban.enabled:
+                raise ValueError("panel transport requires empty docker.containers and fail2ban.enabled=false")
         hosts = [item.host for item in self.domains]
         if len(set(hosts)) != len(hosts):
             raise ValueError("server domains must contain unique hosts")

@@ -1,4 +1,4 @@
-"""Read-only production configuration and split-storage preflight checks."""
+"""Read-only production configuration and SQLite preflight checks."""
 
 from __future__ import annotations
 
@@ -96,9 +96,10 @@ def _check_json_object(path_value: str, field_name: str) -> list[str]:
 
 
 def _check_split_storage(data_dir: str) -> list[str]:
-    from ..persistence.backend import SplitJsonBackend
+    import sqlite3
+
     from ..persistence.errors import PersistenceError
-    from ..persistence.layout import LAYOUT_FILE, STORE_SPECS
+    from ..persistence.sqlite_backend import SQLiteBackend
 
     root = Path(data_dir)
     if not root.exists():
@@ -108,22 +109,17 @@ def _check_split_storage(data_dir: str) -> list[str]:
     if not os.access(root, os.R_OK | os.W_OK | os.X_OK):
         return [f"DATA_DIR: каталог недоступен для чтения и записи: {root}"]
 
-    backend = SplitJsonBackend(root)
+    backend = SQLiteBackend(root)
     try:
-        pending = backend.has_pending_transactions()
-        if pending:
-            backend.verify_recovery()
-            snapshot = None
-        elif not backend.exists():
+        if not backend.exists():
             return [
-                f"DATA_DIR: split-layout v1 не найден ({root / LAYOUT_FILE}); "
+                f"DATA_DIR: SQLite не найдена ({backend.database_path}); "
                 "для нового хранилища выполните python -m app.persistence.bootstrap, "
-                "для переноса v4 — python -m app.persistence.migration"
+                "для переноса JSON — python -m app.persistence.migrate_sqlite"
             ]
-        else:
-            snapshot = backend.inspect()
-    except (PersistenceError, OSError, UnicodeError, ValueError) as exc:
-        return [f"DATA_DIR: split-layout v1 повреждён или требует recovery: {exc}"]
+        snapshot = backend.inspect()
+    except (PersistenceError, OSError, UnicodeError, ValueError, sqlite3.Error) as exc:
+        return [f"DATA_DIR: SQLite повреждена или требует recovery под блокировкой процесса: {exc}"]
 
     errors: list[str] = []
     if snapshot is not None:
@@ -135,9 +131,7 @@ def _check_split_storage(data_dir: str) -> list[str]:
         )
         if owners > 1:
             errors.append("DATA_DIR: найдено несколько руководителей сервиса")
-    errors.extend(_check_private_data_permissions(str(root / LAYOUT_FILE), "DATA_DIR"))
-    for spec in STORE_SPECS.values():
-        errors.extend(_check_private_data_permissions(str(root / spec.relative_path), spec.name))
+    errors.extend(_check_private_data_permissions(str(backend.database_path), "DATA_DIR"))
     return list(dict.fromkeys(errors))
 
 
@@ -150,7 +144,6 @@ def validate_configuration() -> list[str]:
         DATA_DIR,
         INSTANCE_LOCK_PATH,
         PRIVILEGED_HELPER_BIN,
-        PTB_PERSISTENCE_PATH,
         SERVER_CONFIG_DIR,
         SERVERS,
         SSH_IDENTITY_FILE,
@@ -200,7 +193,7 @@ def validate_configuration() -> list[str]:
         else:
             errors.extend(_readable_file(SSH_IDENTITY_FILE, "SSH_IDENTITY_FILE", private=True))
 
-    if os.name != "nt":
+    if os.name != "nt" and any(server.mode == "local" for server in SERVERS.values()):
         helper = Path(PRIVILEGED_HELPER_BIN)
         if not helper.is_absolute() or not helper.is_file() or not os.access(helper, os.X_OK):
             errors.append(f"PRIVILEGED_HELPER_BIN: helper не найден или не исполняемый: {helper}")
@@ -208,12 +201,7 @@ def validate_configuration() -> list[str]:
             errors.append("sudo не найден, безопасный privileged helper недоступен")
 
     errors.extend(_check_split_storage(DATA_DIR))
-    for value, name in (
-        (PTB_PERSISTENCE_PATH, "PTB_PERSISTENCE_PATH"),
-        (INSTANCE_LOCK_PATH, "INSTANCE_LOCK_PATH"),
-    ):
-        errors.extend(_writable_parent(value, name))
-    errors.extend(_check_private_data_permissions(PTB_PERSISTENCE_PATH, "PTB_PERSISTENCE_PATH"))
+    errors.extend(_writable_parent(INSTANCE_LOCK_PATH, "INSTANCE_LOCK_PATH"))
 
     if os.name != "nt":
         errors.extend(_check_operator_config_permissions(str(BOT_CONFIG_FILE), "BOT_CONFIG_FILE"))

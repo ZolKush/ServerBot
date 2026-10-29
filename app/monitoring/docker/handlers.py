@@ -24,14 +24,14 @@ DOCKER_LOGS_TAIL_STEP = 120
 
 def _is_server_container_allowed(server_key: str, name: str) -> bool:
     srv = get_server_target(server_key)
-    if not srv:
+    if not srv or srv.mode == "panel":
         return False
     return bool(is_valid_container_name(name) and name in srv.monitor_containers)
 
 
 def _filtered_containers(server_key: str) -> list[str]:
     srv = get_server_target(server_key)
-    containers = srv.monitor_containers if srv else []
+    containers = srv.monitor_containers if srv and srv.mode != "panel" else []
     return [nm for nm in containers if is_valid_container_name(nm)]
 
 

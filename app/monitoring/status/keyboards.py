@@ -36,10 +36,11 @@ def status_actions_keyboard(
     *,
     show_ssh_fallback: bool = False,
 ) -> InlineKeyboardMarkup:
+    host_checks = server_key not in SERVERS or SERVERS[server_key].mode != "panel"
     rows: list[list[InlineKeyboardButton]] = [
         [InlineKeyboardButton("🔄 Обновить", callback_data=f"status:refresh:{server_key}")],
     ]
-    if admin_mode:
+    if admin_mode and host_checks:
         rows.extend(
             [
                 [InlineKeyboardButton("🛡️ UFW", callback_data=f"status:ufw:{server_key}")],
@@ -49,7 +50,9 @@ def status_actions_keyboard(
                 ],
             ]
         )
-    if admin_mode and show_ssh_fallback:
+    if admin_mode and not host_checks:
+        rows.append([InlineKeyboardButton("🔐 TLS", callback_data=f"tls:list:{server_key}")])
+    if admin_mode and host_checks and show_ssh_fallback:
         rows.append(
             [
                 InlineKeyboardButton(
@@ -58,7 +61,7 @@ def status_actions_keyboard(
                 )
             ]
         )
-    if admin_mode:
+    if admin_mode and host_checks:
         rows.append(
             [
                 InlineKeyboardButton(

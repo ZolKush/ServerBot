@@ -20,7 +20,7 @@ class BackendProtocol(Protocol):
 
 
 class JsonUnitOfWork:
-    """Mutable repository snapshot committed as one durable JSON transaction."""
+    """Mutable repository snapshot committed as one durable backend transaction."""
 
     profiles: MappingRepository
     access: MappingRepository

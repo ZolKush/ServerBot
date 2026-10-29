@@ -1,4 +1,4 @@
-"""Stateful application façade backed exclusively by split JSON stores."""
+"""Stateful application façade backed by transactional SQLite repositories."""
 
 from __future__ import annotations
 
@@ -18,9 +18,9 @@ from .aggregate_mapping import (
     user_data_from_uow,
 )
 from .aggregates import ImportantData, UpdateAborted, UserData
-from .backend import SplitJsonBackend
 from .errors import PersistenceError
 from .normalization import normalize_outbox
+from .sqlite_backend import SQLiteBackend
 
 T = TypeVar("T")
 
@@ -31,7 +31,7 @@ class StorageNotInitializedError(PersistenceError):
 
 class StorageFacade:
     def __init__(self) -> None:
-        self._backend: SplitJsonBackend | None = None
+        self._backend: SQLiteBackend | None = None
         self._data_dir: Path | None = None
         self._user = UserData()
         self._important = ImportantData()
@@ -40,9 +40,11 @@ class StorageFacade:
         self._publish_lock = threading.RLock()
 
     def initialize(self, data_dir: Path | str, *, create: bool = False) -> int:
-        backend = SplitJsonBackend(data_dir)
-        if create and not backend.exists() and not backend.has_pending_transactions():
-            backend.bootstrap()
+        backend = SQLiteBackend(data_dir)
+        if create and not backend.exists():
+            from .bootstrap import initialize_empty_layout
+
+            initialize_empty_layout(data_dir)
         with backend.unit_of_work() as uow:
             user = user_data_from_uow(uow)
             important = important_data_from_uow(uow)
@@ -88,7 +90,7 @@ class StorageFacade:
             except UpdateAborted:
                 raise
             except Exception:
-                logger.exception("Не удалось обновить split user state")
+                logger.exception("Не удалось обновить SQLite user state")
                 raise
 
     async def update_important_data(self, update_fn: Callable[[ImportantData], T]) -> T:
@@ -109,7 +111,7 @@ class StorageFacade:
             except UpdateAborted:
                 raise
             except Exception:
-                logger.exception("Не удалось обновить split important state")
+                logger.exception("Не удалось обновить SQLite important state")
                 raise
 
     def user_meta(self, user_id: int) -> dict[str, Any] | None:
@@ -290,10 +292,10 @@ class StorageFacade:
 
         await self.update_important_data(finish)
 
-    def _require_backend(self) -> SplitJsonBackend:
+    def _require_backend(self) -> SQLiteBackend:
         if self._backend is None:
             raise StorageNotInitializedError(
-                "split storage is not initialized; call initialize_storage after acquiring the process lock"
+                "SQLite storage is not initialized; call initialize_storage after acquiring the process lock"
             )
         return self._backend
 

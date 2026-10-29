@@ -24,7 +24,7 @@ class ServerTarget:
     key: str
     label: str
     flag: str
-    mode: Literal["local", "ssh"]
+    mode: Literal["local", "ssh", "panel"]
     expected_a_ip: str
     check_a_domains: list[str]
     monitor_containers: list[str]

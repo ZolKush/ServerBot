@@ -1,4 +1,4 @@
-"""Application storage API backed exclusively by split JSON layout v1.
+"""Application storage API backed by the local SQLite database.
 
 Importing this module performs no filesystem I/O. The launcher calls
 ``initialize_storage`` only after it owns the process-wide instance lock.
@@ -32,9 +32,9 @@ _FACADE = StorageFacade()
 
 
 def initialize_storage(data_dir: Path | str = DATA_DIR, *, create: bool = False) -> int:
-    """Open/recover split v1.
+    """Open SQLite and let its transaction journal recover interrupted writes.
 
-    Production must leave ``create`` false: an absent layout is a deployment
+    Production must leave ``create`` false: an absent database is a deployment
     error and must be handled by the explicit migration CLI. Tests may create
     a fresh empty layout in an isolated temporary directory.
     """

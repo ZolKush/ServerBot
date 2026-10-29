@@ -50,7 +50,7 @@ def test_transaction_cleanup_syncs_the_parent_directory(tmp_path, monkeypatch):
     assert transaction_dir.parent in synced
 
 
-def test_preflight_allows_recoverable_bootstrap_without_manifest(tmp_path: Path):
+def test_preflight_refuses_pending_legacy_bootstrap_without_writes(tmp_path: Path):
     def crash(name):
         if name == "after_install:users/profiles.json":
             raise SimulatedCrash
@@ -59,8 +59,10 @@ def test_preflight_allows_recoverable_bootstrap_without_manifest(tmp_path: Path)
         SplitJsonBackend(tmp_path, failpoint=crash).bootstrap()
     assert not (tmp_path / "storage_layout.json").exists()
 
-    assert _check_split_storage(str(tmp_path)) == []
-    assert not (tmp_path / "storage_layout.json").exists()  # Preflight is read-only.
+    before = {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    errors = _check_split_storage(str(tmp_path))
+    assert any("SQLite" in error and "migrate_sqlite" in error for error in errors)
+    assert {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before
     recovered = SplitJsonBackend(tmp_path).snapshot()
     assert recovered.revision == 1
     assert set(recovered.stores) == set(STORE_SPECS)

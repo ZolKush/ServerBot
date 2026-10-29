@@ -85,6 +85,8 @@ def _tls_chip(snapshot: StatusSnapshot) -> str:
 
 
 def summary_chips_line(snapshot: StatusSnapshot, *, ufw_emoji: str) -> str:
+    if not snapshot.show_containers_block:
+        return "\n".join([_dns_chip(snapshot), _tls_chip(snapshot)])
     ufw = f"🛡 UFW {ufw_emoji}"
     return "\n".join([f"{_dns_chip(snapshot)}   {ufw}", _docker_chip(snapshot), _tls_chip(snapshot)])
 

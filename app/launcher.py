@@ -34,7 +34,7 @@ def main() -> None:
 
         initialize_storage(DATA_DIR)
 
-        # Import handlers only after the split layout has been verified.  The
+        # Import handlers only after the SQLite database has been verified. The
         # application module does not import this launcher, so ``app.main`` can
         # safely delegate here without creating an internal import cycle.
         from .bot.application import run_application

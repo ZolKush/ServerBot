@@ -33,6 +33,7 @@ id_ed25519.*
 
 # runtime data
 data/
+/conf/
 
 # Python environments, caches, coverage and build output
 .venv/

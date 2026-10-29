@@ -1,4 +1,4 @@
-"""Domain errors raised by the split JSON persistence backend."""
+"""Persistence failures shared by SQLite runtime and legacy JSON compatibility."""
 
 
 class PersistenceError(RuntimeError):

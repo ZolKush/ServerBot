@@ -58,7 +58,7 @@ os.environ.update(
 
 @pytest.fixture
 def isolated_storage(tmp_path: Path):
-    """Give feature tests a fresh split-layout v1 without legacy JSON globals."""
+    """Give feature tests a fresh SQLite database without production files."""
     from app import storage
 
     storage.initialize_empty_storage_for_tests(tmp_path / "data")

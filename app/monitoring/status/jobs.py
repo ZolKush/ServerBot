@@ -37,7 +37,7 @@ async def docker_status_refresh(
                     server.key,
                 )
 
-    await asyncio.gather(*(refresh(server) for server in SERVERS.values()))
+    await asyncio.gather(*(refresh(server) for server in SERVERS.values() if server.mode != "panel"))
 
 
 async def dns_daily_refresh(
@@ -116,7 +116,7 @@ async def daily_node_status_refresh(
                     server.key,
                 )
 
-    await asyncio.gather(*(refresh(server) for server in SERVERS.values()))
+    await asyncio.gather(*(refresh(server) for server in SERVERS.values() if server.mode != "panel"))
 
 
 __all__ = [

@@ -1,4 +1,4 @@
-"""Explicit initializer for a brand-new empty split-storage layout."""
+"""Idempotent SQLite initializer which refuses to hide existing legacy data."""
 
 from __future__ import annotations
 
@@ -8,9 +8,11 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from .backend import SplitJsonBackend
+from ..runtime.lock import InstanceAlreadyRunning, SingleInstanceLock
 from .errors import PersistenceError, StorageConflictError
 from .io import secure_directory
+from .layout import LAYOUT_FILE, STORE_SPECS
+from .sqlite_backend import SQLiteBackend
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,26 +26,38 @@ class BootstrapReport:
         return asdict(self)
 
 
-def initialize_empty_layout(data_root: Path | str) -> BootstrapReport:
-    """Create split layout v1 only when no monolithic source is present."""
+def initialize_empty_layout(data_root: Path | str, *, instance_lock: Path | None = None) -> BootstrapReport:
+    """Create SQLite only when no legacy or partially migrated source exists."""
     root = Path(data_root).resolve()
-    backend = SplitJsonBackend(root)
+    with SingleInstanceLock(instance_lock or root / "runtime/instance.lock"):
+        return _initialize(root)
+
+
+def _initialize(root: Path) -> BootstrapReport:
+    backend = SQLiteBackend(root)
     if backend.exists():
-        snapshot = backend.inspect()
-        secure_directory(root / "telegram")
+        snapshot = backend.snapshot()
         return BootstrapReport(
             already_initialized=True,
             revision=snapshot.revision,
             store_count=len(snapshot.stores),
             data_dir=str(root),
         )
-    if backend.has_pending_transactions():
-        raise StorageConflictError("pending transaction found; empty initialization refused")
-    monolithic = [name for name in ("user_data.json", "important_data.json") if (root / name).exists()]
-    if monolithic:
-        raise StorageConflictError(f"monolithic data found ({', '.join(monolithic)}); use app.persistence.migration")
-
-    secure_directory(root / "telegram")
+    legacy_paths = (
+        LAYOUT_FILE,
+        ".transactions",
+        "user_data.json",
+        "important_data.json",
+        "telegram/persistence.pickle",
+        "telegram/persistence.pickle.bak",
+        "ptb_persistence",
+        "ptb_persistence.bak",
+        *(spec.relative_path for spec in STORE_SPECS.values()),
+    )
+    existing = [name for name in legacy_paths if (root / name).exists()]
+    if existing:
+        raise StorageConflictError(f"legacy data found ({', '.join(existing)}); use app.persistence.migrate_sqlite")
+    secure_directory(root)
     snapshot = backend.bootstrap()
     return BootstrapReport(
         already_initialized=False,
@@ -54,12 +68,13 @@ def initialize_empty_layout(data_root: Path | str) -> BootstrapReport:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Initialize a brand-new empty split-storage layout v1.")
+    parser = argparse.ArgumentParser(description="Initialize a new SQLite database without replacing legacy data.")
     parser.add_argument("--data-dir", type=Path, required=True)
+    parser.add_argument("--instance-lock", type=Path)
     args = parser.parse_args()
     try:
-        report = initialize_empty_layout(args.data_dir)
-    except PersistenceError as exc:
+        report = initialize_empty_layout(args.data_dir, instance_lock=args.instance_lock)
+    except (PersistenceError, InstanceAlreadyRunning, OSError) as exc:
         parser.exit(2, f"initialization refused: {exc}\n")
     print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2, sort_keys=True))
     return 0

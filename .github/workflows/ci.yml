@@ -12,6 +12,36 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Create a synthetic secret to verify build exclusion
+        run: printf '%s\n' 'DOCKER_BUILD_MUST_EXCLUDE_THIS=synthetic-secret' > app/env.secrets
+      - name: Build runtime image
+        run: docker build --tag maintbot:ci .
+      - name: Verify nonroot image contents and offline database bootstrap
+        run: |
+          docker run --rm --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --tmpfs /tmp:rw,noexec,nosuid,size=32m,mode=1777 \
+            maintbot:ci python -c '
+          import os
+          from pathlib import Path
+          from app.persistence.bootstrap import initialize_empty_layout
+          assert os.getuid() == 10001
+          root = Path("/opt/maintbot/app")
+          files = [path for path in root.rglob("*") if path.is_file()]
+          assert all(path.suffix == ".py" or path == root / "requirements.txt" for path in files)
+          assert not (root / "env.secrets").exists()
+          assert not Path("/opt/maintbot/data").exists()
+          report = initialize_empty_layout("/tmp/maintbot-smoke")
+          assert report.revision == 1
+          assert Path("/tmp/maintbot-smoke/maintbot.sqlite3").is_file()
+          '
   validate:
     runs-on: ubuntu-latest
     timeout-minutes: 15

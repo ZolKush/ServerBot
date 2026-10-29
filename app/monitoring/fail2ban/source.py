@@ -41,6 +41,8 @@ async def file_identity(
     path: str,
 ) -> FileIdentity | None:
     server = get_server(server_key)
+    if server.mode == "panel":
+        return None
     if server.mode == "ssh":
         return await remote_fail2ban_identity(server.ssh_target, path)
     return await fail2ban_identity_with_sudo_async(path)
@@ -64,6 +66,8 @@ async def read_range(
     expected_identity: FileIdentity,
 ) -> FileRangeRead:
     server = get_server(server_key)
+    if server.mode == "panel":
+        raise PermissionError("Fail2ban недоступен в режиме панели")
     if server.mode == "ssh":
         return await remote_read_text_range(
             server.ssh_target,
