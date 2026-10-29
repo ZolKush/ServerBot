@@ -52,19 +52,19 @@ def _run(tmp_path: Path, arguments: list[str], *, fail_module: str = ""):
     return result, calls.read_text(encoding="utf-8").splitlines() if calls.exists() else []
 
 
-def test_default_container_start_bootstraps_and_checks_before_launcher(tmp_path):
+def test_default_container_start_prepares_storage_and_checks_before_launcher(tmp_path):
     result, calls = _run(tmp_path, ["python", "-m", "app.launcher"])
 
     assert result.returncode == 0, result.stderr
     assert calls == [
-        "-m app.persistence.bootstrap --data-dir /var/lib/maintbot",
+        "-m app.persistence.startup --data-dir /var/lib/maintbot",
         "-m app.config_check",
         "-m app.launcher",
     ]
 
 
-@pytest.mark.parametrize("module", ["app.persistence.bootstrap", "app.config_check"])
-def test_container_refuses_launch_after_failed_bootstrap_or_preflight(tmp_path, module):
+@pytest.mark.parametrize("module", ["app.persistence.startup", "app.config_check"])
+def test_container_refuses_launch_after_failed_storage_preparation_or_preflight(tmp_path, module):
     result, calls = _run(tmp_path, ["python", "-m", "app.launcher"], fail_module=module)
 
     assert result.returncode == 7

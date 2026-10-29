@@ -1,0 +1,65 @@
+services:
+  maintbot:
+    image: maintbot:standalone
+    pull_policy: build
+    build:
+      context: https://github.com/ZolKush/ServerBot.git#db1ab53983a28722ff5b1233822f0f311b1ab085
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        umask 077
+        if [ ! -e /var/lib/maintbot/maintbot.sqlite3 ] && {
+          [ -e /var/lib/maintbot/storage_layout.json ] ||
+          [ -e /var/lib/maintbot/user_data.json ] ||
+          [ -e /var/lib/maintbot/important_data.json ];
+        }; then
+          set -- --data-dir /var/lib/maintbot
+          if [ -n "$${MAINTBOT_PTB_PICKLE:-}" ]; then
+            case "$$MAINTBOT_PTB_PICKLE" in
+              /*) set -- "$$@" --ptb-pickle "$$MAINTBOT_PTB_PICKLE" ;;
+              *) set -- "$$@" --ptb-pickle "/var/lib/maintbot/$$MAINTBOT_PTB_PICKLE" ;;
+            esac
+          elif [ -f /var/lib/maintbot/telegram-migration.pickle ]; then
+            set -- "$$@" --ptb-pickle /var/lib/maintbot/telegram-migration.pickle
+          fi
+          python -m app.persistence.migrate_sqlite "$$@"
+        fi
+        python -m app.persistence.bootstrap --data-dir /var/lib/maintbot
+        python -m app.config_check
+        exec python -m app.launcher
+    restart: unless-stopped
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 90s
+    environment:
+      MAINTBOT_CONFIG_DIR: /etc/maintbot/conf
+      SECRETS_ENV_PATH: /run/secrets/maintbot.env
+      MAINTBOT_PTB_PICKLE: ${MAINTBOT_PTB_PICKLE:-}
+    volumes:
+      - type: bind
+        source: ./data
+        target: /var/lib/maintbot
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./data/conf
+        target: /etc/maintbot/conf
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./data/env.secrets
+        target: /run/secrets/maintbot.env
+        read_only: true
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m,mode=1777
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
