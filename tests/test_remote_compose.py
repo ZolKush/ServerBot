@@ -64,9 +64,8 @@ def _run(tmp_path: Path, *, files: tuple[str, ...] = (), failed_module: str = ""
     return result, calls.read_text(encoding="utf-8").splitlines() if calls.exists() else []
 
 
-@pytest.mark.parametrize("legacy", ["storage_layout.json", "user_data.json", "important_data.json"])
-def test_remote_container_migrates_legacy_before_bootstrap_and_launcher(tmp_path, legacy):
-    result, calls = _run(tmp_path, files=(legacy,))
+def test_remote_container_migrates_split_layout_before_bootstrap_and_launcher(tmp_path):
+    result, calls = _run(tmp_path, files=("storage_layout.json",))
     assert result.returncode == 0, result.stderr
     assert [line.split()[1] for line in calls] == [
         "app.persistence.migrate_sqlite",
@@ -76,8 +75,22 @@ def test_remote_container_migrates_legacy_before_bootstrap_and_launcher(tmp_path
     ]
 
 
-def test_remote_container_never_reimports_legacy_when_database_exists(tmp_path):
-    result, calls = _run(tmp_path, files=("maintbot.sqlite3", "storage_layout.json"))
+@pytest.mark.parametrize(
+    "files", [("user_data.json",), ("important_data.json",), ("user_data.json", "important_data.json")]
+)
+def test_remote_container_refuses_monolithic_source_before_any_python_command(tmp_path, files):
+    result, calls = _run(tmp_path, files=files)
+
+    assert result.returncode == 2
+    assert "Monolithic JSON storage is not supported" in result.stderr
+    assert calls == []
+    assert all((tmp_path / "data" / name).is_file() for name in files)
+    assert not (tmp_path / "data/maintbot.sqlite3").exists()
+
+
+@pytest.mark.parametrize("sources", [("storage_layout.json",), ("user_data.json", "important_data.json")])
+def test_remote_container_never_reimports_sources_when_database_exists(tmp_path, sources):
+    result, calls = _run(tmp_path, files=("maintbot.sqlite3", *sources))
     assert result.returncode == 0, result.stderr
     assert not any("migrate_sqlite" in line for line in calls)
     assert calls[-1] == "-m app.launcher"

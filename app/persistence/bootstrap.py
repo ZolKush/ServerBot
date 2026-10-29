@@ -43,11 +43,13 @@ def _initialize(root: Path) -> BootstrapReport:
             store_count=len(snapshot.stores),
             data_dir=str(root),
         )
+    if not (root / LAYOUT_FILE).exists() and any(
+        (root / name).exists() for name in ("user_data.json", "important_data.json")
+    ):
+        raise StorageConflictError("unsupported monolithic data found; only split JSON layout can be migrated")
     legacy_paths = (
         LAYOUT_FILE,
         ".transactions",
-        "user_data.json",
-        "important_data.json",
         "telegram/persistence.pickle",
         "telegram/persistence.pickle.bak",
         "ptb_persistence",

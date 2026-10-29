@@ -13,7 +13,6 @@ import pytest
 from app.persistence import PersistenceError, SplitJsonBackend, SQLiteBackend, StorageConflictError
 from app.persistence.startup import prepare_storage
 from app.runtime.lock import InstanceAlreadyRunning, SingleInstanceLock
-from tests.persistence.fixtures import write_v4_source
 
 
 def _pickle() -> bytes:
@@ -79,17 +78,22 @@ def test_split_source_and_dialogs_migrate_once_without_reimport_on_restart(tmp_p
     assert SQLiteBackend(tmp_path).inspect().data("users.profiles")["42"]["nickname"] == "New database value"
 
 
-def test_monolithic_source_and_dialogs_migrate_directly_on_startup(tmp_path: Path) -> None:
+def test_monolithic_source_is_refused_instead_of_initializing_empty_storage(tmp_path: Path) -> None:
     root = tmp_path / "data"
-    write_v4_source(root)
-    _write_pickle(root / "ptb_persistence")
+    root.mkdir()
+    sources = {name: b"{}\n" for name in ("user_data.json", "important_data.json")}
+    for name, payload in sources.items():
+        (root / name).write_bytes(payload)
+    pickle_path = root / "ptb_persistence"
+    pickle_bytes = _write_pickle(pickle_path)
 
-    report = prepare_storage(root)
+    with pytest.raises(StorageConflictError, match="unsupported"):
+        prepare_storage(root)
 
-    assert report["action"] == "migrated"
-    assert report["source_format"] == "monolithic-json-v4"
-    assert report["telegram_imported"] is True
-    assert SQLiteBackend(root).inspect().data("users.profiles")["42"]["nickname"] == "Example"
+    assert all((root / name).read_bytes() == payload for name, payload in sources.items())
+    assert pickle_path.read_bytes() == pickle_bytes
+    assert not SQLiteBackend(root).exists()
+    assert not (root / "sqlite-backups").exists()
 
 
 def test_prepared_pickle_is_selected_when_both_legacy_primaries_exist(tmp_path: Path) -> None:
@@ -188,6 +192,6 @@ def test_container_startup_cli_accepts_relative_pickle_environment_path(tmp_path
 
 def test_explicit_pickle_without_application_source_is_not_silently_ignored(tmp_path: Path) -> None:
     _write_pickle(tmp_path / "custom-state.pickle")
-    with pytest.raises(PersistenceError, match="both user_data.json and important_data.json"):
+    with pytest.raises(PersistenceError, match="storage_layout.json"):
         prepare_storage(tmp_path, ptb_path="custom-state.pickle")
     assert not SQLiteBackend(tmp_path).exists()

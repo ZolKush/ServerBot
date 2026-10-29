@@ -1,19 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import replace
-from pathlib import Path
-
 import pytest
 from telegram.ext import ConversationHandler
 
 from app import storage
 from app.administration import flow_handlers, operations, state, views
-from app.persistence.errors import MigrationError
-from app.persistence.migration import load_v4_source, transform_v4
 from app.persistence.normalization import normalize_product_settings
 from app.persistence.sqlite_backend import SQLiteBackend
 from app.subscriptions.policy import MAX_PRICE_RUB, PLAN_TOTAL_RUB, parse_price, standard_price
-from tests.persistence.fixtures import write_v4_source
 from tests.product_support import _admin, _callback_names, _callback_update
 
 
@@ -96,16 +90,3 @@ async def test_price_change_rechecks_owner_role_inside_transaction(isolated_stor
     with pytest.raises(ValueError, match="owner_required"):
         await operations.change_standard_price(actor=actor, value=450)
     assert standard_price(storage.product_settings_snapshot()) == PLAN_TOTAL_RUB
-
-
-@pytest.mark.parametrize("value", [True, 0, "450", 450.5, MAX_PRICE_RUB + 1])
-def test_legacy_migration_rejects_noncanonical_price(tmp_path: Path, value: object) -> None:
-    root = tmp_path / "legacy"
-    write_v4_source(root)
-    source = load_v4_source(root)
-    user_data = {
-        **source.user_data,
-        "product_settings": {**source.user_data["product_settings"], "standard_price_rub": value},
-    }
-    with pytest.raises(MigrationError, match="standard_price_rub"):
-        transform_v4(replace(source, user_data=user_data))

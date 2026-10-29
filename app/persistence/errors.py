@@ -1,4 +1,4 @@
-"""Persistence failures shared by SQLite runtime and legacy JSON compatibility."""
+"""Persistence failures shared by SQLite runtime and split JSON source tools."""
 
 
 class PersistenceError(RuntimeError):
@@ -39,7 +39,7 @@ class CommittedTransactionError(PersistenceError):
 
 
 class MigrationError(PersistenceError):
-    """The one-shot v4 migration cannot proceed safely."""
+    """The split JSON to SQLite migration cannot proceed safely."""
 
 
 class DuplicateJsonKeyError(SchemaError):

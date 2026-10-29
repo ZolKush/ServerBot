@@ -32,7 +32,7 @@ def test_empty_layout_bootstrap_refuses_monolithic_source(tmp_path: Path, source
     root.mkdir()
     (root / source_name).write_text("{}\n", encoding="utf-8")
 
-    with pytest.raises(StorageConflictError, match="use app.persistence.migrate_sqlite"):
+    with pytest.raises(StorageConflictError, match="unsupported monolithic data"):
         initialize_empty_layout(root)
 
     assert not (root / "maintbot.sqlite3").exists()

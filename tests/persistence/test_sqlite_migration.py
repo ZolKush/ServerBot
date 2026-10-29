@@ -10,7 +10,6 @@ from app.persistence import MigrationError, SchemaError, SplitJsonBackend, SQLit
 from app.persistence.layout import default_store_data
 from app.persistence.migrate_sqlite import migrate_to_sqlite
 from app.runtime.lock import InstanceAlreadyRunning, SingleInstanceLock
-from tests.persistence.fixtures import write_v4_source
 
 
 def _files(root: Path) -> dict[str, bytes]:
@@ -65,14 +64,49 @@ def test_split_sqlite_migration_dry_run_backup_restart_and_idempotence(tmp_path:
     assert SQLiteBackend(root).inspect().data("users.profiles")["43"] == {"user_id": 43}
 
 
-def test_monolithic_v4_import_goes_directly_to_sqlite(tmp_path: Path) -> None:
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_monolithic_source_is_rejected_without_import_or_backup(tmp_path: Path, dry_run: bool) -> None:
     root = tmp_path / "data"
-    write_v4_source(root)
-    (root / "ptb_persistence").write_bytes(_pickle())
-    report = migrate_to_sqlite(root)
-    assert report.source_format == "monolithic-json-v4"
-    assert SQLiteBackend(root).inspect().data("users.profiles")["42"]["nickname"] == "Example"
+    root.mkdir()
+    sources = {name: b"{}\n" for name in ("user_data.json", "important_data.json")}
+    for name, payload in sources.items():
+        (root / name).write_bytes(payload)
+
+    with pytest.raises(MigrationError, match="storage_layout.json"):
+        migrate_to_sqlite(root, dry_run=dry_run)
+
+    assert all((root / name).read_bytes() == payload for name, payload in sources.items())
+    assert not SQLiteBackend(root).exists()
+    assert not (root / "sqlite-backups").exists()
     assert not (root / "storage_layout.json").exists()
+
+
+def test_split_layout_ignores_obsolete_monolithic_files(tmp_path: Path) -> None:
+    before = SplitJsonBackend(tmp_path).bootstrap()
+    for name in ("user_data.json", "important_data.json"):
+        (tmp_path / name).write_bytes(b"unsupported obsolete source")
+
+    report = migrate_to_sqlite(tmp_path)
+
+    assert report.source_format == "split-json-v1"
+    imported = SQLiteBackend(tmp_path).inspect()
+    assert {name: item.data for name, item in imported.stores.items()} == {
+        name: item.data for name, item in before.stores.items()
+    }
+    for name in ("user_data.json", "important_data.json"):
+        assert (tmp_path / name).read_bytes() == b"unsupported obsolete source"
+        assert not (Path(report.backup_path) / name).exists()
+
+
+def test_missing_split_store_is_rejected_without_database_or_backup(tmp_path: Path) -> None:
+    SplitJsonBackend(tmp_path).bootstrap()
+    (tmp_path / "support/tickets.json").unlink()
+
+    with pytest.raises(FileNotFoundError):
+        migrate_to_sqlite(tmp_path)
+
+    assert not SQLiteBackend(tmp_path).exists()
+    assert not (tmp_path / "sqlite-backups").exists()
 
 
 def test_configured_external_telegram_pickle_is_backed_up_and_imported(tmp_path: Path) -> None:
@@ -122,12 +156,15 @@ def test_migration_refuses_fresh_unrelated_sqlite_database(tmp_path: Path) -> No
 
 
 def test_pending_legacy_bootstrap_is_not_bypassed_when_manifest_is_missing(tmp_path: Path) -> None:
-    write_v4_source(tmp_path / "data")
-    pending = tmp_path / "data/.transactions/pending"
+    root = tmp_path / "data"
+    root.mkdir()
+    for name in ("user_data.json", "important_data.json"):
+        (root / name).write_text("{}\n", encoding="utf-8")
+    pending = root / ".transactions/pending"
     pending.mkdir(parents=True)
     with pytest.raises(StorageConflictError, match="pending JSON transaction"):
-        migrate_to_sqlite(tmp_path / "data", dry_run=True)
-    assert not SQLiteBackend(tmp_path / "data").exists()
+        migrate_to_sqlite(root, dry_run=True)
+    assert not SQLiteBackend(root).exists()
 
 
 def test_source_change_during_backup_does_not_publish(tmp_path: Path, monkeypatch) -> None:

@@ -3,16 +3,21 @@ services:
     image: maintbot:standalone
     pull_policy: build
     build:
-      context: https://github.com/ZolKush/ServerBot.git#db1ab53983a28722ff5b1233822f0f311b1ab085
+      context: https://github.com/ZolKush/ServerBot.git#${MAINTBOT_SOURCE_REF:-dev}
     entrypoint: ["/bin/sh", "-ec"]
     command:
       - |
         umask 077
-        if [ ! -e /var/lib/maintbot/maintbot.sqlite3 ] && {
-          [ -e /var/lib/maintbot/storage_layout.json ] ||
+        if [ ! -e /var/lib/maintbot/maintbot.sqlite3 ] &&
+           [ ! -e /var/lib/maintbot/storage_layout.json ] && {
           [ -e /var/lib/maintbot/user_data.json ] ||
           [ -e /var/lib/maintbot/important_data.json ];
         }; then
+          printf '%s\n' 'Monolithic JSON storage is not supported; storage_layout.json is required.' >&2
+          exit 2
+        fi
+        if [ ! -e /var/lib/maintbot/maintbot.sqlite3 ] &&
+           [ -e /var/lib/maintbot/storage_layout.json ]; then
           set -- --data-dir /var/lib/maintbot
           if [ -n "$${MAINTBOT_PTB_PICKLE:-}" ]; then
             case "$$MAINTBOT_PTB_PICKLE" in

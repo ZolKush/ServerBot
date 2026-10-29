@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from app.persistence import SplitJsonBackend
 from tools.deployment_config import DeploymentPreparationError
 from tools.prepare_deployment import prepare_deployment
 
@@ -20,8 +21,7 @@ def _project(tmp_path: Path) -> Path:
     project = tmp_path / "project"
     data = project / "data"
     data.mkdir(parents=True)
-    (data / "user_data.json").write_bytes(b"opaque-user-data")
-    (data / "important_data.json").write_bytes(b"opaque-important-data")
+    SplitJsonBackend(data).bootstrap()
     (data / ".hidden").write_bytes(b"preserve-hidden-file")
     bot = json.loads((ROOT / "examples/conf/docker-bot.json").read_text(encoding="utf-8"))
     bot.update(DATA_DIR="/opt/old/data", PTB_PERSISTENCE_PATH="/opt/old/data/telegram/persistence.pickle")
@@ -62,12 +62,12 @@ def test_bundle_copies_all_state_and_adapts_only_copied_config(tmp_path: Path) -
     report = prepare_deployment(project, output, panel_only=True)
 
     assert _files(project) == before
-    assert report.source_format == "monolithic-json-v4"
+    assert report.source_format == "split-json-v1"
     assert report.server_count == 1
     assert report.omitted_host_servers == 1
     assert report.telegram_state_present
     assert sorted(path.name for path in output.iterdir()) == ["compose.yaml", "data"]
-    for relative in ("user_data.json", "important_data.json", ".hidden", "telegram/persistence.pickle"):
+    for relative in ("storage_layout.json", "users/profiles.json", ".hidden", "telegram/persistence.pickle"):
         assert (output / "data" / relative).read_bytes() == (project / "data" / relative).read_bytes()
     assert (output / "data/env.secrets").read_bytes() == (project / "app/env.secrets").read_bytes()
     assert (output / "data/telegram-migration.pickle").read_bytes() == (
@@ -114,11 +114,27 @@ def test_refuses_existing_output_and_source_descendants(tmp_path: Path, target: 
         prepare_deployment(project, output, panel_only=True)
 
 
-def test_missing_legacy_store_is_not_treated_as_empty_installation(tmp_path: Path) -> None:
+def test_missing_split_manifest_is_not_treated_as_empty_installation(tmp_path: Path) -> None:
     project = _project(tmp_path)
-    (project / "data/important_data.json").unlink()
-    with pytest.raises(DeploymentPreparationError, match="no complete recognized"):
+    (project / "data/storage_layout.json").unlink()
+    with pytest.raises(DeploymentPreparationError, match="storage_layout.json"):
         prepare_deployment(project, tmp_path / "release", panel_only=True)
+
+
+def test_monolithic_source_is_refused_without_modification_or_output(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    data = project / "data"
+    data.mkdir(parents=True)
+    (data / "user_data.json").write_bytes(b"{}")
+    (data / "important_data.json").write_bytes(b"{}")
+    before = _files(project)
+    output = tmp_path / "release"
+
+    with pytest.raises(DeploymentPreparationError, match="storage_layout.json"):
+        prepare_deployment(project, output, panel_only=True)
+
+    assert _files(project) == before
+    assert not output.exists()
 
 
 def test_explicit_custom_pickle_is_preserved_under_canonical_name(tmp_path: Path) -> None:

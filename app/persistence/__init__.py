@@ -1,4 +1,4 @@
-"""SQLite persistence boundary and explicit legacy JSON compatibility tools.
+"""SQLite persistence boundary and split JSON import-source tools.
 
 Importing this package never opens or mutates application data. Runtime code
 must construct :class:`SQLiteBackend` after acquiring the process lock.

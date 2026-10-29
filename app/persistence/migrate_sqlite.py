@@ -1,4 +1,4 @@
-"""Explicit, offline JSON/pickle to SQLite migration with atomic publication."""
+"""Explicit split JSON/pickle to SQLite migration with atomic publication."""
 
 from __future__ import annotations
 
@@ -157,9 +157,7 @@ def _migrate(root: Path, *, dry_run: bool, ptb_path: Path | None) -> SQLiteMigra
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="Migrate offline split JSON v1 or monolithic v4 and trusted PTB pickle to SQLite."
-    )
+    parser = argparse.ArgumentParser(description="Migrate split JSON layout v1 and trusted Telegram pickle to SQLite.")
     parser.add_argument("--data-dir", required=True, type=Path)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--ptb-pickle", type=Path)

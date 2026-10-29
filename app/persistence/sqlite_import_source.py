@@ -1,4 +1,4 @@
-"""Read-only capture and verified backup of supported JSON migration sources."""
+"""Read-only capture and verified backup of the split JSON migration source."""
 
 from __future__ import annotations
 
@@ -9,7 +9,6 @@ from typing import Any
 from .errors import MigrationError, StorageConflictError
 from .io import decode_json, encode_json, resolve_inside, sha256_bytes, write_bytes_durable
 from .layout import LAYOUT_FILE, STORE_SPECS
-from .migration.v4 import load_v4_source, transform_v4
 from .schema import parse_layout_manifest, parse_store_document
 
 
@@ -40,6 +39,9 @@ def capture_source(root: Path, *, ptb_path: Path | None = None) -> ImportSource:
     transactions = _source_path(root, ".transactions")
     if transactions.exists() and any(transactions.iterdir()):
         raise StorageConflictError("pending JSON transaction found; recover with the old release first")
+    manifest_path = _source_path(root, LAYOUT_FILE)
+    if not manifest_path.is_file():
+        raise MigrationError("split JSON layout is required; storage_layout.json is missing")
     if ptb_path is not None:
         selected = ptb_path.resolve()
         if not selected.is_file():
@@ -58,27 +60,16 @@ def capture_source(root: Path, *, ptb_path: Path | None = None) -> ImportSource:
     if root in selected.parents:
         selected = _source_path(root, selected.relative_to(root).as_posix())
     ptb_payload = selected.read_bytes() if selected.is_file() else None
-    files: dict[str, bytes] = {}
-    if (root / LAYOUT_FILE).exists():
-        files[LAYOUT_FILE] = _source_path(root, LAYOUT_FILE).read_bytes()
-        manifest = parse_layout_manifest(decode_json(files[LAYOUT_FILE]), files[LAYOUT_FILE])
-        stores = {}
-        for name, spec in STORE_SPECS.items():
-            files[spec.relative_path] = _source_path(root, spec.relative_path).read_bytes()
-            document = parse_store_document(name, decode_json(files[spec.relative_path]), files[spec.relative_path])
-            expected = manifest.stores[name]
-            if document.sha256 != expected.sha256 or document.revision != expected.revision:
-                raise MigrationError(f"source checksum/revision differs from manifest: {name}")
-            stores[name] = document.data
-        source_format = "split-json-v1"
-    else:
-        _source_path(root, "user_data.json")
-        _source_path(root, "important_data.json")
-        legacy = load_v4_source(root, ptb_path=selected if ptb_payload is not None else None)
-        stores = transform_v4(legacy).stores
-        files["user_data.json"] = legacy.user_payload
-        files["important_data.json"] = legacy.important_payload
-        source_format = "monolithic-json-v4"
+    files = {LAYOUT_FILE: manifest_path.read_bytes()}
+    manifest = parse_layout_manifest(decode_json(files[LAYOUT_FILE]), files[LAYOUT_FILE])
+    stores = {}
+    for name, spec in STORE_SPECS.items():
+        files[spec.relative_path] = _source_path(root, spec.relative_path).read_bytes()
+        document = parse_store_document(name, decode_json(files[spec.relative_path]), files[spec.relative_path])
+        expected = manifest.stores[name]
+        if document.sha256 != expected.sha256 or document.revision != expected.revision:
+            raise MigrationError(f"source checksum/revision differs from manifest: {name}")
+        stores[name] = document.data
     if ptb_payload is not None:
         name = (
             selected.relative_to(root).as_posix()
@@ -86,7 +77,7 @@ def capture_source(root: Path, *, ptb_path: Path | None = None) -> ImportSource:
             else "_external/telegram/persistence.pickle"
         )
         files[name] = ptb_payload
-    return ImportSource(source_format, stores, files, ptb_payload)
+    return ImportSource("split-json-v1", stores, files, ptb_payload)
 
 
 def backup_source(root: Path, source: ImportSource) -> Path:

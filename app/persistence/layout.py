@@ -13,12 +13,10 @@ from .errors import SchemaError
 LAYOUT_SCHEMA_VERSION = 1
 STORE_SCHEMA_VERSION = 1
 TRANSACTION_SCHEMA_VERSION = 1
-BACKUP_SCHEMA_VERSION = 1
 
 LAYOUT_FILE = "storage_layout.json"
 TRANSACTIONS_DIR = ".transactions"
 STATE_LOCK_FILE = "runtime/state.lock"
-PTB_TARGET_FILE = "telegram/persistence.pickle"
 
 
 def _mapping_default() -> dict[str, Any]:
@@ -128,10 +126,8 @@ def default_store_data() -> dict[str, Any]:
 
 
 __all__ = [
-    "BACKUP_SCHEMA_VERSION",
     "LAYOUT_FILE",
     "LAYOUT_SCHEMA_VERSION",
-    "PTB_TARGET_FILE",
     "STATE_LOCK_FILE",
     "STORE_PATHS",
     "STORE_SCHEMA_VERSION",

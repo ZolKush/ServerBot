@@ -54,9 +54,7 @@ def _source_format(data_dir: Path) -> str:
         return "sqlite-v1"
     if (data_dir / "storage_layout.json").is_file():
         return "split-json-v1"
-    if (data_dir / "user_data.json").is_file() and (data_dir / "important_data.json").is_file():
-        return "monolithic-json-v4"
-    raise DeploymentPreparationError("source data has no complete recognized database or JSON layout")
+    raise DeploymentPreparationError("source data requires SQLite or split JSON layout with storage_layout.json")
 
 
 def _selected_config(project: Path, selected: Path | None) -> Path:

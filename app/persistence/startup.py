@@ -34,8 +34,8 @@ def prepare_storage(
     backend = SQLiteBackend(root)
     if not backend.exists() and ptb_path is None and (root / "telegram-migration.pickle").exists():
         ptb_path = root / "telegram-migration.pickle"
-    legacy_json = any((root / name).exists() for name in (LAYOUT_FILE, "user_data.json", "important_data.json"))
-    if not backend.exists() and (legacy_json or ptb_path is not None):
+    split_json = (root / LAYOUT_FILE).exists()
+    if not backend.exists() and (split_json or ptb_path is not None):
         selected_ptb = Path(ptb_path) if ptb_path is not None else None
         if selected_ptb is not None and not selected_ptb.is_absolute():
             selected_ptb = root / selected_ptb
